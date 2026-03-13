@@ -1,12 +1,13 @@
 .SILENT:
-.PHONY: proto dashboard build build-debug test lint clean manifests docker-build docker-push docker-compose-up docker-compose-down \
-        minikube-build minikube-debug k8s-deploy k8s-delete k8s-delete-all k8s-refresh-deploy k8s-status help \
-        local-pg local-central local-satellite local-stop
+.PHONY: proto dashboard build build-debug test test-integration lint clean manifests \
+        docker-build docker-push docker-compose-up docker-compose-down \
+        minikube-build minikube-debug k8s-deploy k8s-delete k8s-delete-all k8s-refresh-deploy k8s-status \
+        local-pg local-central local-satellite local-stop help
 
-DOCKER_REPO   ?= ghcr.io/pg-swarm
-IMAGE_TAG     ?= latest
-DOCKERFILE_DIR = deploy/docker
-PLATFORMS     ?= linux/amd64,linux/arm64
+DOCKER_REPO    ?= ghcr.io/pg-swarm
+IMAGE_TAG      ?= latest
+DOCKERFILE_DIR  = deploy/docker
+PLATFORMS      ?= linux/amd64,linux/arm64
 
 help: ## Show this help
 	@printf "\nUsage: make <target>\n"
@@ -19,28 +20,35 @@ help: ## Show this help
 		awk -F'\t' '{ printf "  %-22s %s\n", $$1, $$2 }'
 	@printf "\n"
 
+# ── Build ────────────────────────────────────────────────────────────────────
+
 proto: ## Generate Go code from .proto files (requires buf)
 	buf generate
 
 dashboard: ## Build the React dashboard into web/static/
 	cd web/dashboard && npm install && npm run build
 
-build: proto dashboard ## Compile central, satellite, and failover-sidecar binaries into bin/
+build: proto dashboard ## Compile central, satellite, and failover-sidecar binaries
 	go build -o bin/central ./cmd/central
 	go build -o bin/satellite ./cmd/satellite
 	go build -o bin/failover-sidecar ./cmd/failover-sidecar
 
-test: ## Run all Go tests
+clean: ## Remove compiled binaries and generated proto code
+	rm -rf bin/ api/gen/v1/*.go
+
+# ── Test ─────────────────────────────────────────────────────────────────────
+
+test: ## Run unit tests
 	go test ./...
 
-manifests: ## Regenerate operator manifest YAMLs in testdata/ for inspection
+test-integration: ## Run integration tests against minikube (requires running cluster)
+	go test -tags=integration ./internal/satellite/operator/ -run TestIntegration -v -count=1 -timeout=10m
+
+manifests: ## Regenerate operator manifest YAMLs in testdata/
 	go test ./internal/satellite/operator/ -run TestManifests -count=1
 
 lint: ## Run golangci-lint
 	golangci-lint run ./...
-
-clean: ## Remove compiled binaries and generated proto code
-	rm -rf bin/ api/gen/v1/*.go
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 
@@ -168,6 +176,9 @@ local-satellite: build ## Build and run satellite locally (connects to local cen
 		./bin/satellite & \
 	echo $$! > $(LOCAL_PID_DIR)/satellite.pid; \
 	echo "satellite started (pid $$!)"
+
+local-dashboard: ## Run React dashboard with hot-reload (proxies API to localhost:8080)
+	cd web/dashboard && npm install && npm run dev
 
 local-stop: ## Stop all locally running processes (central, satellite, port-forward)
 	@for name in central satellite pg-forward; do \

@@ -1,3 +1,5 @@
+apiVersion: apps/v1
+kind: StatefulSet
 metadata:
   labels:
     app.kubernetes.io/managed-by: pg-swarm
@@ -140,6 +142,10 @@ spec:
           name: data
         - mountPath: /etc/pg-config
           name: config
+      securityContext:
+        fsGroup: 999
+        runAsGroup: 999
+        runAsUser: 999
       volumes:
       - configMap:
           name: pg-nocreds-config

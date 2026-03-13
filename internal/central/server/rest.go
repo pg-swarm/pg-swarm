@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -73,6 +74,7 @@ func (s *RESTServer) setupRoutes() {
 	api.Get("/satellites", s.listSatellites)
 	api.Post("/satellites/:id/approve", s.approveSatellite)
 	api.Post("/satellites/:id/reject", s.rejectSatellite)
+	api.Put("/satellites/:id/labels", s.updateSatelliteLabels)
 
 	// Cluster configs
 	api.Get("/clusters", s.listClusterConfigs)
@@ -81,18 +83,13 @@ func (s *RESTServer) setupRoutes() {
 	api.Put("/clusters/:id", s.updateClusterConfig)
 	api.Delete("/clusters/:id", s.deleteClusterConfig)
 
-	// Edge groups
-	api.Get("/groups", s.listGroups)
-	api.Post("/groups", s.createGroup)
-	api.Post("/groups/:id/satellites/:satelliteId", s.assignSatelliteToGroup)
-
-	// Deployment Groups
-	api.Get("/deployment-groups", s.listDeploymentGroups)
-	api.Post("/deployment-groups", s.createDeploymentGroup)
-	api.Get("/deployment-groups/:id", s.getDeploymentGroup)
-	api.Put("/deployment-groups/:id", s.updateDeploymentGroup)
-	api.Delete("/deployment-groups/:id", s.deleteDeploymentGroup)
-	api.Get("/deployment-groups/:id/clusters", s.listDeploymentGroupClusters)
+	// Deployment Rules
+	api.Get("/deployment-rules", s.listDeploymentRules)
+	api.Post("/deployment-rules", s.createDeploymentRule)
+	api.Get("/deployment-rules/:id", s.getDeploymentRule)
+	api.Put("/deployment-rules/:id", s.updateDeploymentRule)
+	api.Delete("/deployment-rules/:id", s.deleteDeploymentRule)
+	api.Get("/deployment-rules/:id/clusters", s.listDeploymentRuleClusters)
 
 	// Profiles
 	api.Get("/profiles", s.listProfiles)
@@ -267,58 +264,37 @@ func (s *RESTServer) deleteClusterConfig(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
-// --- Edge Groups ---
-
-func (s *RESTServer) listGroups(c *fiber.Ctx) error {
-	groups, err := s.store.ListGroups(c.Context())
-	if err != nil {
-		log.Error().Err(err).Msg("failed to list groups")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list groups"})
-	}
-	return c.JSON(groups)
-}
-
-func (s *RESTServer) createGroup(c *fiber.Ctx) error {
-	var group models.EdgeGroup
-	if err := c.BodyParser(&group); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
-	}
-
-	group.ID = uuid.New()
-
-	if err := s.store.CreateGroup(c.Context(), &group); err != nil {
-		log.Error().Err(err).Msg("failed to create group")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create group"})
-	}
-
-	log.Info().Str("group_id", group.ID.String()).Str("name", group.Name).Msg("edge group created")
-	return c.Status(fiber.StatusCreated).JSON(group)
-}
-
-func (s *RESTServer) assignSatelliteToGroup(c *fiber.Ctx) error {
-	groupID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid group id"})
-	}
-
-	satelliteID, err := uuid.Parse(c.Params("satelliteId"))
+func (s *RESTServer) updateSatelliteLabels(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
 	}
 
-	if err := s.store.AssignSatelliteToGroup(c.Context(), satelliteID, groupID); err != nil {
-		log.Error().Err(err).
-			Str("satellite_id", satelliteID.String()).
-			Str("group_id", groupID.String()).
-			Msg("failed to assign satellite to group")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to assign satellite to group"})
+	var body struct {
+		Labels map[string]string `json:"labels"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if body.Labels == nil {
+		body.Labels = map[string]string{}
 	}
 
-	log.Info().
-		Str("satellite_id", satelliteID.String()).
-		Str("group_id", groupID.String()).
-		Msg("satellite assigned to group")
-	return c.JSON(fiber.Map{"status": "assigned"})
+	if err := s.store.UpdateSatelliteLabels(c.Context(), id, body.Labels); err != nil {
+		log.Error().Err(err).Str("satellite_id", id.String()).Msg("failed to update satellite labels")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update labels"})
+	}
+
+	log.Info().Str("satellite_id", id.String()).Interface("labels", body.Labels).Msg("satellite labels updated")
+
+	// Re-evaluate deployment rules for this satellite
+	s.fanOutRulesForSatellite(c.Context(), id, body.Labels)
+
+	sat, err := s.store.GetSatellite(c.Context(), id)
+	if err != nil {
+		return c.JSON(fiber.Map{"status": "labels updated"})
+	}
+	return c.JSON(sat)
 }
 
 // --- Health ---
@@ -352,129 +328,250 @@ func (s *RESTServer) listEvents(c *fiber.Ctx) error {
 	return c.JSON(events)
 }
 
-// --- Deployment Groups ---
+// --- Deployment Rules ---
 
-func (s *RESTServer) listDeploymentGroups(c *fiber.Ctx) error {
-	groups, err := s.store.ListDeploymentGroups(c.Context())
+func (s *RESTServer) listDeploymentRules(c *fiber.Ctx) error {
+	rules, err := s.store.ListDeploymentRules(c.Context())
 	if err != nil {
-		log.Error().Err(err).Msg("failed to list deployment groups")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list deployment groups"})
+		log.Error().Err(err).Msg("failed to list deployment rules")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list deployment rules"})
 	}
-	return c.JSON(groups)
+	return c.JSON(rules)
 }
 
-func (s *RESTServer) createDeploymentGroup(c *fiber.Ctx) error {
-	var dg models.DeploymentGroup
-	if err := c.BodyParser(&dg); err != nil {
+func (s *RESTServer) createDeploymentRule(c *fiber.Ctx) error {
+	var rule models.DeploymentRule
+	if err := c.BodyParser(&rule); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
 	}
-	if dg.Name == "" {
+	if rule.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
 	}
-	if dg.ProfileID == uuid.Nil {
+	if rule.ProfileID == uuid.Nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile_id is required"})
 	}
+	if rule.ClusterName == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cluster_name is required"})
+	}
+	if rule.LabelSelector == nil {
+		rule.LabelSelector = map[string]string{}
+	}
 
-	// Verify profile exists
-	if _, err := s.store.GetProfile(c.Context(), dg.ProfileID); err != nil {
+	// Verify profile exists and fetch its config
+	profile, err := s.store.GetProfile(c.Context(), rule.ProfileID)
+	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile not found"})
 	}
 
-	dg.ID = uuid.New()
+	rule.ID = uuid.New()
 
-	if err := s.store.CreateDeploymentGroup(c.Context(), &dg); err != nil {
-		log.Error().Err(err).Msg("failed to create deployment group")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create deployment group"})
+	if err := s.store.CreateDeploymentRule(c.Context(), &rule); err != nil {
+		log.Error().Err(err).Msg("failed to create deployment rule")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create deployment rule"})
 	}
 
-	// Lock the profile since it's now in use by a deployment group
-	if err := s.store.LockProfile(c.Context(), dg.ProfileID); err != nil {
-		log.Warn().Err(err).Str("profile_id", dg.ProfileID.String()).Msg("failed to lock profile")
+	// Lock the profile since it's now in use by a deployment rule
+	if err := s.store.LockProfile(c.Context(), rule.ProfileID); err != nil {
+		log.Warn().Err(err).Str("profile_id", rule.ProfileID.String()).Msg("failed to lock profile")
 	}
 
-	log.Info().Str("dg_id", dg.ID.String()).Str("name", dg.Name).Msg("deployment group created")
-	return c.Status(fiber.StatusCreated).JSON(dg)
+	// Fan-out: create a ClusterConfig for each satellite matching the label selector
+	s.fanOutDeploymentRule(c.Context(), &rule, profile)
+
+	log.Info().Str("rule_id", rule.ID.String()).Str("name", rule.Name).Msg("deployment rule created")
+	return c.Status(fiber.StatusCreated).JSON(rule)
 }
 
-func (s *RESTServer) getDeploymentGroup(c *fiber.Ctx) error {
+func (s *RESTServer) getDeploymentRule(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment rule id"})
 	}
 
-	dg, err := s.store.GetDeploymentGroup(c.Context(), id)
+	rule, err := s.store.GetDeploymentRule(c.Context(), id)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "deployment group not found"})
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "deployment rule not found"})
 	}
 
-	return c.JSON(dg)
+	return c.JSON(rule)
 }
 
-func (s *RESTServer) updateDeploymentGroup(c *fiber.Ctx) error {
+func (s *RESTServer) updateDeploymentRule(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment rule id"})
 	}
 
-	var dg models.DeploymentGroup
-	if err := c.BodyParser(&dg); err != nil {
+	var rule models.DeploymentRule
+	if err := c.BodyParser(&rule); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
 	}
-	if dg.ProfileID == uuid.Nil {
+	if rule.ProfileID == uuid.Nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile_id is required"})
+	}
+	if rule.ClusterName == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cluster_name is required"})
+	}
+	if rule.LabelSelector == nil {
+		rule.LabelSelector = map[string]string{}
 	}
 
 	// Verify profile exists
-	if _, err := s.store.GetProfile(c.Context(), dg.ProfileID); err != nil {
+	if _, err := s.store.GetProfile(c.Context(), rule.ProfileID); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile not found"})
 	}
 
-	dg.ID = id
-	if err := s.store.UpdateDeploymentGroup(c.Context(), &dg); err != nil {
+	rule.ID = id
+	if err := s.store.UpdateDeploymentRule(c.Context(), &rule); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	log.Info().Str("dg_id", id.String()).Str("name", dg.Name).Msg("deployment group updated")
-	return c.JSON(dg)
+	log.Info().Str("rule_id", id.String()).Str("name", rule.Name).Msg("deployment rule updated")
+	return c.JSON(rule)
 }
 
-func (s *RESTServer) deleteDeploymentGroup(c *fiber.Ctx) error {
+func (s *RESTServer) deleteDeploymentRule(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment rule id"})
 	}
 
-	// Check if any clusters are still in this group
-	clusters, err := s.store.GetClusterConfigsByDeploymentGroup(c.Context(), id)
+	// Check if any clusters are still linked to this rule
+	clusters, err := s.store.GetClusterConfigsByDeploymentRule(c.Context(), id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to check clusters"})
 	}
 	if len(clusters) > 0 {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-			"error": fmt.Sprintf("cannot delete deployment group with %d cluster(s) — remove clusters first", len(clusters)),
+			"error": fmt.Sprintf("cannot delete deployment rule with %d cluster(s) — remove clusters first", len(clusters)),
 		})
 	}
 
-	if err := s.store.DeleteDeploymentGroup(c.Context(), id); err != nil {
+	if err := s.store.DeleteDeploymentRule(c.Context(), id); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	log.Info().Str("dg_id", id.String()).Msg("deployment group deleted")
+	log.Info().Str("rule_id", id.String()).Msg("deployment rule deleted")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
-func (s *RESTServer) listDeploymentGroupClusters(c *fiber.Ctx) error {
+func (s *RESTServer) listDeploymentRuleClusters(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment rule id"})
 	}
 
-	clusters, err := s.store.GetClusterConfigsByDeploymentGroup(c.Context(), id)
+	clusters, err := s.store.GetClusterConfigsByDeploymentRule(c.Context(), id)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to list deployment group clusters")
+		log.Error().Err(err).Msg("failed to list deployment rule clusters")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list clusters"})
 	}
 	return c.JSON(clusters)
+}
+
+// fanOutDeploymentRule creates a ClusterConfig for each satellite matching the rule's label selector.
+func (s *RESTServer) fanOutDeploymentRule(ctx context.Context, rule *models.DeploymentRule, profile *models.ClusterProfile) {
+	satellites, err := s.store.ListSatellitesByLabelSelector(ctx, rule.LabelSelector)
+	if err != nil {
+		log.Error().Err(err).Str("rule_id", rule.ID.String()).Msg("fan-out: failed to list satellites by label selector")
+		return
+	}
+
+	for _, sat := range satellites {
+		satID := sat.ID
+		cfg := &models.ClusterConfig{
+			Name:             rule.ClusterName,
+			Namespace:        rule.Namespace,
+			SatelliteID:      &satID,
+			ProfileID:        &rule.ProfileID,
+			DeploymentRuleID: &rule.ID,
+			Config:           profile.Config,
+		}
+		if err := s.store.CreateClusterConfig(ctx, cfg); err != nil {
+			log.Error().Err(err).
+				Str("rule_id", rule.ID.String()).
+				Str("satellite_id", sat.ID.String()).
+				Msg("fan-out: failed to create cluster config")
+			continue
+		}
+		log.Info().
+			Str("rule_id", rule.ID.String()).
+			Str("satellite_id", sat.ID.String()).
+			Str("config_id", cfg.ID.String()).
+			Msg("fan-out: cluster config created")
+		s.pushConfigToSatellite(cfg)
+	}
+}
+
+// fanOutRulesForSatellite evaluates all deployment rules against the satellite's labels
+// and creates ClusterConfigs for matching rules that don't already have one.
+func (s *RESTServer) fanOutRulesForSatellite(ctx context.Context, satelliteID uuid.UUID, labels map[string]string) {
+	rules, err := s.store.ListDeploymentRules(ctx)
+	if err != nil {
+		log.Error().Err(err).Str("satellite_id", satelliteID.String()).Msg("fan-out: failed to list deployment rules")
+		return
+	}
+
+	for _, rule := range rules {
+		if !labelsMatch(labels, rule.LabelSelector) {
+			continue
+		}
+
+		// Check if a cluster config already exists for this rule + satellite
+		existing, err := s.store.GetClusterConfigsByDeploymentRule(ctx, rule.ID)
+		if err != nil {
+			log.Error().Err(err).Str("rule_id", rule.ID.String()).Msg("fan-out: failed to check existing configs")
+			continue
+		}
+		alreadyExists := false
+		for _, ec := range existing {
+			if ec.SatelliteID != nil && *ec.SatelliteID == satelliteID {
+				alreadyExists = true
+				break
+			}
+		}
+		if alreadyExists {
+			continue
+		}
+
+		profile, err := s.store.GetProfile(ctx, rule.ProfileID)
+		if err != nil {
+			log.Error().Err(err).Str("rule_id", rule.ID.String()).Msg("fan-out: failed to get profile for rule")
+			continue
+		}
+
+		cfg := &models.ClusterConfig{
+			Name:             rule.ClusterName,
+			Namespace:        rule.Namespace,
+			SatelliteID:      &satelliteID,
+			ProfileID:        &rule.ProfileID,
+			DeploymentRuleID: &rule.ID,
+			Config:           profile.Config,
+		}
+		if err := s.store.CreateClusterConfig(ctx, cfg); err != nil {
+			log.Error().Err(err).
+				Str("rule_id", rule.ID.String()).
+				Str("satellite_id", satelliteID.String()).
+				Msg("fan-out: failed to create cluster config for satellite")
+			continue
+		}
+		log.Info().
+			Str("rule_id", rule.ID.String()).
+			Str("satellite_id", satelliteID.String()).
+			Str("config_id", cfg.ID.String()).
+			Msg("fan-out: cluster config created for satellite")
+		s.pushConfigToSatellite(cfg)
+	}
+}
+
+// labelsMatch returns true if the satellite labels contain all key-value pairs in the selector.
+func labelsMatch(labels, selector map[string]string) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // --- Profiles ---
@@ -626,11 +723,27 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		return
 	}
 
+	// Resolve profile name and label selector for K8s labels
+	var profileName string
+	var labelSelector map[string]string
+	if cfg.ProfileID != nil {
+		if p, err := s.store.GetProfile(context.Background(), *cfg.ProfileID); err == nil {
+			profileName = p.Name
+		}
+	}
+	if cfg.DeploymentRuleID != nil {
+		if r, err := s.store.GetDeploymentRule(context.Background(), *cfg.DeploymentRuleID); err == nil {
+			labelSelector = r.LabelSelector
+		}
+	}
+
 	protoConfig := &pgswarmv1.ClusterConfig{
 		ClusterName:   cfg.Name,
 		Namespace:     cfg.Namespace,
 		Replicas:      spec.Replicas,
 		ConfigVersion: cfg.ConfigVersion,
+		ProfileName:   profileName,
+		LabelSelector: labelSelector,
 		Postgres: &pgswarmv1.PostgresSpec{
 			Version: spec.Postgres.Version,
 			Image:   spec.Postgres.Image,

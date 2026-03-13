@@ -32,10 +32,11 @@ var mandatoryHbaRules = []string{
 
 func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(cfg.ClusterName, "config"),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Data: map[string]string{
 			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive),

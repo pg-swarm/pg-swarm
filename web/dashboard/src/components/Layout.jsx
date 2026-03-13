@@ -3,11 +3,11 @@ import { useData } from '../context/DataContext';
 import { deriveSatState } from '../api';
 
 const NAV = [
-  { to: '/',           label: 'Overview' },
-  { to: '/satellites', label: 'Satellites' },
-  { to: '/clusters',   label: 'Clusters' },
+  { to: '/',                  label: 'Overview' },
+  { to: '/satellites',        label: 'Satellites' },
   { to: '/profiles',          label: 'Profiles' },
-  { to: '/deployment-groups', label: 'Deployments' },
+  { to: '/deployment-rules',  label: 'Deployment Rules' },
+  { to: '/clusters',          label: 'Clusters' },
   { to: '/events',            label: 'Events' },
 ];
 

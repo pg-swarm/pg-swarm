@@ -1,3 +1,5 @@
+apiVersion: apps/v1
+kind: StatefulSet
 metadata:
   labels:
     app.kubernetes.io/managed-by: pg-swarm
@@ -159,6 +161,10 @@ spec:
           name: config
         - mountPath: /var/lib/postgresql/wal
           name: wal
+      securityContext:
+        fsGroup: 999
+        runAsGroup: 999
+        runAsUser: 999
       volumes:
       - configMap:
           name: wal-pg-config

@@ -192,10 +192,11 @@ func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.Config
 	}
 
 	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      o.configStoreName(cfg.ClusterName),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Data: map[string]string{
 			"config.json": string(jsonBytes),

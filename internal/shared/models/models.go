@@ -36,19 +36,9 @@ type Satellite struct {
 	State          SatelliteState    `json:"state" db:"state"`
 	AuthTokenHash  string            `json:"-" db:"auth_token_hash"`
 	TempTokenHash  string            `json:"-" db:"temp_token_hash"`
-	GroupID        *uuid.UUID        `json:"group_id,omitempty" db:"group_id"`
 	LastHeartbeat  *time.Time        `json:"last_heartbeat,omitempty" db:"last_heartbeat"`
 	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
-}
-
-type EdgeGroup struct {
-	ID          uuid.UUID         `json:"id" db:"id"`
-	Name        string            `json:"name" db:"name"`
-	Description string            `json:"description" db:"description"`
-	Labels      map[string]string `json:"labels" db:"labels"`
-	CreatedAt   time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 type ClusterConfig struct {
@@ -56,9 +46,8 @@ type ClusterConfig struct {
 	Name              string          `json:"name" db:"name"`
 	Namespace         string          `json:"namespace" db:"namespace"`
 	SatelliteID       *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
-	GroupID           *uuid.UUID      `json:"group_id,omitempty" db:"group_id"`
 	ProfileID         *uuid.UUID      `json:"profile_id,omitempty" db:"profile_id"`
-	DeploymentGroupID *uuid.UUID      `json:"deployment_group_id,omitempty" db:"deployment_group_id"`
+	DeploymentRuleID  *uuid.UUID      `json:"deployment_rule_id,omitempty" db:"deployment_rule_id"`
 	Config            json.RawMessage `json:"config" db:"config"`
 	ConfigVersion     int64           `json:"config_version" db:"config_version"`
 	State             ClusterState    `json:"state" db:"state"`
@@ -66,14 +55,17 @@ type ClusterConfig struct {
 	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
 }
 
-// DeploymentGroup represents a group of clusters sharing the same profile configuration.
-type DeploymentGroup struct {
-	ID          uuid.UUID  `json:"id" db:"id"`
-	Name        string     `json:"name" db:"name"`
-	Description string     `json:"description" db:"description"`
-	ProfileID   uuid.UUID  `json:"profile_id" db:"profile_id"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
+// DeploymentRule maps a profile to satellites matching a label selector.
+// Fan-out: one ClusterConfig is created per satellite whose labels contain the selector.
+type DeploymentRule struct {
+	ID            uuid.UUID         `json:"id" db:"id"`
+	Name          string            `json:"name" db:"name"`
+	ProfileID     uuid.UUID         `json:"profile_id" db:"profile_id"`
+	LabelSelector map[string]string `json:"label_selector" db:"label_selector"`
+	Namespace     string            `json:"namespace" db:"namespace"`
+	ClusterName   string            `json:"cluster_name" db:"cluster_name"`
+	CreatedAt     time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 // ClusterSpec represents the desired PostgreSQL cluster specification.

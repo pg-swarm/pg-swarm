@@ -10,14 +10,15 @@ import (
 
 func buildHeadlessService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
 	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(cfg.ClusterName, "headless"),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
-			Selector:  clusterLabels(cfg.ClusterName),
+			Selector:  clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "postgres",
@@ -31,14 +32,15 @@ func buildHeadlessService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
 }
 
 func buildRWService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
-	sel := clusterLabels(cfg.ClusterName)
+	sel := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	sel[LabelRole] = RolePrimary
 
 	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(cfg.ClusterName, "rw"),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: sel,
@@ -55,14 +57,15 @@ func buildRWService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
 }
 
 func buildROService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
-	sel := clusterLabels(cfg.ClusterName)
+	sel := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	sel[LabelRole] = RoleReplica
 
 	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(cfg.ClusterName, "ro"),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: sel,
