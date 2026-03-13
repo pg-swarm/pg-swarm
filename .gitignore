@@ -33,6 +33,12 @@ Thumbs.db
 design/
 .claude/
 
+# Node
+web/dashboard/node_modules/
+
+# Dashboard build output (generated from web/dashboard/)
+web/static/
+
 # Environment / secrets
 .env
 .env.*

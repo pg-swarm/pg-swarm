@@ -1,5 +1,5 @@
 .SILENT:
-.PHONY: proto build test lint clean manifests docker-build docker-push docker-compose-up docker-compose-down \
+.PHONY: proto dashboard build test lint clean manifests docker-build docker-push docker-compose-up docker-compose-down \
         minikube-build k8s-deploy k8s-delete k8s-delete-all k8s-status help
 
 DOCKER_REPO   ?= ghcr.io/pg-swarm
@@ -21,7 +21,10 @@ help: ## Show this help
 proto: ## Generate Go code from .proto files (requires buf)
 	buf generate
 
-build: proto ## Compile central, satellite, and failover-sidecar binaries into bin/
+dashboard: ## Build the React dashboard into web/static/
+	cd web/dashboard && npm install && npm run build
+
+build: proto dashboard ## Compile central, satellite, and failover-sidecar binaries into bin/
 	go build -o bin/central ./cmd/central
 	go build -o bin/satellite ./cmd/satellite
 	go build -o bin/failover-sidecar ./cmd/failover-sidecar
