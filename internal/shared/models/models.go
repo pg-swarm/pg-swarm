@@ -52,16 +52,28 @@ type EdgeGroup struct {
 }
 
 type ClusterConfig struct {
-	ID            uuid.UUID       `json:"id" db:"id"`
-	Name          string          `json:"name" db:"name"`
-	Namespace     string          `json:"namespace" db:"namespace"`
-	SatelliteID   *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
-	GroupID       *uuid.UUID      `json:"group_id,omitempty" db:"group_id"`
-	Config        json.RawMessage `json:"config" db:"config"`
-	ConfigVersion int64           `json:"config_version" db:"config_version"`
-	State         ClusterState    `json:"state" db:"state"`
-	CreatedAt     time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at" db:"updated_at"`
+	ID                uuid.UUID       `json:"id" db:"id"`
+	Name              string          `json:"name" db:"name"`
+	Namespace         string          `json:"namespace" db:"namespace"`
+	SatelliteID       *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
+	GroupID           *uuid.UUID      `json:"group_id,omitempty" db:"group_id"`
+	ProfileID         *uuid.UUID      `json:"profile_id,omitempty" db:"profile_id"`
+	DeploymentGroupID *uuid.UUID      `json:"deployment_group_id,omitempty" db:"deployment_group_id"`
+	Config            json.RawMessage `json:"config" db:"config"`
+	ConfigVersion     int64           `json:"config_version" db:"config_version"`
+	State             ClusterState    `json:"state" db:"state"`
+	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// DeploymentGroup represents a group of clusters sharing the same profile configuration.
+type DeploymentGroup struct {
+	ID          uuid.UUID  `json:"id" db:"id"`
+	Name        string     `json:"name" db:"name"`
+	Description string     `json:"description" db:"description"`
+	ProfileID   uuid.UUID  `json:"profile_id" db:"profile_id"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 // ClusterSpec represents the desired PostgreSQL cluster specification.
@@ -69,8 +81,9 @@ type ClusterConfig struct {
 type ClusterSpec struct {
 	Replicas  int32             `json:"replicas"`
 	Postgres  PostgresSpec      `json:"postgres"`
-	Storage   StorageSpec       `json:"storage"`
-	Resources ResourceSpec      `json:"resources"`
+	Storage    StorageSpec       `json:"storage"`
+	WalStorage *StorageSpec     `json:"wal_storage,omitempty"` // nil = WAL on data volume
+	Resources  ResourceSpec     `json:"resources"`
 	PgParams  map[string]string `json:"pg_params,omitempty"`
 	HbaRules  []string          `json:"hba_rules,omitempty"`
 	Archive   *ArchiveSpec      `json:"archive,omitempty"`   // nil = archiving disabled
@@ -176,6 +189,25 @@ func ValidateDatabases(dbs []DatabaseSpec) error {
 func (c *ClusterConfig) ParseSpec() (*ClusterSpec, error) {
 	var spec ClusterSpec
 	if err := json.Unmarshal(c.Config, &spec); err != nil {
+		return nil, err
+	}
+	return &spec, nil
+}
+
+type ClusterProfile struct {
+	ID          uuid.UUID       `json:"id" db:"id"`
+	Name        string          `json:"name" db:"name"`
+	Description string          `json:"description" db:"description"`
+	Config      json.RawMessage `json:"config" db:"config"`
+	Locked      bool            `json:"locked" db:"locked"`
+	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// ParseSpec deserializes the Config JSON into a ClusterSpec.
+func (p *ClusterProfile) ParseSpec() (*ClusterSpec, error) {
+	var spec ClusterSpec
+	if err := json.Unmarshal(p.Config, &spec); err != nil {
 		return nil, err
 	}
 	return &spec, nil

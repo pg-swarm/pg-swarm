@@ -6,7 +6,9 @@ const NAV = [
   { to: '/',           label: 'Overview' },
   { to: '/satellites', label: 'Satellites' },
   { to: '/clusters',   label: 'Clusters' },
-  { to: '/events',     label: 'Events' },
+  { to: '/profiles',          label: 'Profiles' },
+  { to: '/deployment-groups', label: 'Deployments' },
+  { to: '/events',            label: 'Events' },
 ];
 
 function StatusDot({ satellites }) {

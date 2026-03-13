@@ -18,6 +18,30 @@ func archiveEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.Archive != nil && cfg.Archive.Mode != ""
 }
 
+func walStorageEnabled(cfg *pgswarmv1.ClusterConfig) bool {
+	return cfg.WalStorage != nil && cfg.WalStorage.Size != ""
+}
+
+func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "wal",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(cfg.WalStorage.Size),
+				},
+			},
+		},
+	}
+	if cfg.WalStorage.StorageClass != "" {
+		pvc.Spec.StorageClassName = &cfg.WalStorage.StorageClass
+	}
+	return pvc
+}
+
 func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.StatefulSet {
 	labels := clusterLabels(cfg.ClusterName)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
@@ -72,6 +96,11 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 				buildVCT(cfg),
 			},
 		},
+	}
+
+	// Separate WAL volume
+	if walStorageEnabled(cfg) {
+		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalVCT(cfg))
 	}
 
 	// PVC archive mode: add wal-archive VolumeClaimTemplate
@@ -180,6 +209,25 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 
 	databaseSQL := buildDatabaseSQL(cfg.Databases)
 
+	// WAL symlink script block (used after initdb/pg_basebackup and in re-init path)
+	walSymlinkBlock := ""
+	walSymlinkIdempotentBlock := ""
+	if walStorageEnabled(cfg) {
+		walSymlinkBlock = `
+    # Move WAL to separate volume and symlink
+    if [ -d "/var/lib/postgresql/wal" ]; then
+        mv "$PGDATA/pg_wal"/* /var/lib/postgresql/wal/ 2>/dev/null || true
+        rm -rf "$PGDATA/pg_wal"
+        ln -s /var/lib/postgresql/wal "$PGDATA/pg_wal"
+    fi`
+		walSymlinkIdempotentBlock = `
+    if [ -d "/var/lib/postgresql/wal" ] && [ ! -L "$PGDATA/pg_wal" ]; then
+        mv "$PGDATA/pg_wal"/* /var/lib/postgresql/wal/ 2>/dev/null || true
+        rm -rf "$PGDATA/pg_wal"
+        ln -s /var/lib/postgresql/wal "$PGDATA/pg_wal"
+    fi`
+	}
+
 	initScript := fmt.Sprintf(`#!/bin/bash
 set -e
 
@@ -190,7 +238,7 @@ PGDATA="%s"
 if [ -f "$PGDATA/PG_VERSION" ]; then
     echo "PGDATA already initialized, copying config only"
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s
     exit 0
 fi
 
@@ -207,7 +255,7 @@ if [ "$ORDINAL" = "0" ]; then
 
     # Copy config
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s%s
 else
     echo "Initializing replica (ordinal $ORDINAL)"
     PRIMARY_HOST="%s-0.%s.%s.svc.cluster.local"
@@ -218,9 +266,9 @@ else
     PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
         -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s%s
 fi
-`, pgDataPath, databaseSQL, primaryArchiveBlock, cfg.ClusterName, headlessSvc, cfg.Namespace, replicaRestoreBlock)
+`, pgDataPath, walSymlinkIdempotentBlock, databaseSQL, primaryArchiveBlock, walSymlinkBlock, cfg.ClusterName, headlessSvc, cfg.Namespace, replicaRestoreBlock, walSymlinkBlock)
 
 	c := corev1.Container{
 		Name:    "pg-init",
@@ -269,6 +317,14 @@ fi
 					Key:                  fmt.Sprintf("password-%s", db.User),
 				},
 			},
+		})
+	}
+
+	// Mount WAL volume on init container
+	if walStorageEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "wal",
+			MountPath: "/var/lib/postgresql/wal",
 		})
 	}
 
@@ -350,6 +406,14 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 				c.Resources.Limits[corev1.ResourceMemory] = resource.MustParse(cfg.Resources.MemoryLimit)
 			}
 		}
+	}
+
+	// Mount WAL volume on main container
+	if walStorageEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "wal",
+			MountPath: "/var/lib/postgresql/wal",
+		})
 	}
 
 	// PVC archive mode: mount wal-archive volume

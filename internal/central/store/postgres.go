@@ -87,6 +87,8 @@ func scanClusterConfig(row pgx.Row) (*models.ClusterConfig, error) {
 		&cfg.Namespace,
 		&cfg.SatelliteID,
 		&cfg.GroupID,
+		&cfg.ProfileID,
+		&cfg.DeploymentGroupID,
 		&cfg.Config,
 		&cfg.ConfigVersion,
 		&cfg.State,
@@ -100,6 +102,44 @@ func scanClusterConfig(row pgx.Row) (*models.ClusterConfig, error) {
 		cfg.Config = json.RawMessage("{}")
 	}
 	return &cfg, nil
+}
+
+// scanDeploymentGroup scans a deployment_groups row into a DeploymentGroup struct.
+func scanDeploymentGroup(row pgx.Row) (*models.DeploymentGroup, error) {
+	var dg models.DeploymentGroup
+	err := row.Scan(
+		&dg.ID,
+		&dg.Name,
+		&dg.Description,
+		&dg.ProfileID,
+		&dg.CreatedAt,
+		&dg.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &dg, nil
+}
+
+// scanProfile scans a cluster_profiles row into a ClusterProfile struct.
+func scanProfile(row pgx.Row) (*models.ClusterProfile, error) {
+	var p models.ClusterProfile
+	err := row.Scan(
+		&p.ID,
+		&p.Name,
+		&p.Description,
+		&p.Config,
+		&p.Locked,
+		&p.CreatedAt,
+		&p.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if p.Config == nil {
+		p.Config = json.RawMessage("{}")
+	}
+	return &p, nil
 }
 
 // scanClusterHealth scans a cluster_health row into a ClusterHealth struct.
@@ -354,10 +394,10 @@ func (s *PostgresStore) CreateClusterConfig(ctx context.Context, cfg *models.Clu
 	cfg.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO cluster_configs (id, name, namespace, satellite_id, group_id, config, config_version, state, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		cfg.ID, cfg.Name, cfg.Namespace, cfg.SatelliteID, cfg.GroupID,
-		cfg.Config, cfg.ConfigVersion, cfg.State, cfg.CreatedAt, cfg.UpdatedAt,
+		`INSERT INTO cluster_configs (id, name, namespace, satellite_id, group_id, profile_id, deployment_group_id, config, config_version, state, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		cfg.ID, cfg.Name, cfg.Namespace, cfg.SatelliteID, cfg.GroupID, cfg.ProfileID,
+		cfg.DeploymentGroupID, cfg.Config, cfg.ConfigVersion, cfg.State, cfg.CreatedAt, cfg.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create cluster config: %w", err)
@@ -367,7 +407,7 @@ func (s *PostgresStore) CreateClusterConfig(ctx context.Context, cfg *models.Clu
 
 func (s *PostgresStore) GetClusterConfig(ctx context.Context, id uuid.UUID) (*models.ClusterConfig, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, name, namespace, satellite_id, group_id, config, config_version, state, created_at, updated_at
+		`SELECT id, name, namespace, satellite_id, group_id, profile_id, deployment_group_id, config, config_version, state, created_at, updated_at
 		 FROM cluster_configs WHERE id = $1`, id)
 	cfg, err := scanClusterConfig(row)
 	if err != nil {
@@ -378,7 +418,7 @@ func (s *PostgresStore) GetClusterConfig(ctx context.Context, id uuid.UUID) (*mo
 
 func (s *PostgresStore) ListClusterConfigs(ctx context.Context) ([]*models.ClusterConfig, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, namespace, satellite_id, group_id, config, config_version, state, created_at, updated_at
+		`SELECT id, name, namespace, satellite_id, group_id, profile_id, deployment_group_id, config, config_version, state, created_at, updated_at
 		 FROM cluster_configs ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list cluster configs: %w", err)
@@ -407,10 +447,10 @@ func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.Clu
 
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE cluster_configs SET name = $1, namespace = $2, satellite_id = $3, group_id = $4,
-		 config = $5, config_version = config_version + 1, state = $6, updated_at = $7
-		 WHERE id = $8`,
+		 profile_id = $5, deployment_group_id = $6, config = $7, config_version = config_version + 1, state = $8, updated_at = $9
+		 WHERE id = $10`,
 		cfg.Name, cfg.Namespace, cfg.SatelliteID, cfg.GroupID,
-		cfg.Config, cfg.State, cfg.UpdatedAt, cfg.ID,
+		cfg.ProfileID, cfg.DeploymentGroupID, cfg.Config, cfg.State, cfg.UpdatedAt, cfg.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update cluster config: %w", err)
@@ -435,7 +475,7 @@ func (s *PostgresStore) DeleteClusterConfig(ctx context.Context, id uuid.UUID) e
 
 func (s *PostgresStore) GetClusterConfigsBySatellite(ctx context.Context, satelliteID uuid.UUID) ([]*models.ClusterConfig, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, namespace, satellite_id, group_id, config, config_version, state, created_at, updated_at
+		`SELECT id, name, namespace, satellite_id, group_id, profile_id, deployment_group_id, config, config_version, state, created_at, updated_at
 		 FROM cluster_configs WHERE satellite_id = $1 ORDER BY created_at DESC`, satelliteID)
 	if err != nil {
 		return nil, fmt.Errorf("get cluster configs by satellite: %w", err)
@@ -458,7 +498,7 @@ func (s *PostgresStore) GetClusterConfigsBySatellite(ctx context.Context, satell
 
 func (s *PostgresStore) GetClusterConfigsByGroup(ctx context.Context, groupID uuid.UUID) ([]*models.ClusterConfig, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, namespace, satellite_id, group_id, config, config_version, state, created_at, updated_at
+		`SELECT id, name, namespace, satellite_id, group_id, profile_id, deployment_group_id, config, config_version, state, created_at, updated_at
 		 FROM cluster_configs WHERE group_id = $1 ORDER BY created_at DESC`, groupID)
 	if err != nil {
 		return nil, fmt.Errorf("get cluster configs by group: %w", err)
@@ -608,6 +648,215 @@ func (s *PostgresStore) ListEventsByCluster(ctx context.Context, satelliteID uui
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate events: %w", err)
+	}
+	return result, nil
+}
+
+// ---------- Profiles ----------
+
+func (s *PostgresStore) CreateProfile(ctx context.Context, p *models.ClusterProfile) error {
+	if p.ID == uuid.Nil {
+		p.ID = uuid.New()
+	}
+	if p.Config == nil {
+		p.Config = json.RawMessage("{}")
+	}
+	now := time.Now()
+	p.CreatedAt = now
+	p.UpdatedAt = now
+
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO cluster_profiles (id, name, description, config, locked, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		p.ID, p.Name, p.Description, p.Config, p.Locked, p.CreatedAt, p.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create profile: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.ClusterProfile, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, name, description, config, locked, created_at, updated_at
+		 FROM cluster_profiles WHERE id = $1`, id)
+	p, err := scanProfile(row)
+	if err != nil {
+		return nil, fmt.Errorf("get profile %s: %w", id, err)
+	}
+	return p, nil
+}
+
+func (s *PostgresStore) ListProfiles(ctx context.Context) ([]*models.ClusterProfile, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, description, config, locked, created_at, updated_at
+		 FROM cluster_profiles ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list profiles: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.ClusterProfile
+	for rows.Next() {
+		p, err := scanProfile(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan profile row: %w", err)
+		}
+		result = append(result, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate profiles: %w", err)
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) UpdateProfile(ctx context.Context, p *models.ClusterProfile) error {
+	if p.Config == nil {
+		p.Config = json.RawMessage("{}")
+	}
+	p.UpdatedAt = time.Now()
+
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, updated_at = $4
+		 WHERE id = $5 AND locked = FALSE`,
+		p.Name, p.Description, p.Config, p.UpdatedAt, p.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("profile %s not found or is locked", p.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteProfile(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM cluster_profiles WHERE id = $1 AND locked = FALSE`, id)
+	if err != nil {
+		return fmt.Errorf("delete profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("profile %s not found or is locked", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) LockProfile(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE cluster_profiles SET locked = TRUE, updated_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("lock profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("profile %s not found", id)
+	}
+	return nil
+}
+
+// ---------- Deployment Groups ----------
+
+func (s *PostgresStore) CreateDeploymentGroup(ctx context.Context, dg *models.DeploymentGroup) error {
+	if dg.ID == uuid.Nil {
+		dg.ID = uuid.New()
+	}
+	now := time.Now()
+	dg.CreatedAt = now
+	dg.UpdatedAt = now
+
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO deployment_groups (id, name, description, profile_id, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		dg.ID, dg.Name, dg.Description, dg.ProfileID, dg.CreatedAt, dg.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create deployment group: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetDeploymentGroup(ctx context.Context, id uuid.UUID) (*models.DeploymentGroup, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, name, description, profile_id, created_at, updated_at
+		 FROM deployment_groups WHERE id = $1`, id)
+	dg, err := scanDeploymentGroup(row)
+	if err != nil {
+		return nil, fmt.Errorf("get deployment group %s: %w", id, err)
+	}
+	return dg, nil
+}
+
+func (s *PostgresStore) ListDeploymentGroups(ctx context.Context) ([]*models.DeploymentGroup, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, description, profile_id, created_at, updated_at
+		 FROM deployment_groups ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list deployment groups: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.DeploymentGroup
+	for rows.Next() {
+		dg, err := scanDeploymentGroup(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan deployment group row: %w", err)
+		}
+		result = append(result, dg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate deployment groups: %w", err)
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) UpdateDeploymentGroup(ctx context.Context, dg *models.DeploymentGroup) error {
+	dg.UpdatedAt = time.Now()
+
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE deployment_groups SET name = $1, description = $2, profile_id = $3, updated_at = $4
+		 WHERE id = $5`,
+		dg.Name, dg.Description, dg.ProfileID, dg.UpdatedAt, dg.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update deployment group: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("deployment group %s not found", dg.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteDeploymentGroup(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM deployment_groups WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete deployment group: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("deployment group %s not found", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetClusterConfigsByDeploymentGroup(ctx context.Context, dgID uuid.UUID) ([]*models.ClusterConfig, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, namespace, satellite_id, group_id, profile_id, deployment_group_id, config, config_version, state, created_at, updated_at
+		 FROM cluster_configs WHERE deployment_group_id = $1 ORDER BY created_at DESC`, dgID)
+	if err != nil {
+		return nil, fmt.Errorf("get cluster configs by deployment group: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.ClusterConfig
+	for rows.Next() {
+		cfg, err := scanClusterConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan cluster config row: %w", err)
+		}
+		result = append(result, cfg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cluster configs: %w", err)
 	}
 	return result, nil
 }

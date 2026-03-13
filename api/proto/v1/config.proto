@@ -56,6 +56,7 @@ message ClusterConfig {
   ArchiveSpec archive = 10;           // optional WAL archiving config
   repeated DatabaseSpec databases = 11; // databases to create with their owner users
   FailoverSpec failover = 12;            // optional automatic failover sidecar
+  StorageSpec wal_storage = 13;          // optional separate WAL volume
 }
 
 message PostgresSpec {

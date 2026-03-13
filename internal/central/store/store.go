@@ -32,6 +32,22 @@ type Store interface {
 	GetClusterConfigsBySatellite(ctx context.Context, satelliteID uuid.UUID) ([]*models.ClusterConfig, error)
 	GetClusterConfigsByGroup(ctx context.Context, groupID uuid.UUID) ([]*models.ClusterConfig, error)
 
+	// Profiles
+	CreateProfile(ctx context.Context, profile *models.ClusterProfile) error
+	GetProfile(ctx context.Context, id uuid.UUID) (*models.ClusterProfile, error)
+	ListProfiles(ctx context.Context) ([]*models.ClusterProfile, error)
+	UpdateProfile(ctx context.Context, profile *models.ClusterProfile) error
+	DeleteProfile(ctx context.Context, id uuid.UUID) error
+	LockProfile(ctx context.Context, id uuid.UUID) error
+
+	// Deployment Groups
+	CreateDeploymentGroup(ctx context.Context, dg *models.DeploymentGroup) error
+	GetDeploymentGroup(ctx context.Context, id uuid.UUID) (*models.DeploymentGroup, error)
+	ListDeploymentGroups(ctx context.Context) ([]*models.DeploymentGroup, error)
+	UpdateDeploymentGroup(ctx context.Context, dg *models.DeploymentGroup) error
+	DeleteDeploymentGroup(ctx context.Context, id uuid.UUID) error
+	GetClusterConfigsByDeploymentGroup(ctx context.Context, dgID uuid.UUID) ([]*models.ClusterConfig, error)
+
 	// Health
 	UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error
 	GetClusterHealth(ctx context.Context, satelliteID uuid.UUID, clusterName string) (*models.ClusterHealth, error)

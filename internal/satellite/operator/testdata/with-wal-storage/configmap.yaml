@@ -20,6 +20,6 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: pg-swarm
     app.kubernetes.io/name: postgresql
-    pg-swarm.io/cluster: orphan-pg
-  name: orphan-pg-config
-  namespace: pg-clusters
+    pg-swarm.io/cluster: wal-pg
+  name: wal-pg-config
+  namespace: default

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -85,6 +86,22 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/groups", s.createGroup)
 	api.Post("/groups/:id/satellites/:satelliteId", s.assignSatelliteToGroup)
 
+	// Deployment Groups
+	api.Get("/deployment-groups", s.listDeploymentGroups)
+	api.Post("/deployment-groups", s.createDeploymentGroup)
+	api.Get("/deployment-groups/:id", s.getDeploymentGroup)
+	api.Put("/deployment-groups/:id", s.updateDeploymentGroup)
+	api.Delete("/deployment-groups/:id", s.deleteDeploymentGroup)
+	api.Get("/deployment-groups/:id/clusters", s.listDeploymentGroupClusters)
+
+	// Profiles
+	api.Get("/profiles", s.listProfiles)
+	api.Post("/profiles", s.createProfile)
+	api.Get("/profiles/:id", s.getProfile)
+	api.Put("/profiles/:id", s.updateProfile)
+	api.Delete("/profiles/:id", s.deleteProfile)
+	api.Post("/profiles/:id/clone", s.cloneProfile)
+
 	// Health
 	api.Get("/health", s.listClusterHealth)
 
@@ -167,6 +184,13 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 	if err := s.store.CreateClusterConfig(c.Context(), &cfg); err != nil {
 		log.Error().Err(err).Msg("failed to create cluster config")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create cluster config"})
+	}
+
+	// Lock the source profile once a cluster is built from it
+	if cfg.ProfileID != nil {
+		if err := s.store.LockProfile(c.Context(), *cfg.ProfileID); err != nil {
+			log.Warn().Err(err).Str("profile_id", cfg.ProfileID.String()).Msg("failed to lock profile")
+		}
 	}
 
 	log.Info().Str("config_id", cfg.ID.String()).Str("name", cfg.Name).Msg("cluster config created")
@@ -328,6 +352,264 @@ func (s *RESTServer) listEvents(c *fiber.Ctx) error {
 	return c.JSON(events)
 }
 
+// --- Deployment Groups ---
+
+func (s *RESTServer) listDeploymentGroups(c *fiber.Ctx) error {
+	groups, err := s.store.ListDeploymentGroups(c.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list deployment groups")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list deployment groups"})
+	}
+	return c.JSON(groups)
+}
+
+func (s *RESTServer) createDeploymentGroup(c *fiber.Ctx) error {
+	var dg models.DeploymentGroup
+	if err := c.BodyParser(&dg); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if dg.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	if dg.ProfileID == uuid.Nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile_id is required"})
+	}
+
+	// Verify profile exists
+	if _, err := s.store.GetProfile(c.Context(), dg.ProfileID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile not found"})
+	}
+
+	dg.ID = uuid.New()
+
+	if err := s.store.CreateDeploymentGroup(c.Context(), &dg); err != nil {
+		log.Error().Err(err).Msg("failed to create deployment group")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create deployment group"})
+	}
+
+	// Lock the profile since it's now in use by a deployment group
+	if err := s.store.LockProfile(c.Context(), dg.ProfileID); err != nil {
+		log.Warn().Err(err).Str("profile_id", dg.ProfileID.String()).Msg("failed to lock profile")
+	}
+
+	log.Info().Str("dg_id", dg.ID.String()).Str("name", dg.Name).Msg("deployment group created")
+	return c.Status(fiber.StatusCreated).JSON(dg)
+}
+
+func (s *RESTServer) getDeploymentGroup(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+	}
+
+	dg, err := s.store.GetDeploymentGroup(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "deployment group not found"})
+	}
+
+	return c.JSON(dg)
+}
+
+func (s *RESTServer) updateDeploymentGroup(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+	}
+
+	var dg models.DeploymentGroup
+	if err := c.BodyParser(&dg); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if dg.ProfileID == uuid.Nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile_id is required"})
+	}
+
+	// Verify profile exists
+	if _, err := s.store.GetProfile(c.Context(), dg.ProfileID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile not found"})
+	}
+
+	dg.ID = id
+	if err := s.store.UpdateDeploymentGroup(c.Context(), &dg); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("dg_id", id.String()).Str("name", dg.Name).Msg("deployment group updated")
+	return c.JSON(dg)
+}
+
+func (s *RESTServer) deleteDeploymentGroup(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+	}
+
+	// Check if any clusters are still in this group
+	clusters, err := s.store.GetClusterConfigsByDeploymentGroup(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to check clusters"})
+	}
+	if len(clusters) > 0 {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": fmt.Sprintf("cannot delete deployment group with %d cluster(s) — remove clusters first", len(clusters)),
+		})
+	}
+
+	if err := s.store.DeleteDeploymentGroup(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("dg_id", id.String()).Msg("deployment group deleted")
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (s *RESTServer) listDeploymentGroupClusters(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid deployment group id"})
+	}
+
+	clusters, err := s.store.GetClusterConfigsByDeploymentGroup(c.Context(), id)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list deployment group clusters")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list clusters"})
+	}
+	return c.JSON(clusters)
+}
+
+// --- Profiles ---
+
+func (s *RESTServer) listProfiles(c *fiber.Ctx) error {
+	profiles, err := s.store.ListProfiles(c.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list profiles")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list profiles"})
+	}
+	return c.JSON(profiles)
+}
+
+func (s *RESTServer) createProfile(c *fiber.Ctx) error {
+	var profile models.ClusterProfile
+	if err := c.BodyParser(&profile); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if profile.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+
+	spec, err := profile.ParseSpec()
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid config: " + err.Error()})
+	}
+	if err := models.ValidateArchiveSpec(spec.Archive); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := models.ValidateDatabases(spec.Databases); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	profile.ID = uuid.New()
+	profile.Locked = false
+
+	if err := s.store.CreateProfile(c.Context(), &profile); err != nil {
+		log.Error().Err(err).Msg("failed to create profile")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create profile"})
+	}
+
+	log.Info().Str("profile_id", profile.ID.String()).Str("name", profile.Name).Msg("profile created")
+	return c.Status(fiber.StatusCreated).JSON(profile)
+}
+
+func (s *RESTServer) getProfile(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+	profile, err := s.store.GetProfile(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "profile not found"})
+	}
+	return c.JSON(profile)
+}
+
+func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+
+	var profile models.ClusterProfile
+	if err := c.BodyParser(&profile); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	spec, err := profile.ParseSpec()
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid config: " + err.Error()})
+	}
+	if err := models.ValidateArchiveSpec(spec.Archive); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := models.ValidateDatabases(spec.Databases); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	profile.ID = id
+	if err := s.store.UpdateProfile(c.Context(), &profile); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("profile_id", id.String()).Str("name", profile.Name).Msg("profile updated")
+	return c.JSON(profile)
+}
+
+func (s *RESTServer) deleteProfile(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+	if err := s.store.DeleteProfile(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+	log.Info().Str("profile_id", id.String()).Msg("profile deleted")
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (s *RESTServer) cloneProfile(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+
+	source, err := s.store.GetProfile(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "profile not found"})
+	}
+
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required for cloned profile"})
+	}
+
+	clone := &models.ClusterProfile{
+		ID:          uuid.New(),
+		Name:        body.Name,
+		Description: source.Description,
+		Config:      source.Config,
+		Locked:      false,
+	}
+
+	if err := s.store.CreateProfile(c.Context(), clone); err != nil {
+		log.Error().Err(err).Msg("failed to clone profile")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to clone profile"})
+	}
+
+	log.Info().Str("source", id.String()).Str("clone", clone.ID.String()).Str("name", clone.Name).Msg("profile cloned")
+	return c.Status(fiber.StatusCreated).JSON(clone)
+}
+
 // --- Config push helper ---
 
 func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
@@ -365,6 +647,13 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		},
 		PgParams: spec.PgParams,
 		HbaRules: spec.HbaRules,
+	}
+
+	if spec.WalStorage != nil {
+		protoConfig.WalStorage = &pgswarmv1.StorageSpec{
+			Size:         spec.WalStorage.Size,
+			StorageClass: spec.WalStorage.StorageClass,
+		}
 	}
 
 	if spec.Archive != nil && spec.Archive.Mode != "" {

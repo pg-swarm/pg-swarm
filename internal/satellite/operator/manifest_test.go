@@ -707,6 +707,87 @@ func TestManifests_NoFailover(t *testing.T) {
 	}
 }
 
+func walStorageCfg() *pgswarmv1.ClusterConfig {
+	cfg := baseCfg()
+	cfg.ClusterName = "wal-pg"
+	cfg.WalStorage = &pgswarmv1.StorageSpec{
+		Size:         "5Gi",
+		StorageClass: "fast-ssd",
+	}
+	return cfg
+}
+
+func TestManifests_WithWalStorage(t *testing.T) {
+	cfg := walStorageCfg()
+	writeAll(t, "with-wal-storage", cfg)
+
+	secret := buildSecret(cfg)
+	sts := buildStatefulSet(cfg, secret.Name)
+
+	// Should have 2 VCTs: data + wal
+	if n := len(sts.Spec.VolumeClaimTemplates); n != 2 {
+		t.Fatalf("expected 2 VCTs (data + wal), got %d", n)
+	}
+
+	walVCT := sts.Spec.VolumeClaimTemplates[1]
+	if walVCT.Name != "wal" {
+		t.Errorf("expected second VCT name 'wal', got %q", walVCT.Name)
+	}
+	walSize := walVCT.Spec.Resources.Requests[corev1.ResourceStorage]
+	if walSize.String() != "5Gi" {
+		t.Errorf("expected wal size 5Gi, got %s", walSize.String())
+	}
+	if walVCT.Spec.StorageClassName == nil || *walVCT.Spec.StorageClassName != "fast-ssd" {
+		t.Error("expected wal storageClassName = fast-ssd")
+	}
+
+	// Both init and main containers must mount /var/lib/postgresql/wal
+	init := sts.Spec.Template.Spec.InitContainers[0]
+	if !hasVolumeMount(init, "wal") {
+		t.Error("init container missing wal mount")
+	}
+	main := sts.Spec.Template.Spec.Containers[0]
+	if !hasVolumeMount(main, "wal") {
+		t.Error("main container missing wal mount")
+	}
+
+	// Init script should contain symlink logic
+	initScript := init.Command[2]
+	if !strings.Contains(initScript, "ln -s /var/lib/postgresql/wal") {
+		t.Error("init script missing WAL symlink logic")
+	}
+	if !strings.Contains(initScript, `mv "$PGDATA/pg_wal"/*`) {
+		t.Error("init script missing pg_wal move logic")
+	}
+}
+
+func TestManifests_WithoutWalStorage(t *testing.T) {
+	cfg := baseCfg()
+	secret := buildSecret(cfg)
+	sts := buildStatefulSet(cfg, secret.Name)
+
+	// Should have only 1 VCT (data)
+	if n := len(sts.Spec.VolumeClaimTemplates); n != 1 {
+		t.Errorf("expected 1 VCT without wal_storage, got %d", n)
+	}
+
+	// No wal mount on containers
+	init := sts.Spec.Template.Spec.InitContainers[0]
+	if hasVolumeMount(init, "wal") {
+		t.Error("init container should not have wal mount without wal_storage")
+	}
+	main := sts.Spec.Template.Spec.Containers[0]
+	if hasVolumeMount(main, "wal") {
+		t.Error("main container should not have wal mount without wal_storage")
+	}
+
+	// Init script should not contain symlink logic
+	initScript := init.Command[2]
+	if strings.Contains(initScript, "ln -s /var/lib/postgresql/wal") {
+		t.Error("init script should not have WAL symlink logic without wal_storage")
+	}
+}
+
 func TestManifests_SecretPasswords(t *testing.T) {
 	cfg := baseCfg()
 	secret := buildSecret(cfg)

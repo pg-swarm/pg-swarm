@@ -10,6 +10,7 @@ data:
     hot_standby = on
     listen_addresses = '*'
     max_replication_slots = 10
+    max_slot_wal_keep_size = -1
     max_wal_senders = 10
     shared_buffers = 256MB
     wal_level = replica
