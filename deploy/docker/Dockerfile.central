@@ -1,7 +1,16 @@
 # syntax=docker/dockerfile:1
 
+# ── Dashboard stage ───────────────────────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM node:22-alpine AS dashboard
+
+WORKDIR /src/web/dashboard
+COPY web/dashboard/package.json web/dashboard/package-lock.json ./
+RUN npm ci
+COPY web/dashboard/ .
+RUN npm run build
+
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 # Injected by buildx for each platform in the matrix (linux/amd64, linux/arm64).
 ARG TARGETOS
@@ -15,8 +24,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and build a fully static binary for the target platform.
+# Copy source and bring in built dashboard assets
 COPY . .
+COPY --from=dashboard /src/web/static/ ./web/static/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" \
     -o /out/central ./cmd/central

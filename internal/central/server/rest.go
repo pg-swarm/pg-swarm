@@ -1,14 +1,17 @@
 package server
 
 import (
+	"net/http"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/google/uuid"
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/central/registry"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
+	"github.com/pg-swarm/pg-swarm/web"
 	"github.com/rs/zerolog/log"
 )
 
@@ -44,6 +47,25 @@ func (s *RESTServer) Shutdown() error {
 }
 
 func (s *RESTServer) setupRoutes() {
+	// Dashboard (embedded React SPA)
+	s.app.Use("/assets", filesystem.New(filesystem.Config{
+		Root:       http.FS(web.StaticFS),
+		PathPrefix: "static/assets",
+	}))
+	// SPA catch-all: serve index.html for all non-API routes (BrowserRouter)
+	s.app.Use(func(c *fiber.Ctx) error {
+		path := c.Path()
+		if len(path) >= 4 && path[:4] == "/api" {
+			return c.Next()
+		}
+		data, err := web.StaticFS.ReadFile("static/index.html")
+		if err != nil {
+			return c.Next()
+		}
+		c.Set("Content-Type", "text/html; charset=utf-8")
+		return c.Send(data)
+	})
+
 	api := s.app.Group("/api/v1")
 
 	// Satellites
