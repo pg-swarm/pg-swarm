@@ -5,14 +5,14 @@ const DataContext = createContext(null);
 
 export function DataProvider({ children }) {
   const [data, setData] = useState({
-    satellites: [], clusters: [], health: [], events: [], profiles: [], deploymentGroups: [],
+    satellites: [], clusters: [], health: [], events: [], profiles: [], deploymentRules: [],
   });
   const [lastRefresh, setLastRefresh] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [satellites, clusters, health, events, profiles, deploymentGroups] = await Promise.all([
-        api.satellites(), api.clusters(), api.health(), api.events(50), api.profiles(), api.deploymentGroups(),
+      const [satellites, clusters, health, events, profiles, deploymentRules] = await Promise.all([
+        api.satellites(), api.clusters(), api.health(), api.events(50), api.profiles(), api.deploymentRules(),
       ]);
       setData({
         satellites:       satellites || [],
@@ -20,7 +20,7 @@ export function DataProvider({ children }) {
         health:           health || [],
         events:           events || [],
         profiles:         profiles || [],
-        deploymentGroups: deploymentGroups || [],
+        deploymentRules:  deploymentRules || [],
       });
       setLastRefresh(new Date());
     } catch (err) {

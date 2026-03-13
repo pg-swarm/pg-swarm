@@ -14,6 +14,19 @@ import (
 
 const pgDataPath = "/var/lib/postgresql/data/pgdata"
 
+// podSecurityContext returns the PodSecurityContext for all PG pods.
+// UID/GID 999 is the postgres user in the official postgres images.
+func podSecurityContext() *corev1.PodSecurityContext {
+	uid := int64(999)
+	gid := int64(999)
+	fsGroup := int64(999)
+	return &corev1.PodSecurityContext{
+		RunAsUser:  &uid,
+		RunAsGroup: &gid,
+		FSGroup:    &fsGroup,
+	}
+}
+
 func archiveEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.Archive != nil && cfg.Archive.Mode != ""
 }
@@ -43,11 +56,12 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 }
 
 func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.StatefulSet {
-	labels := clusterLabels(cfg.ClusterName)
+	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
 	replicas := cfg.Replicas
 
 	sts := &appsv1.StatefulSet{
+		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cfg.ClusterName,
 			Namespace: cfg.Namespace,
@@ -64,6 +78,7 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					SecurityContext: podSecurityContext(),
 					InitContainers: []corev1.Container{
 						buildInitContainer(cfg, secretName),
 					},

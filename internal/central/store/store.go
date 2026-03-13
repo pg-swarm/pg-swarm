@@ -16,12 +16,8 @@ type Store interface {
 	UpdateSatelliteState(ctx context.Context, id uuid.UUID, state models.SatelliteState) error
 	SetSatelliteAuthToken(ctx context.Context, id uuid.UUID, tokenHash string) error
 	UpdateSatelliteHeartbeat(ctx context.Context, id uuid.UUID) error
-
-	// Groups
-	CreateGroup(ctx context.Context, group *models.EdgeGroup) error
-	GetGroup(ctx context.Context, id uuid.UUID) (*models.EdgeGroup, error)
-	ListGroups(ctx context.Context) ([]*models.EdgeGroup, error)
-	AssignSatelliteToGroup(ctx context.Context, satelliteID, groupID uuid.UUID) error
+	UpdateSatelliteLabels(ctx context.Context, id uuid.UUID, labels map[string]string) error
+	ListSatellitesByLabelSelector(ctx context.Context, selector map[string]string) ([]*models.Satellite, error)
 
 	// Cluster Configs
 	CreateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error
@@ -30,7 +26,6 @@ type Store interface {
 	UpdateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error
 	DeleteClusterConfig(ctx context.Context, id uuid.UUID) error
 	GetClusterConfigsBySatellite(ctx context.Context, satelliteID uuid.UUID) ([]*models.ClusterConfig, error)
-	GetClusterConfigsByGroup(ctx context.Context, groupID uuid.UUID) ([]*models.ClusterConfig, error)
 
 	// Profiles
 	CreateProfile(ctx context.Context, profile *models.ClusterProfile) error
@@ -40,13 +35,14 @@ type Store interface {
 	DeleteProfile(ctx context.Context, id uuid.UUID) error
 	LockProfile(ctx context.Context, id uuid.UUID) error
 
-	// Deployment Groups
-	CreateDeploymentGroup(ctx context.Context, dg *models.DeploymentGroup) error
-	GetDeploymentGroup(ctx context.Context, id uuid.UUID) (*models.DeploymentGroup, error)
-	ListDeploymentGroups(ctx context.Context) ([]*models.DeploymentGroup, error)
-	UpdateDeploymentGroup(ctx context.Context, dg *models.DeploymentGroup) error
-	DeleteDeploymentGroup(ctx context.Context, id uuid.UUID) error
-	GetClusterConfigsByDeploymentGroup(ctx context.Context, dgID uuid.UUID) ([]*models.ClusterConfig, error)
+	// Deployment Rules
+	CreateDeploymentRule(ctx context.Context, rule *models.DeploymentRule) error
+	GetDeploymentRule(ctx context.Context, id uuid.UUID) (*models.DeploymentRule, error)
+	ListDeploymentRules(ctx context.Context) ([]*models.DeploymentRule, error)
+	UpdateDeploymentRule(ctx context.Context, rule *models.DeploymentRule) error
+	DeleteDeploymentRule(ctx context.Context, id uuid.UUID) error
+	GetClusterConfigsByDeploymentRule(ctx context.Context, ruleID uuid.UUID) ([]*models.ClusterConfig, error)
+	GetDeploymentRulesByProfile(ctx context.Context, profileID uuid.UUID) ([]*models.DeploymentRule, error)
 
 	// Health
 	UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error

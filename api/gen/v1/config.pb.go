@@ -401,10 +401,12 @@ type ClusterConfig struct {
 	PgParams      map[string]string      `protobuf:"bytes,7,rep,name=pg_params,json=pgParams,proto3" json:"pg_params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	HbaRules      []string               `protobuf:"bytes,8,rep,name=hba_rules,json=hbaRules,proto3" json:"hba_rules,omitempty"`
 	ConfigVersion int64                  `protobuf:"varint,9,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`
-	Archive       *ArchiveSpec           `protobuf:"bytes,10,opt,name=archive,proto3" json:"archive,omitempty"`                         // optional WAL archiving config
-	Databases     []*DatabaseSpec        `protobuf:"bytes,11,rep,name=databases,proto3" json:"databases,omitempty"`                     // databases to create with their owner users
-	Failover      *FailoverSpec          `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`                       // optional automatic failover sidecar
-	WalStorage    *StorageSpec           `protobuf:"bytes,13,opt,name=wal_storage,json=walStorage,proto3" json:"wal_storage,omitempty"` // optional separate WAL volume
+	Archive       *ArchiveSpec           `protobuf:"bytes,10,opt,name=archive,proto3" json:"archive,omitempty"`                                                                                                            // optional WAL archiving config
+	Databases     []*DatabaseSpec        `protobuf:"bytes,11,rep,name=databases,proto3" json:"databases,omitempty"`                                                                                                        // databases to create with their owner users
+	Failover      *FailoverSpec          `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`                                                                                                          // optional automatic failover sidecar
+	WalStorage    *StorageSpec           `protobuf:"bytes,13,opt,name=wal_storage,json=walStorage,proto3" json:"wal_storage,omitempty"`                                                                                    // optional separate WAL volume
+	ProfileName   string                 `protobuf:"bytes,14,opt,name=profile_name,json=profileName,proto3" json:"profile_name,omitempty"`                                                                                 // name of the source profile (for K8s labels)
+	LabelSelector map[string]string      `protobuf:"bytes,15,rep,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // deployment rule label selector (for K8s labels)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -526,6 +528,20 @@ func (x *ClusterConfig) GetFailover() *FailoverSpec {
 func (x *ClusterConfig) GetWalStorage() *StorageSpec {
 	if x != nil {
 		return x.WalStorage
+	}
+	return nil
+}
+
+func (x *ClusterConfig) GetProfileName() string {
+	if x != nil {
+		return x.ProfileName
+	}
+	return ""
+}
+
+func (x *ClusterConfig) GetLabelSelector() map[string]string {
+	if x != nil {
+		return x.LabelSelector
 	}
 	return nil
 }
@@ -1080,7 +1096,7 @@ const file_config_proto_rawDesc = "" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12%\n" +
 	"\x0econfig_version\x18\x02 \x01(\x03R\rconfigVersion\x12\x18\n" +
 	"\asuccess\x18\x03 \x01(\bR\asuccess\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xaf\x05\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xe9\x06\n" +
 	"\rClusterConfig\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1a\n" +
@@ -1096,8 +1112,13 @@ const file_config_proto_rawDesc = "" +
 	"\tdatabases\x18\v \x03(\v2\x18.pgswarm.v1.DatabaseSpecR\tdatabases\x124\n" +
 	"\bfailover\x18\f \x01(\v2\x18.pgswarm.v1.FailoverSpecR\bfailover\x128\n" +
 	"\vwal_storage\x18\r \x01(\v2\x17.pgswarm.v1.StorageSpecR\n" +
-	"walStorage\x1a;\n" +
+	"walStorage\x12!\n" +
+	"\fprofile_name\x18\x0e \x01(\tR\vprofileName\x12S\n" +
+	"\x0elabel_selector\x18\x0f \x03(\v2,.pgswarm.v1.ClusterConfig.LabelSelectorEntryR\rlabelSelector\x1a;\n" +
 	"\rPgParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a@\n" +
+	"\x12LabelSelectorEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\">\n" +
 	"\fPostgresSpec\x12\x18\n" +
@@ -1150,7 +1171,7 @@ func file_config_proto_rawDescGZIP() []byte {
 	return file_config_proto_rawDescData
 }
 
-var file_config_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_config_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_config_proto_goTypes = []any{
 	(*SatelliteMessage)(nil),      // 0: pgswarm.v1.SatelliteMessage
 	(*CentralMessage)(nil),        // 1: pgswarm.v1.CentralMessage
@@ -1168,20 +1189,21 @@ var file_config_proto_goTypes = []any{
 	(*FailoverSpec)(nil),          // 13: pgswarm.v1.FailoverSpec
 	(*DeleteCluster)(nil),         // 14: pgswarm.v1.DeleteCluster
 	nil,                           // 15: pgswarm.v1.ClusterConfig.PgParamsEntry
-	(*ClusterHealthReport)(nil),   // 16: pgswarm.v1.ClusterHealthReport
-	(*EventReport)(nil),           // 17: pgswarm.v1.EventReport
-	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
+	nil,                           // 16: pgswarm.v1.ClusterConfig.LabelSelectorEntry
+	(*ClusterHealthReport)(nil),   // 17: pgswarm.v1.ClusterHealthReport
+	(*EventReport)(nil),           // 18: pgswarm.v1.EventReport
+	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
 }
 var file_config_proto_depIdxs = []int32{
 	2,  // 0: pgswarm.v1.SatelliteMessage.heartbeat:type_name -> pgswarm.v1.Heartbeat
-	16, // 1: pgswarm.v1.SatelliteMessage.health_report:type_name -> pgswarm.v1.ClusterHealthReport
-	17, // 2: pgswarm.v1.SatelliteMessage.event_report:type_name -> pgswarm.v1.EventReport
+	17, // 1: pgswarm.v1.SatelliteMessage.health_report:type_name -> pgswarm.v1.ClusterHealthReport
+	18, // 2: pgswarm.v1.SatelliteMessage.event_report:type_name -> pgswarm.v1.EventReport
 	4,  // 3: pgswarm.v1.SatelliteMessage.config_ack:type_name -> pgswarm.v1.ConfigAck
 	5,  // 4: pgswarm.v1.CentralMessage.cluster_config:type_name -> pgswarm.v1.ClusterConfig
 	14, // 5: pgswarm.v1.CentralMessage.delete_cluster:type_name -> pgswarm.v1.DeleteCluster
 	3,  // 6: pgswarm.v1.CentralMessage.heartbeat_ack:type_name -> pgswarm.v1.HeartbeatAck
-	18, // 7: pgswarm.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	18, // 8: pgswarm.v1.HeartbeatAck.timestamp:type_name -> google.protobuf.Timestamp
+	19, // 7: pgswarm.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	19, // 8: pgswarm.v1.HeartbeatAck.timestamp:type_name -> google.protobuf.Timestamp
 	6,  // 9: pgswarm.v1.ClusterConfig.postgres:type_name -> pgswarm.v1.PostgresSpec
 	7,  // 10: pgswarm.v1.ClusterConfig.storage:type_name -> pgswarm.v1.StorageSpec
 	8,  // 11: pgswarm.v1.ClusterConfig.resources:type_name -> pgswarm.v1.ResourceSpec
@@ -1190,15 +1212,16 @@ var file_config_proto_depIdxs = []int32{
 	9,  // 14: pgswarm.v1.ClusterConfig.databases:type_name -> pgswarm.v1.DatabaseSpec
 	13, // 15: pgswarm.v1.ClusterConfig.failover:type_name -> pgswarm.v1.FailoverSpec
 	7,  // 16: pgswarm.v1.ClusterConfig.wal_storage:type_name -> pgswarm.v1.StorageSpec
-	11, // 17: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
-	12, // 18: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
-	0,  // 19: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
-	1,  // 20: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
-	20, // [20:21] is the sub-list for method output_type
-	19, // [19:20] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	16, // 17: pgswarm.v1.ClusterConfig.label_selector:type_name -> pgswarm.v1.ClusterConfig.LabelSelectorEntry
+	11, // 18: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
+	12, // 19: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
+	0,  // 20: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
+	1,  // 21: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
+	21, // [21:22] is the sub-list for method output_type
+	20, // [20:21] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_config_proto_init() }
@@ -1224,7 +1247,7 @@ func file_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_config_proto_rawDesc), len(file_config_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

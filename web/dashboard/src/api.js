@@ -24,12 +24,13 @@ export const api = {
   updateProfile: (id, data) => request('/profiles/' + id, { method: 'PUT', body: JSON.stringify(data) }),
   deleteProfile: (id)   => request('/profiles/' + id, { method: 'DELETE' }),
   cloneProfile:  (id, name) => request('/profiles/' + id + '/clone', { method: 'POST', body: JSON.stringify({ name }) }),
-  deploymentGroups: () => request('/deployment-groups'),
-  createDeploymentGroup: (data) => request('/deployment-groups', { method: 'POST', body: JSON.stringify(data) }),
-  getDeploymentGroup: (id) => request('/deployment-groups/' + id),
-  updateDeploymentGroup: (id, data) => request('/deployment-groups/' + id, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteDeploymentGroup: (id) => request('/deployment-groups/' + id, { method: 'DELETE' }),
-  deploymentGroupClusters: (id) => request('/deployment-groups/' + id + '/clusters'),
+  updateSatelliteLabels: (id, labels) => request('/satellites/' + id + '/labels', { method: 'PUT', body: JSON.stringify({ labels }) }),
+  deploymentRules: () => request('/deployment-rules'),
+  createDeploymentRule: (data) => request('/deployment-rules', { method: 'POST', body: JSON.stringify(data) }),
+  getDeploymentRule: (id) => request('/deployment-rules/' + id),
+  updateDeploymentRule: (id, data) => request('/deployment-rules/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteDeploymentRule: (id) => request('/deployment-rules/' + id, { method: 'DELETE' }),
+  deploymentRuleClusters: (id) => request('/deployment-rules/' + id + '/clusters'),
 };
 
 const HEARTBEAT_TIMEOUT_S = 60;

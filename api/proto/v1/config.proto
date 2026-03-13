@@ -57,6 +57,8 @@ message ClusterConfig {
   repeated DatabaseSpec databases = 11; // databases to create with their owner users
   FailoverSpec failover = 12;            // optional automatic failover sidecar
   StorageSpec wal_storage = 13;          // optional separate WAL volume
+  string profile_name = 14;                      // name of the source profile (for K8s labels)
+  map<string, string> label_selector = 15;       // deployment rule label selector (for K8s labels)
 }
 
 message PostgresSpec {
