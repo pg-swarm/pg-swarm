@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package pgswarm.v1;
+
+option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
+
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+message ClusterHealthReport {
+  string cluster_name = 1;
+  ClusterState state = 2;
+  repeated InstanceHealth instances = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message InstanceHealth {
+  string pod_name = 1;
+  InstanceRole role = 2;
+  bool ready = 3;
+  int64 replication_lag_bytes = 4;
+  string error_message = 5;
+}
+
+message EventReport {
+  string cluster_name = 1;
+  string severity = 2; // info, warning, error, critical
+  string message = 3;
+  string source = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}

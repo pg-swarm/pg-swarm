@@ -1,0 +1,161 @@
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: pg-swarm
+    app.kubernetes.io/name: postgresql
+    pg-swarm.io/cluster: my-pg
+  name: my-pg
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: pg-swarm
+      app.kubernetes.io/name: postgresql
+      pg-swarm.io/cluster: my-pg
+  serviceName: my-pg-headless
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: pg-swarm
+        app.kubernetes.io/name: postgresql
+        pg-swarm.io/cluster: my-pg
+    spec:
+      containers:
+      - env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: superuser-password
+              name: my-pg-secret
+        image: postgres:17-alpine
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - postgres
+          failureThreshold: 6
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        name: postgres
+        ports:
+        - containerPort: 5432
+          name: postgres
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - postgres
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 250m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: data
+        - mountPath: /etc/pg-config
+          name: config
+          readOnly: true
+      initContainers:
+      - command:
+        - bash
+        - -c
+        - |
+          #!/bin/bash
+          set -e
+
+          ORDINAL=${POD_NAME##*-}
+          PGDATA="/var/lib/postgresql/data/pgdata"
+
+          # Idempotent: skip if already initialized
+          if [ -f "$PGDATA/PG_VERSION" ]; then
+              echo "PGDATA already initialized, copying config only"
+              cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+              cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+              exit 0
+          fi
+
+          if [ "$ORDINAL" = "0" ]; then
+              echo "Initializing primary (ordinal 0)"
+              initdb -D "$PGDATA" --auth-local=trust --auth-host=md5
+
+              # Set superuser password
+              pg_ctl -D "$PGDATA" start -w -o "-c listen_addresses='localhost'"
+              psql -U postgres -c "ALTER USER postgres PASSWORD '$POSTGRES_PASSWORD';"
+              psql -U postgres -c "CREATE ROLE repl_user WITH REPLICATION LOGIN PASSWORD '$REPLICATION_PASSWORD';"
+
+              pg_ctl -D "$PGDATA" stop -w
+
+              # Copy config
+              cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+              cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+          else
+              echo "Initializing replica (ordinal $ORDINAL)"
+              PRIMARY_HOST="my-pg-0.my-pg-headless.default.svc.cluster.local"
+              until pg_isready -h "$PRIMARY_HOST" -U postgres; do
+                  echo "Waiting for primary..."
+                  sleep 2
+              done
+              PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                  -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
+              cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+              cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+          fi
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: superuser-password
+              name: my-pg-secret
+        - name: REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: replication-password
+              name: my-pg-secret
+        image: postgres:17-alpine
+        name: pg-init
+        resources: {}
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: data
+        - mountPath: /etc/pg-config
+          name: config
+      volumes:
+      - configMap:
+          name: my-pg-config
+        name: config
+      - name: secret
+        secret:
+          secretName: my-pg-secret
+  updateStrategy: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+    status: {}
+status:
+  availableReplicas: 0
+  replicas: 0

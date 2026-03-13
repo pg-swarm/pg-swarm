@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pgswarm
+      POSTGRES_PASSWORD: pgswarm
+      POSTGRES_DB: pgswarm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgswarm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  central:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.central
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: pgswarm
+      PG_PASSWORD: pgswarm
+      PG_DB: pgswarm
+      PG_SSL_MODE: disable
+      GRPC_ADDR: ":9090"
+      HTTP_ADDR: ":8080"
+    ports:
+      - "9090:9090"
+      - "8080:8080"
+
+  satellite:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.satellite
+    restart: unless-stopped
+    depends_on:
+      - central
+    environment:
+      CENTRAL_ADDR: central:9090
+      K8S_CLUSTER_NAME: local-dev
+      REGION: local
+      DATA_DIR: /var/lib/pg-swarm
+    volumes:
+      - satellite_data:/var/lib/pg-swarm
+
+volumes:
+  postgres_data:
+  satellite_data:

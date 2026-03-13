@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package pgswarm.v1;
+
+option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
+
+service RegistrationService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc CheckApproval(CheckApprovalRequest) returns (CheckApprovalResponse);
+}
+
+message RegisterRequest {
+  string hostname = 1;
+  string k8s_cluster_name = 2;
+  string region = 3;
+  map<string, string> labels = 4;
+}
+
+message RegisterResponse {
+  string satellite_id = 1;
+  string temp_token = 2;
+}
+
+message CheckApprovalRequest {
+  string satellite_id = 1;
+  string temp_token = 2;
+}
+
+message CheckApprovalResponse {
+  bool approved = 1;
+  string auth_token = 2; // empty if not yet approved
+}

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package pgswarm.v1;
+
+option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
+
+import "google/protobuf/timestamp.proto";
+
+enum SatelliteState {
+  SATELLITE_STATE_UNSPECIFIED = 0;
+  SATELLITE_STATE_PENDING = 1;
+  SATELLITE_STATE_APPROVED = 2;
+  SATELLITE_STATE_CONNECTED = 3;
+  SATELLITE_STATE_DISCONNECTED = 4;
+}
+
+enum ClusterState {
+  CLUSTER_STATE_UNSPECIFIED = 0;
+  CLUSTER_STATE_CREATING = 1;
+  CLUSTER_STATE_RUNNING = 2;
+  CLUSTER_STATE_DEGRADED = 3;
+  CLUSTER_STATE_FAILED = 4;
+  CLUSTER_STATE_DELETING = 5;
+}
+
+enum InstanceRole {
+  INSTANCE_ROLE_UNSPECIFIED = 0;
+  INSTANCE_ROLE_PRIMARY = 1;
+  INSTANCE_ROLE_REPLICA = 2;
+  INSTANCE_ROLE_FAILED_PRIMARY = 3;
+}

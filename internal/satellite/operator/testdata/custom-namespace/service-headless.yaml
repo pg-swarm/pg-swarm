@@ -1,0 +1,20 @@
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: pg-swarm
+    app.kubernetes.io/name: postgresql
+    pg-swarm.io/cluster: edge-pg
+  name: edge-pg-headless
+  namespace: tenant-alpha
+spec:
+  clusterIP: None
+  ports:
+  - name: postgres
+    port: 5432
+    protocol: TCP
+    targetPort: 5432
+  selector:
+    app.kubernetes.io/managed-by: pg-swarm
+    app.kubernetes.io/name: postgresql
+    pg-swarm.io/cluster: edge-pg
+status:
+  loadBalancer: {}

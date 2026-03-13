@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package pgswarm.v1;
+
+option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
+
+import "google/protobuf/timestamp.proto";
+import "health.proto";
+
+service SatelliteStreamService {
+  rpc Connect(stream SatelliteMessage) returns (stream CentralMessage);
+}
+
+message SatelliteMessage {
+  oneof payload {
+    Heartbeat heartbeat = 1;
+    ClusterHealthReport health_report = 2;
+    EventReport event_report = 3;
+    ConfigAck config_ack = 4;
+  }
+}
+
+message CentralMessage {
+  oneof payload {
+    ClusterConfig cluster_config = 1;
+    DeleteCluster delete_cluster = 2;
+    HeartbeatAck heartbeat_ack = 3;
+  }
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp timestamp = 1;
+}
+
+message HeartbeatAck {
+  google.protobuf.Timestamp timestamp = 1;
+}
+
+message ConfigAck {
+  string cluster_name = 1;
+  int64 config_version = 2;
+  bool success = 3;
+  string error_message = 4;
+}
+
+message ClusterConfig {
+  string cluster_name = 1;
+  string namespace = 2;
+  int32 replicas = 3;
+  PostgresSpec postgres = 4;
+  StorageSpec storage = 5;
+  ResourceSpec resources = 6;
+  map<string, string> pg_params = 7;
+  repeated string hba_rules = 8;
+  int64 config_version = 9;
+  ArchiveSpec archive = 10;           // optional WAL archiving config
+  repeated DatabaseSpec databases = 11; // databases to create with their owner users
+  FailoverSpec failover = 12;            // optional automatic failover sidecar
+}
+
+message PostgresSpec {
+  string version = 1;
+  string image = 2;
+}
+
+message StorageSpec {
+  string size = 1;
+  string storage_class = 2;
+}
+
+message ResourceSpec {
+  string cpu_request = 1;
+  string cpu_limit = 2;
+  string memory_request = 3;
+  string memory_limit = 4;
+}
+
+message DatabaseSpec {
+  string name = 1;       // database name
+  string user = 2;       // owner username
+  string password = 3;   // user password
+}
+
+message ArchiveSpec {
+  string mode = 1;                          // "pvc" or "custom"; empty = disabled
+  string archive_command = 2;               // required for "custom"
+  string restore_command = 3;               // optional for "custom"
+  int32 archive_timeout_seconds = 4;        // default 60
+  ArchiveStorageSpec archive_storage = 5;   // for "pvc" mode
+  SecretRef credentials_secret = 6;         // for "custom" mode
+}
+
+message ArchiveStorageSpec {
+  string size = 1;
+  string storage_class = 2;
+}
+
+message SecretRef {
+  string name = 1;  // existing K8s Secret in cluster namespace
+}
+
+message FailoverSpec {
+  bool enabled = 1;
+  int32 health_check_interval_seconds = 2; // default 5
+  string sidecar_image = 3;                // default: pg-swarm-failover:latest
+}
+
+message DeleteCluster {
+  string cluster_name = 1;
+  string namespace = 2;
+}

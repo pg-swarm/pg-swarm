@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: pgswarm-system
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: pg-swarm
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: pg
+      name: pg
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: pgswarm-system
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: pg-swarm
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: pg
+      name: pg

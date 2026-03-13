@@ -1,0 +1,105 @@
+# Role: allows the satellite to create/update its own identity secret in the
+# system namespace. Scoped to the exact secret name so it cannot touch other
+# secrets in pgswarm-system. Note: 'create' cannot be restricted by
+# resourceNames (K8s limitation), so it is listed in a separate rule.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pg-swarm-satellite-identity
+  namespace: pgswarm-system
+  labels:
+    app.kubernetes.io/part-of: pg-swarm
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["pg-swarm-satellite-identity"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pg-swarm-satellite-identity
+  namespace: pgswarm-system
+  labels:
+    app.kubernetes.io/part-of: pg-swarm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pg-swarm-satellite-identity
+subjects:
+  - kind: ServiceAccount
+    name: pg-swarm-satellite
+    namespace: pgswarm-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pg-swarm-satellite
+  namespace: pgswarm-system
+  labels:
+    app.kubernetes.io/part-of: pg-swarm
+---
+# ClusterRole grants the satellite permission to manage PG cluster resources
+# (StatefulSets, Services, ConfigMaps, Secrets) across all namespaces it
+# is configured to deploy into.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pg-swarm-satellite
+  labels:
+    app.kubernetes.io/part-of: pg-swarm
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "create", "update", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "create", "update", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pg-swarm-satellite
+  labels:
+    app.kubernetes.io/part-of: pg-swarm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pg-swarm-satellite
+subjects:
+  - kind: ServiceAccount
+    name: pg-swarm-satellite
+    namespace: pgswarm-system

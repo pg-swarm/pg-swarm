@@ -1,0 +1,43 @@
+data:
+  config.json: |-
+    {
+      "clusterName":  "my-pg-wal",
+      "namespace":  "default",
+      "replicas":  3,
+      "postgres":  {
+        "version":  "17",
+        "image":  "postgres:17-alpine"
+      },
+      "storage":  {
+        "size":  "10Gi"
+      },
+      "resources":  {
+        "cpuRequest":  "250m",
+        "cpuLimit":  "1",
+        "memoryRequest":  "512Mi",
+        "memoryLimit":  "1Gi"
+      },
+      "pgParams":  {
+        "shared_buffers":  "256MB",
+        "work_mem":  "16MB"
+      },
+      "hbaRules":  [
+        "host all app_user 10.0.0.0/8 md5"
+      ],
+      "configVersion":  "1",
+      "archive":  {
+        "mode":  "pvc",
+        "archiveTimeoutSeconds":  120,
+        "archiveStorage":  {
+          "size":  "50Gi",
+          "storageClass":  "fast-ssd"
+        }
+      }
+    }
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: pg-swarm
+    app.kubernetes.io/name: postgresql
+    pg-swarm.io/cluster: my-pg-wal
+  name: pg-swarm-minikube-my-pg-wal
+  namespace: default

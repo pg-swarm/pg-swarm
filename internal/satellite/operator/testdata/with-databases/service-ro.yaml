@@ -1,0 +1,20 @@
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: pg-swarm
+    app.kubernetes.io/name: postgresql
+    pg-swarm.io/cluster: app-pg
+  name: app-pg-ro
+  namespace: default
+spec:
+  ports:
+  - name: postgres
+    port: 5432
+    protocol: TCP
+    targetPort: 5432
+  selector:
+    app.kubernetes.io/managed-by: pg-swarm
+    app.kubernetes.io/name: postgresql
+    pg-swarm.io/cluster: app-pg
+    pg-swarm.io/role: replica
+status:
+  loadBalancer: {}
