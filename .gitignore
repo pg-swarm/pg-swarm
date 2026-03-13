@@ -39,6 +39,9 @@ web/dashboard/node_modules/
 # Dashboard build output (generated from web/dashboard/)
 web/static/
 
+# Local dev PID files
+.run/
+
 # Environment / secrets
 .env
 .env.*

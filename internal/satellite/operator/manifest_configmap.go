@@ -19,7 +19,8 @@ var mandatoryPgParams = map[string]string{
 	"max_wal_senders":     "10",
 	"max_replication_slots": "10",
 	"hot_standby":         "on",
-	"wal_log_hints":       "on",
+	"wal_log_hints":            "on",
+	"max_slot_wal_keep_size":   "-1",
 }
 
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.

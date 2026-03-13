@@ -401,9 +401,10 @@ type ClusterConfig struct {
 	PgParams      map[string]string      `protobuf:"bytes,7,rep,name=pg_params,json=pgParams,proto3" json:"pg_params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	HbaRules      []string               `protobuf:"bytes,8,rep,name=hba_rules,json=hbaRules,proto3" json:"hba_rules,omitempty"`
 	ConfigVersion int64                  `protobuf:"varint,9,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`
-	Archive       *ArchiveSpec           `protobuf:"bytes,10,opt,name=archive,proto3" json:"archive,omitempty"`     // optional WAL archiving config
-	Databases     []*DatabaseSpec        `protobuf:"bytes,11,rep,name=databases,proto3" json:"databases,omitempty"` // databases to create with their owner users
-	Failover      *FailoverSpec          `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`   // optional automatic failover sidecar
+	Archive       *ArchiveSpec           `protobuf:"bytes,10,opt,name=archive,proto3" json:"archive,omitempty"`                         // optional WAL archiving config
+	Databases     []*DatabaseSpec        `protobuf:"bytes,11,rep,name=databases,proto3" json:"databases,omitempty"`                     // databases to create with their owner users
+	Failover      *FailoverSpec          `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`                       // optional automatic failover sidecar
+	WalStorage    *StorageSpec           `protobuf:"bytes,13,opt,name=wal_storage,json=walStorage,proto3" json:"wal_storage,omitempty"` // optional separate WAL volume
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -518,6 +519,13 @@ func (x *ClusterConfig) GetDatabases() []*DatabaseSpec {
 func (x *ClusterConfig) GetFailover() *FailoverSpec {
 	if x != nil {
 		return x.Failover
+	}
+	return nil
+}
+
+func (x *ClusterConfig) GetWalStorage() *StorageSpec {
+	if x != nil {
+		return x.WalStorage
 	}
 	return nil
 }
@@ -1072,7 +1080,7 @@ const file_config_proto_rawDesc = "" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12%\n" +
 	"\x0econfig_version\x18\x02 \x01(\x03R\rconfigVersion\x12\x18\n" +
 	"\asuccess\x18\x03 \x01(\bR\asuccess\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xf5\x04\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xaf\x05\n" +
 	"\rClusterConfig\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1a\n" +
@@ -1086,7 +1094,9 @@ const file_config_proto_rawDesc = "" +
 	"\aarchive\x18\n" +
 	" \x01(\v2\x17.pgswarm.v1.ArchiveSpecR\aarchive\x126\n" +
 	"\tdatabases\x18\v \x03(\v2\x18.pgswarm.v1.DatabaseSpecR\tdatabases\x124\n" +
-	"\bfailover\x18\f \x01(\v2\x18.pgswarm.v1.FailoverSpecR\bfailover\x1a;\n" +
+	"\bfailover\x18\f \x01(\v2\x18.pgswarm.v1.FailoverSpecR\bfailover\x128\n" +
+	"\vwal_storage\x18\r \x01(\v2\x17.pgswarm.v1.StorageSpecR\n" +
+	"walStorage\x1a;\n" +
 	"\rPgParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\">\n" +
@@ -1179,15 +1189,16 @@ var file_config_proto_depIdxs = []int32{
 	10, // 13: pgswarm.v1.ClusterConfig.archive:type_name -> pgswarm.v1.ArchiveSpec
 	9,  // 14: pgswarm.v1.ClusterConfig.databases:type_name -> pgswarm.v1.DatabaseSpec
 	13, // 15: pgswarm.v1.ClusterConfig.failover:type_name -> pgswarm.v1.FailoverSpec
-	11, // 16: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
-	12, // 17: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
-	0,  // 18: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
-	1,  // 19: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
-	19, // [19:20] is the sub-list for method output_type
-	18, // [18:19] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	7,  // 16: pgswarm.v1.ClusterConfig.wal_storage:type_name -> pgswarm.v1.StorageSpec
+	11, // 17: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
+	12, // 18: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
+	0,  // 19: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
+	1,  // 20: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
+	20, // [20:21] is the sub-list for method output_type
+	19, // [19:20] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_config_proto_init() }

@@ -13,12 +13,23 @@ async function request(path, opts = {}) {
 }
 
 export const api = {
-  satellites:  ()   => request('/satellites'),
-  clusters:    ()   => request('/clusters'),
-  health:      ()   => request('/health'),
-  events:      (n)  => request('/events?limit=' + (n || 50)),
-  approve:     (id) => request('/satellites/' + id + '/approve', { method: 'POST' }),
-  reject:      (id) => request('/satellites/' + id + '/reject',  { method: 'POST' }),
+  satellites:  ()       => request('/satellites'),
+  clusters:    ()       => request('/clusters'),
+  health:      ()       => request('/health'),
+  events:      (n)      => request('/events?limit=' + (n || 50)),
+  approve:     (id)     => request('/satellites/' + id + '/approve', { method: 'POST' }),
+  reject:      (id)     => request('/satellites/' + id + '/reject',  { method: 'POST' }),
+  profiles:    ()       => request('/profiles'),
+  createProfile: (data) => request('/profiles', { method: 'POST', body: JSON.stringify(data) }),
+  updateProfile: (id, data) => request('/profiles/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteProfile: (id)   => request('/profiles/' + id, { method: 'DELETE' }),
+  cloneProfile:  (id, name) => request('/profiles/' + id + '/clone', { method: 'POST', body: JSON.stringify({ name }) }),
+  deploymentGroups: () => request('/deployment-groups'),
+  createDeploymentGroup: (data) => request('/deployment-groups', { method: 'POST', body: JSON.stringify(data) }),
+  getDeploymentGroup: (id) => request('/deployment-groups/' + id),
+  updateDeploymentGroup: (id, data) => request('/deployment-groups/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteDeploymentGroup: (id) => request('/deployment-groups/' + id, { method: 'DELETE' }),
+  deploymentGroupClusters: (id) => request('/deployment-groups/' + id + '/clusters'),
 };
 
 const HEARTBEAT_TIMEOUT_S = 60;
