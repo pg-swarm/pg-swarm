@@ -242,6 +242,7 @@ export default function Clusters() {
                 {sat ? sat.hostname : (c.satellite_id ? c.satellite_id.substring(0, 8) : 'unassigned')}
               </span>
               <span>v{c.config_version}</span>
+              <span title={c.created_at ? new Date(c.created_at).toLocaleString() : ''}>created {timeAgo(c.created_at)}</span>
               <span>{timeAgo(c.updated_at)}</span>
               <button
                 className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-pause'}`}
@@ -352,12 +353,14 @@ function InstanceDetailModal({ inst, storageSpec, onClose }) {
             <div className="report-grid">
               <ReportRow label="Ready" value={inst.ready ? 'Yes' : 'No'} />
               <ReportRow label="Timeline" value={inst.timeline_id || '-'} />
-              <ReportRow label="Connections" value={inst.connections_max > 0 ? `${inst.connections_used} / ${inst.connections_max}` : '-'} />
+              <ReportRow label="Connections" value={inst.connections_max > 0 ? `${inst.connections_used} / ${inst.connections_max} (${inst.connections_active || 0} active)` : '-'} />
               <ReportRow label="Replication Lag" value={
                 inst.role === 'replica' && inst.replication_lag_seconds > 0
                   ? formatLagTime(inst.replication_lag_seconds)
                   : formatLag(inst.replication_lag_bytes)
               } />
+              {inst.index_hit_ratio > 0 && <ReportRow label="Index Hit Ratio" value={<CacheHitBadge pct={inst.index_hit_ratio * 100} />} />}
+              {inst.txn_commit_ratio > 0 && <ReportRow label="Txn Commit Ratio" value={<CacheHitBadge pct={inst.txn_commit_ratio * 100} />} />}
               {inst.pg_start_time && <ReportRow label="PG Start Time" value={new Date(inst.pg_start_time).toLocaleString()} />}
               {inst.role === 'replica' && <ReportRow label="WAL Receiver" value={inst.wal_receiver_active ? 'Streaming' : 'Disconnected'} />}
               {inst.error_message && <ReportRow label="Error" value={inst.error_message} />}

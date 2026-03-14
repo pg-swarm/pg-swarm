@@ -19,6 +19,11 @@ import (
 )
 
 // Monitor periodically checks the health of managed PostgreSQL clusters.
+// clusterStartGrace is how long a cluster is allowed to be not-fully-ready
+// before it transitions from CREATING to FAILED.
+const clusterStartGrace = 10 * time.Minute
+
+// Monitor periodically checks the health of all managed PostgreSQL clusters.
 type Monitor struct {
 	client     kubernetes.Interface
 	operator   *operator.Operator
@@ -26,6 +31,7 @@ type Monitor struct {
 	onEvent    func(*pgswarmv1.EventReport)
 	interval   time.Duration
 	lastStates map[string]pgswarmv1.ClusterState
+	firstSeen  map[string]time.Time // tracks when each cluster was first observed
 }
 
 // New creates a new health Monitor.
@@ -35,6 +41,7 @@ func New(client kubernetes.Interface, op *operator.Operator, interval time.Durat
 		operator:   op,
 		interval:   interval,
 		lastStates: make(map[string]pgswarmv1.ClusterState),
+		firstSeen:  make(map[string]time.Time),
 	}
 }
 
@@ -103,6 +110,13 @@ func (m *Monitor) checkAll(ctx context.Context) {
 }
 
 func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) *pgswarmv1.ClusterHealthReport {
+	clusterKey := mc.Namespace + "/" + mc.ClusterName
+
+	// Track when we first observed this cluster for the startup grace period.
+	if _, ok := m.firstSeen[clusterKey]; !ok {
+		m.firstSeen[clusterKey] = time.Now()
+	}
+
 	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
@@ -132,7 +146,8 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	}
 	wg.Wait()
 
-	state := DeriveClusterState(instances, mc.Replicas)
+	age := time.Since(m.firstSeen[clusterKey])
+	state := DeriveClusterState(instances, mc.Replicas, age)
 	if mc.Paused {
 		state = pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED
 	}
@@ -245,10 +260,19 @@ func (m *Monitor) checkInstance(ctx context.Context, pod *corev1.Pod, namespace,
 	// 8. WAL on-disk size
 	m.collectWalDiskSize(ctx, conn, ih)
 
-	// 9. Per-database sizes and table statistics
+	// 9. Index hit ratio (from pg_statio_user_indexes)
+	m.collectIndexHitRatio(ctx, conn, ih)
+
+	// 10. Transaction commit ratio (from pg_stat_database)
+	m.collectTxnCommitRatio(ctx, conn, ih)
+
+	// 11. Active connections (from pg_stat_activity)
+	m.collectActiveConnections(ctx, conn, ih)
+
+	// 12. Per-database sizes and table statistics
 	m.collectDatabaseStats(ctx, conn, ih, host, password)
 
-	// 10. Slow queries (pg_stat_statements — requires extension)
+	// 13. Slow queries (pg_stat_statements — requires extension)
 	m.collectSlowQueries(ctx, conn, ih)
 
 	return ih
@@ -316,6 +340,47 @@ func (m *Monitor) collectWalDiskSize(ctx context.Context, conn *pgx.Conn, ih *pg
 		log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to read WAL disk size")
 	} else {
 		ih.WalDiskBytes = walSize
+	}
+}
+
+// collectIndexHitRatio reads the index hit ratio from pg_statio_user_indexes.
+// A value below 0.95 indicates indexes are being read from disk frequently.
+func (m *Monitor) collectIndexHitRatio(ctx context.Context, conn *pgx.Conn, ih *pgswarmv1.InstanceHealth) {
+	var ratio float64
+	err := conn.QueryRow(ctx,
+		"SELECT COALESCE(SUM(idx_blks_hit)::float / NULLIF(SUM(idx_blks_hit) + SUM(idx_blks_read), 0), 0) FROM pg_statio_user_indexes",
+	).Scan(&ratio)
+	if err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to read index hit ratio")
+	} else {
+		ih.IndexHitRatio = ratio
+	}
+}
+
+// collectTxnCommitRatio reads the transaction commit ratio from pg_stat_database.
+// A low ratio may indicate application errors, deadlocks, or excessive rollbacks.
+func (m *Monitor) collectTxnCommitRatio(ctx context.Context, conn *pgx.Conn, ih *pgswarmv1.InstanceHealth) {
+	var ratio float64
+	err := conn.QueryRow(ctx,
+		"SELECT COALESCE(xact_commit::float / NULLIF(xact_commit + xact_rollback, 0), 0) FROM pg_stat_database WHERE datname = current_database()",
+	).Scan(&ratio)
+	if err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to read txn commit ratio")
+	} else {
+		ih.TxnCommitRatio = ratio
+	}
+}
+
+// collectActiveConnections counts connections with state='active' from pg_stat_activity.
+func (m *Monitor) collectActiveConnections(ctx context.Context, conn *pgx.Conn, ih *pgswarmv1.InstanceHealth) {
+	var active int32
+	err := conn.QueryRow(ctx,
+		"SELECT COUNT(*)::int FROM pg_stat_activity WHERE state = 'active'",
+	).Scan(&active)
+	if err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to read active connections")
+	} else {
+		ih.ConnectionsActive = active
 	}
 }
 
@@ -460,8 +525,14 @@ func (m *Monitor) collectSlowQueries(ctx context.Context, conn *pgx.Conn, ih *pg
 }
 
 // DeriveClusterState determines the overall cluster state from instance health.
-func DeriveClusterState(instances []*pgswarmv1.InstanceHealth, expectedReplicas int32) pgswarmv1.ClusterState {
+// The age parameter indicates how long the cluster has been observed. Clusters
+// that are not yet fully running within clusterStartGrace (10 minutes) report
+// CREATING instead of FAILED, giving pods time to pull images and initialise.
+func DeriveClusterState(instances []*pgswarmv1.InstanceHealth, expectedReplicas int32, age time.Duration) pgswarmv1.ClusterState {
 	if len(instances) == 0 {
+		if age < clusterStartGrace {
+			return pgswarmv1.ClusterState_CLUSTER_STATE_CREATING
+		}
 		return pgswarmv1.ClusterState_CLUSTER_STATE_FAILED
 	}
 
@@ -478,6 +549,9 @@ func DeriveClusterState(instances []*pgswarmv1.InstanceHealth, expectedReplicas 
 	}
 
 	if !primaryReady {
+		if age < clusterStartGrace {
+			return pgswarmv1.ClusterState_CLUSTER_STATE_CREATING
+		}
 		return pgswarmv1.ClusterState_CLUSTER_STATE_FAILED
 	}
 
