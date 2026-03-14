@@ -150,9 +150,9 @@ spec:
         - mountPath: /wal-archive
           name: wal-archive
       securityContext:
-        fsGroup: 999
-        runAsGroup: 999
-        runAsUser: 999
+        fsGroup: 70
+        runAsGroup: 70
+        runAsUser: 70
       volumes:
       - configMap:
           name: my-pg-wal-config
@@ -163,6 +163,10 @@ spec:
   updateStrategy: {}
   volumeClaimTemplates:
   - metadata:
+      labels:
+        app.kubernetes.io/managed-by: pg-swarm
+        app.kubernetes.io/name: postgresql
+        pg-swarm.io/cluster: my-pg-wal
       name: data
     spec:
       accessModes:
@@ -172,6 +176,10 @@ spec:
           storage: 10Gi
     status: {}
   - metadata:
+      labels:
+        app.kubernetes.io/managed-by: pg-swarm
+        app.kubernetes.io/name: postgresql
+        pg-swarm.io/cluster: my-pg-wal
       name: wal-archive
     spec:
       accessModes:

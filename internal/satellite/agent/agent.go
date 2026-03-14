@@ -4,9 +4,14 @@ import (
 	"context"
 	"fmt"
 
+	"time"
+
+	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/health"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/operator"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/stream"
 	"github.com/rs/zerolog/log"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -26,6 +31,9 @@ type Config struct {
 	// DeployNamespace is the default K8s namespace for deploying PostgreSQL clusters
 	// when the cluster config does not specify one. Defaults to "default".
 	DeployNamespace string
+	// DefaultFailoverImage is the container image for the failover sidecar
+	// when the cluster config does not specify one.
+	DefaultFailoverImage string
 }
 
 // Agent manages the satellite lifecycle: registration, approval, and streaming.
@@ -73,7 +81,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// 2. Create operator (requires K8s client)
 	if a.k8sClient != nil {
-		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace)
+		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage)
 	} else {
 		log.Warn().Msg("K8s client unavailable — operator disabled, configs will be logged only")
 	}
@@ -87,7 +95,97 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.connector.OnDelete = a.operator.HandleDelete
 	}
 
+	// 5. Wire storage class callback
+	if a.k8sClient != nil {
+		a.connector.OnStorageClassRequest = a.gatherStorageClasses
+	}
+
+	// 6. Wire switchover callback
+	if a.operator != nil && a.k8sClient != nil {
+		a.connector.OnSwitchover = a.handleSwitchover
+	}
+
+	// 7. Start health monitor
+	if a.operator != nil && a.k8sClient != nil {
+		mon := health.New(a.k8sClient, a.operator, 30*time.Second)
+		mon.SetOnHealth(func(report *pgswarmv1.ClusterHealthReport) {
+			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
+				Payload: &pgswarmv1.SatelliteMessage_HealthReport{
+					HealthReport: report,
+				},
+			})
+		})
+		mon.SetOnEvent(func(event *pgswarmv1.EventReport) {
+			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
+				Payload: &pgswarmv1.SatelliteMessage_EventReport{
+					EventReport: event,
+				},
+			})
+		})
+		go mon.Run(ctx)
+	}
+
 	log.Info().Str("satellite_id", a.identity.SatelliteID).Msg("satellite agent started")
 
 	return a.connector.Run(ctx)
+}
+
+// handleSwitchover handles a switchover request from central.
+func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.SwitchoverResult {
+	if a.k8sClient == nil || a.operator == nil {
+		return &pgswarmv1.SwitchoverResult{
+			ClusterName:  req.ClusterName,
+			ErrorMessage: "K8s client or operator unavailable",
+		}
+	}
+
+	// Resolve namespace from operator if not provided
+	ns := a.operator.ResolveNamespaceForCluster(req.ClusterName, req.Namespace)
+	req.Namespace = ns
+
+	// Read the superuser password
+	secretName := req.ClusterName + "-secret"
+	secret, err := a.k8sClient.CoreV1().Secrets(ns).Get(context.Background(), secretName, metav1.GetOptions{})
+	if err != nil {
+		return &pgswarmv1.SwitchoverResult{
+			ClusterName:  req.ClusterName,
+			ErrorMessage: fmt.Sprintf("cannot read secret %s: %v", secretName, err),
+		}
+	}
+	password := string(secret.Data["superuser-password"])
+
+	return health.Switchover(context.Background(), a.k8sClient, req, password)
+}
+
+// gatherStorageClasses queries K8s for all StorageClasses and returns a proto report.
+func (a *Agent) gatherStorageClasses() *pgswarmv1.StorageClassReport {
+	if a.k8sClient == nil {
+		return nil
+	}
+
+	list, err := a.k8sClient.StorageV1().StorageClasses().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list storage classes")
+		return nil
+	}
+
+	report := &pgswarmv1.StorageClassReport{}
+	for _, sc := range list.Items {
+		info := &pgswarmv1.StorageClassInfo{
+			Name:        sc.Name,
+			Provisioner: sc.Provisioner,
+		}
+		if sc.ReclaimPolicy != nil {
+			info.ReclaimPolicy = string(*sc.ReclaimPolicy)
+		}
+		if sc.VolumeBindingMode != nil {
+			info.VolumeBindingMode = string(*sc.VolumeBindingMode)
+		}
+		if sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
+			info.IsDefault = true
+		}
+		report.StorageClasses = append(report.StorageClasses, info)
+	}
+
+	return report
 }

@@ -25,12 +25,21 @@ export const api = {
   deleteProfile: (id)   => request('/profiles/' + id, { method: 'DELETE' }),
   cloneProfile:  (id, name) => request('/profiles/' + id + '/clone', { method: 'POST', body: JSON.stringify({ name }) }),
   updateSatelliteLabels: (id, labels) => request('/satellites/' + id + '/labels', { method: 'PUT', body: JSON.stringify({ labels }) }),
+  refreshStorageClasses: (id) => request('/satellites/' + id + '/refresh-storage-classes', { method: 'POST' }),
+  pauseCluster:  (id) => request('/clusters/' + id + '/pause', { method: 'POST' }),
+  resumeCluster: (id) => request('/clusters/' + id + '/resume', { method: 'POST' }),
+  switchover:    (id, targetPod) => request('/clusters/' + id + '/switchover', { method: 'POST', body: JSON.stringify({ target_pod: targetPod }) }),
   deploymentRules: () => request('/deployment-rules'),
   createDeploymentRule: (data) => request('/deployment-rules', { method: 'POST', body: JSON.stringify(data) }),
   getDeploymentRule: (id) => request('/deployment-rules/' + id),
   updateDeploymentRule: (id, data) => request('/deployment-rules/' + id, { method: 'PUT', body: JSON.stringify(data) }),
   deleteDeploymentRule: (id) => request('/deployment-rules/' + id, { method: 'DELETE' }),
   deploymentRuleClusters: (id) => request('/deployment-rules/' + id + '/clusters'),
+  postgresVersions: () => request('/postgres-versions'),
+  createPostgresVersion: (data) => request('/postgres-versions', { method: 'POST', body: JSON.stringify(data) }),
+  updatePostgresVersion: (id, data) => request('/postgres-versions/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deletePostgresVersion: (id) => request('/postgres-versions/' + id, { method: 'DELETE' }),
+  setDefaultPostgresVersion: (id) => request('/postgres-versions/' + id + '/default', { method: 'POST' }),
 };
 
 const HEARTBEAT_TIMEOUT_S = 60;

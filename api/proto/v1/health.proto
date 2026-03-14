@@ -20,6 +20,13 @@ message InstanceHealth {
   bool ready = 3;
   int64 replication_lag_bytes = 4;
   string error_message = 5;
+  double replication_lag_seconds = 6;  // time-based lag from pg_last_xact_replay_timestamp (replicas)
+  int32 connections_used = 7;          // current connection count
+  int32 connections_max = 8;           // max_connections setting
+  int64 disk_used_bytes = 9;           // sum of pg_database_size()
+  int64 timeline_id = 10;             // pg_control_checkpoint() timeline
+  google.protobuf.Timestamp pg_start_time = 11; // pg_postmaster_start_time()
+  bool wal_receiver_active = 12;      // pg_stat_wal_receiver.status = 'streaming' (replicas)
 }
 
 message EventReport {

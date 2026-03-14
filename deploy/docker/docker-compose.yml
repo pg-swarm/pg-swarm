@@ -48,10 +48,6 @@ services:
       CENTRAL_ADDR: central:9090
       K8S_CLUSTER_NAME: local-dev
       REGION: local
-      DATA_DIR: /var/lib/pg-swarm
-    volumes:
-      - satellite_data:/var/lib/pg-swarm
 
 volumes:
   postgres_data:
-  satellite_data:

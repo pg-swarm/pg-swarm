@@ -5,22 +5,23 @@ const DataContext = createContext(null);
 
 export function DataProvider({ children }) {
   const [data, setData] = useState({
-    satellites: [], clusters: [], health: [], events: [], profiles: [], deploymentRules: [],
+    satellites: [], clusters: [], health: [], events: [], profiles: [], deploymentRules: [], postgresVersions: [],
   });
   const [lastRefresh, setLastRefresh] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [satellites, clusters, health, events, profiles, deploymentRules] = await Promise.all([
-        api.satellites(), api.clusters(), api.health(), api.events(50), api.profiles(), api.deploymentRules(),
+      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions] = await Promise.all([
+        api.satellites(), api.clusters(), api.health(), api.events(50), api.profiles(), api.deploymentRules(), api.postgresVersions(),
       ]);
       setData({
-        satellites:       satellites || [],
-        clusters:         clusters || [],
-        health:           health || [],
-        events:           events || [],
-        profiles:         profiles || [],
-        deploymentRules:  deploymentRules || [],
+        satellites:        satellites || [],
+        clusters:          clusters || [],
+        health:            health || [],
+        events:            events || [],
+        profiles:          profiles || [],
+        deploymentRules:   deploymentRules || [],
+        postgresVersions:  postgresVersions || [],
       });
       setLastRefresh(new Date());
     } catch (err) {

@@ -5,7 +5,7 @@ const SAT_COLORS = {
 
 const CLUSTER_COLORS = {
   running: 'green', creating: 'amber', degraded: 'amber',
-  failed: 'red', deleting: 'gray',
+  paused: 'amber', failed: 'red', deleting: 'gray',
 };
 
 export function SatBadge({ state }) {

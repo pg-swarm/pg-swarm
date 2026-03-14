@@ -24,21 +24,31 @@ const (
 	ClusterStateRunning  ClusterState = "running"
 	ClusterStateDegraded ClusterState = "degraded"
 	ClusterStateFailed   ClusterState = "failed"
+	ClusterStatePaused   ClusterState = "paused"
 	ClusterStateDeleting ClusterState = "deleting"
 )
 
+type StorageClassInfo struct {
+	Name              string `json:"name"`
+	Provisioner       string `json:"provisioner"`
+	ReclaimPolicy     string `json:"reclaim_policy"`
+	VolumeBindingMode string `json:"volume_binding_mode"`
+	IsDefault         bool   `json:"is_default"`
+}
+
 type Satellite struct {
-	ID             uuid.UUID         `json:"id" db:"id"`
-	Hostname       string            `json:"hostname" db:"hostname"`
-	K8sClusterName string            `json:"k8s_cluster_name" db:"k8s_cluster_name"`
-	Region         string            `json:"region" db:"region"`
-	Labels         map[string]string `json:"labels" db:"labels"`
-	State          SatelliteState    `json:"state" db:"state"`
-	AuthTokenHash  string            `json:"-" db:"auth_token_hash"`
-	TempTokenHash  string            `json:"-" db:"temp_token_hash"`
-	LastHeartbeat  *time.Time        `json:"last_heartbeat,omitempty" db:"last_heartbeat"`
-	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
+	ID             uuid.UUID          `json:"id" db:"id"`
+	Hostname       string             `json:"hostname" db:"hostname"`
+	K8sClusterName string             `json:"k8s_cluster_name" db:"k8s_cluster_name"`
+	Region         string             `json:"region" db:"region"`
+	Labels         map[string]string  `json:"labels" db:"labels"`
+	StorageClasses []StorageClassInfo `json:"storage_classes" db:"storage_classes"`
+	State          SatelliteState     `json:"state" db:"state"`
+	AuthTokenHash  string             `json:"-" db:"auth_token_hash"`
+	TempTokenHash  string             `json:"-" db:"temp_token_hash"`
+	LastHeartbeat  *time.Time         `json:"last_heartbeat,omitempty" db:"last_heartbeat"`
+	CreatedAt      time.Time          `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time          `json:"updated_at" db:"updated_at"`
 }
 
 type ClusterConfig struct {
@@ -51,6 +61,7 @@ type ClusterConfig struct {
 	Config            json.RawMessage `json:"config" db:"config"`
 	ConfigVersion     int64           `json:"config_version" db:"config_version"`
 	State             ClusterState    `json:"state" db:"state"`
+	Paused            bool            `json:"paused" db:"paused"`
 	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
 }
@@ -80,12 +91,15 @@ type ClusterSpec struct {
 	HbaRules  []string          `json:"hba_rules,omitempty"`
 	Archive   *ArchiveSpec      `json:"archive,omitempty"`   // nil = archiving disabled
 	Databases []DatabaseSpec    `json:"databases,omitempty"` // databases to create with owner users
-	Failover  *FailoverSpec     `json:"failover,omitempty"`  // nil = failover disabled
+	Failover           *FailoverSpec     `json:"failover,omitempty"`  // nil = failover disabled
+	DeletionProtection bool               `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
 }
 
 type PostgresSpec struct {
-	Version string `json:"version"`
-	Image   string `json:"image"`
+	Version  string `json:"version"`
+	Variant  string `json:"variant,omitempty"`  // "alpine" or "debian"
+	Registry string `json:"registry,omitempty"` // optional registry prefix
+	Image    string `json:"image"`              // resolved at deploy time
 }
 
 type StorageSpec struct {
@@ -203,6 +217,17 @@ func (p *ClusterProfile) ParseSpec() (*ClusterSpec, error) {
 		return nil, err
 	}
 	return &spec, nil
+}
+
+// PostgresVersion maps a major version + variant to a Docker image tag.
+type PostgresVersion struct {
+	ID        uuid.UUID `json:"id" db:"id"`
+	Version   string    `json:"version" db:"version"`
+	Variant   string    `json:"variant" db:"variant"`
+	ImageTag  string    `json:"image_tag" db:"image_tag"`
+	IsDefault bool      `json:"is_default" db:"is_default"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 type ClusterHealth struct {

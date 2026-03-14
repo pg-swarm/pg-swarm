@@ -50,10 +50,10 @@ func writeAll(t *testing.T, dir string, cfg *pgswarmv1.ClusterConfig) {
 	writeYAML(t, dir, "service-headless.yaml", buildHeadlessService(cfg))
 	writeYAML(t, dir, "service-rw.yaml", buildRWService(cfg))
 	writeYAML(t, dir, "service-ro.yaml", buildROService(cfg))
-	writeYAML(t, dir, "statefulset.yaml", buildStatefulSet(cfg, secret.Name))
+	writeYAML(t, dir, "statefulset.yaml", buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest"))
 
 	// Config-store ConfigMap (requires operator instance for naming)
-	op := New(nil, "minikube", "pg-clusters")
+	op := New(nil, "minikube", "pg-clusters", "")
 	writeYAML(t, dir, "configmap-store.yaml", op.buildConfigStore(cfg))
 }
 
@@ -169,7 +169,7 @@ func TestManifests_NoArchive(t *testing.T) {
 
 	// StatefulSet: only 1 VCT (data), no wal-archive mount
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	if n := len(sts.Spec.VolumeClaimTemplates); n != 1 {
 		t.Errorf("expected 1 VCT, got %d", n)
 	}
@@ -219,7 +219,7 @@ func TestManifests_PVCArchive(t *testing.T) {
 
 	// StatefulSet: 2 VCTs (data + wal-archive)
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	if n := len(sts.Spec.VolumeClaimTemplates); n != 2 {
 		t.Fatalf("expected 2 VCTs, got %d", n)
 	}
@@ -279,7 +279,7 @@ func TestManifests_CustomArchive(t *testing.T) {
 
 	// StatefulSet: only 1 VCT (no wal-archive PVC for custom mode)
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	if n := len(sts.Spec.VolumeClaimTemplates); n != 1 {
 		t.Errorf("custom mode should have 1 VCT (data only), got %d", n)
 	}
@@ -322,7 +322,7 @@ func TestManifests_CustomNamespace(t *testing.T) {
 	// All resources should be in tenant-alpha namespace
 	secret := buildSecret(cfg)
 	cm := buildConfigMap(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	hl := buildHeadlessService(cfg)
 	rw := buildRWService(cfg)
 	ro := buildROService(cfg)
@@ -357,7 +357,7 @@ func TestManifests_DefaultNamespaceResolution(t *testing.T) {
 	cfg.ClusterName = "orphan-pg"
 	cfg.Namespace = "" // empty
 
-	op := New(nil, "minikube", "pg-clusters")
+	op := New(nil, "minikube", "pg-clusters", "")
 	op.resolveNamespace(cfg)
 
 	if cfg.Namespace != "pg-clusters" {
@@ -366,7 +366,7 @@ func TestManifests_DefaultNamespaceResolution(t *testing.T) {
 
 	writeAll(t, "default-namespace", cfg)
 
-	sts := buildStatefulSet(cfg, resourceName(cfg.ClusterName, "secret"))
+	sts := buildStatefulSet(cfg, resourceName(cfg.ClusterName, "secret"), "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	if sts.Namespace != "pg-clusters" {
 		t.Errorf("statefulset namespace = %q, want pg-clusters", sts.Namespace)
 	}
@@ -374,7 +374,7 @@ func TestManifests_DefaultNamespaceResolution(t *testing.T) {
 
 func TestManifests_DefaultNamespaceFallback(t *testing.T) {
 	// Operator with empty defaultNamespace falls back to "default"
-	op := New(nil, "minikube", "")
+	op := New(nil, "minikube", "", "")
 	cfg := &pgswarmv1.ClusterConfig{
 		ClusterName: "test",
 		Namespace:   "",
@@ -387,7 +387,7 @@ func TestManifests_DefaultNamespaceFallback(t *testing.T) {
 
 func TestManifests_NamespacePreserved(t *testing.T) {
 	// Config with explicit namespace should not be overridden
-	op := New(nil, "minikube", "pg-clusters")
+	op := New(nil, "minikube", "pg-clusters", "")
 	cfg := &pgswarmv1.ClusterConfig{
 		ClusterName: "test",
 		Namespace:   "custom-ns",
@@ -426,7 +426,7 @@ func TestManifests_MinimalConfig(t *testing.T) {
 
 	// StatefulSet: no resource limits set
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	main := sts.Spec.Template.Spec.Containers[0]
 	if main.Resources.Requests != nil || main.Resources.Limits != nil {
 		t.Error("minimal config should not set resource requests/limits")
@@ -443,7 +443,7 @@ func TestManifests_StorageClass(t *testing.T) {
 	writeAll(t, "storage-class", cfg)
 
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	vct := sts.Spec.VolumeClaimTemplates[0]
 	if vct.Spec.StorageClassName == nil || *vct.Spec.StorageClassName != "gp3" {
 		t.Error("expected storageClassName = gp3 on data VCT")
@@ -462,7 +462,7 @@ func TestManifests_CustomArchiveNoCredentials(t *testing.T) {
 	writeAll(t, "custom-no-creds", cfg)
 
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	main := sts.Spec.Template.Spec.Containers[0]
 	if len(main.EnvFrom) != 0 {
 		t.Error("custom mode without credentials should have no EnvFrom")
@@ -498,7 +498,7 @@ func TestManifests_ArchiveDefaultTimeout(t *testing.T) {
 func TestManifests_Labels(t *testing.T) {
 	cfg := baseCfg()
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 
 	// All resources should carry standard labels
 	for _, labels := range []map[string]string{
@@ -545,7 +545,7 @@ func TestManifests_WithDatabases(t *testing.T) {
 	}
 
 	// Init container should have DB_PASSWORD env vars from secret
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	init := sts.Spec.Template.Spec.InitContainers[0]
 	if !hasEnvVar(init, "DB_PASSWORD_APP_USER") {
 		t.Error("init container missing DB_PASSWORD_APP_USER env var")
@@ -570,7 +570,7 @@ func TestManifests_WithDatabases(t *testing.T) {
 	}
 
 	// Config-store ConfigMap should exist with correct name and redacted passwords
-	op := New(nil, "minikube", "pg-clusters")
+	op := New(nil, "minikube", "pg-clusters", "")
 	cfgStore := op.buildConfigStore(cfg)
 	if cfgStore.Name != "pg-swarm-minikube-app-pg" {
 		t.Errorf("config-store name = %q, want pg-swarm-minikube-app-pg", cfgStore.Name)
@@ -585,7 +585,7 @@ func TestManifests_WithDatabases(t *testing.T) {
 }
 
 func TestManifests_ConfigStoreName(t *testing.T) {
-	op := New(nil, "prod-cluster", "default")
+	op := New(nil, "prod-cluster", "default", "")
 	name := op.configStoreName("orders-db")
 	if name != "pg-swarm-prod-cluster-orders-db" {
 		t.Errorf("configStoreName = %q, want pg-swarm-prod-cluster-orders-db", name)
@@ -608,7 +608,7 @@ func TestManifests_WithFailover(t *testing.T) {
 	writeAll(t, "with-failover", cfg)
 
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 
 	// Should have 2 containers: postgres + failover sidecar
 	containers := sts.Spec.Template.Spec.Containers
@@ -677,11 +677,11 @@ func TestManifests_FailoverDefaultImage(t *testing.T) {
 	}
 
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 	sidecar := sts.Spec.Template.Spec.Containers[1]
 
-	if sidecar.Image != "pg-swarm-failover:latest" {
-		t.Errorf("default sidecar image = %q, want pg-swarm-failover:latest", sidecar.Image)
+	if sidecar.Image != "ghcr.io/pg-swarm/pg-swarm-failover:latest" {
+		t.Errorf("default sidecar image = %q, want ghcr.io/pg-swarm/pg-swarm-failover:latest", sidecar.Image)
 	}
 	// Default interval should be 5
 	for _, ev := range sidecar.Env {
@@ -694,7 +694,7 @@ func TestManifests_FailoverDefaultImage(t *testing.T) {
 func TestManifests_NoFailover(t *testing.T) {
 	cfg := baseCfg()
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 
 	// Without failover, should have only 1 container
 	if len(sts.Spec.Template.Spec.Containers) != 1 {
@@ -722,7 +722,7 @@ func TestManifests_WithWalStorage(t *testing.T) {
 	writeAll(t, "with-wal-storage", cfg)
 
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 
 	// Should have 2 VCTs: data + wal
 	if n := len(sts.Spec.VolumeClaimTemplates); n != 2 {
@@ -764,7 +764,7 @@ func TestManifests_WithWalStorage(t *testing.T) {
 func TestManifests_WithoutWalStorage(t *testing.T) {
 	cfg := baseCfg()
 	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
 
 	// Should have only 1 VCT (data)
 	if n := len(sts.Spec.VolumeClaimTemplates); n != 1 {
