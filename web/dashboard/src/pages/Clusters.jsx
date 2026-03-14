@@ -15,6 +15,7 @@ export default function Clusters() {
   const [expanded, setExpanded] = useState({});
   const [eventsExpanded, setEventsExpanded] = useState({});
   const [detailInst, setDetailInst] = useState(null);
+  const [switchoverTarget, setSwitchoverTarget] = useState(null);
 
   if (clusters.length === 0) {
     return (
@@ -42,8 +43,15 @@ export default function Clusters() {
     }
   }
 
-  async function doSwitchover(clusterId, targetPod) {
-    if (!confirm(`Promote ${targetPod} to primary? This will demote the current primary.`)) return;
+  function requestSwitchover(clusterId, targetPod, instances) {
+    const currentPrimary = instances.find(i => i.role === 'primary');
+    setSwitchoverTarget({ clusterId, targetPod, currentPrimary: currentPrimary?.pod_name });
+  }
+
+  async function confirmSwitchover() {
+    if (!switchoverTarget) return;
+    const { clusterId, targetPod } = switchoverTarget;
+    setSwitchoverTarget(null);
     setBusy(clusterId);
     try {
       await api.switchover(clusterId, targetPod);
@@ -173,7 +181,7 @@ export default function Clusters() {
                                 {inst.role === 'replica' && inst.ready && (
                                   <button
                                     className="btn-sm btn-switchover"
-                                    onClick={(e) => { e.stopPropagation(); doSwitchover(c.id, inst.pod_name); }}
+                                    onClick={(e) => { e.stopPropagation(); requestSwitchover(c.id, inst.pod_name, instances); }}
                                     disabled={busy === c.id}
                                     title="Promote to primary"
                                   >
@@ -249,7 +257,66 @@ export default function Clusters() {
       })}
     </div>
     {detailInst && <InstanceDetailModal inst={detailInst.inst} storageSpec={detailInst.storage} onClose={() => setDetailInst(null)} />}
+    {switchoverTarget && (
+      <SwitchoverConfirmModal
+        target={switchoverTarget}
+        onConfirm={confirmSwitchover}
+        onCancel={() => setSwitchoverTarget(null)}
+      />
+    )}
     </>
+  );
+}
+
+function SwitchoverConfirmModal({ target, onConfirm, onCancel }) {
+  return (
+    <div className="confirm-overlay" onClick={onCancel}>
+      <div className="confirm-modal switchover-modal" onClick={e => e.stopPropagation()}>
+        <div className="confirm-header switchover-header">
+          <h3><AlertTriangle size={18} className="switchover-warn-icon" /> Planned Switchover</h3>
+          <button className="modal-close" onClick={onCancel}><X size={18} /></button>
+        </div>
+        <div className="confirm-body">
+          <div className="switchover-detail">
+            <div className="switchover-flow">
+              <div className="switchover-node">
+                <Crown size={16} className="switchover-icon-primary" />
+                <span className="switchover-label">Current Primary</span>
+                <span className="mono switchover-pod">{target.currentPrimary || 'unknown'}</span>
+                <span className="switchover-action">will be demoted to replica</span>
+              </div>
+              <div className="switchover-arrow">
+                <ArrowUpRight size={20} />
+              </div>
+              <div className="switchover-node">
+                <ArrowUpRight size={16} className="switchover-icon-promote" />
+                <span className="switchover-label">New Primary</span>
+                <span className="mono switchover-pod">{target.targetPod}</span>
+                <span className="switchover-action">will be promoted to primary</span>
+              </div>
+            </div>
+          </div>
+          <div className="switchover-steps">
+            <h5>What will happen:</h5>
+            <ol>
+              <li>A CHECKPOINT will be issued on the current primary to flush all WAL</li>
+              <li>The current primary will be fenced (writes blocked, client connections terminated)</li>
+              <li>The leader lease will be transferred to <strong>{target.targetPod}</strong></li>
+              <li>The target replica will be promoted via <code>pg_promote()</code></li>
+              <li>The old primary will automatically demote to a replica</li>
+            </ol>
+          </div>
+          <div className="switchover-warning">
+            <AlertTriangle size={14} />
+            <span>Applications connected to the database will experience a brief downtime during the switchover. New connections will be routed to the new primary once promotion is complete.</span>
+          </div>
+        </div>
+        <div className="confirm-footer">
+          <button className="btn-sm" onClick={onCancel}>Cancel</button>
+          <button className="btn-sm btn-danger" onClick={onConfirm}>Confirm Switchover</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
