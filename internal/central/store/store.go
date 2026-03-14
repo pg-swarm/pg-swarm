@@ -7,6 +7,9 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
 )
 
+// Store defines the persistence layer used by the central control plane for
+// managing satellites, cluster configurations, profiles, deployment rules,
+// health reports, and events.
 type Store interface {
 	// Satellites
 	CreateSatellite(ctx context.Context, sat *models.Satellite) error

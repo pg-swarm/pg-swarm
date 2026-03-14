@@ -337,6 +337,9 @@ func (m *Monitor) collectDatabaseStats(ctx context.Context, conn *pgx.Conn, ih *
 		}
 		ih.DatabaseStats = append(ih.DatabaseStats, ds)
 	}
+	if err := rows.Err(); err != nil {
+		log.Warn().Err(err).Str("pod", ih.PodName).Msg("error iterating database stat rows")
+	}
 
 	// Collect table stats + cache hit ratio from each database (limit to 5)
 	limit := 5
@@ -408,6 +411,9 @@ func (m *Monitor) collectTablesForDB(ctx context.Context, ih *pgswarmv1.Instance
 		}
 		ih.TableStats = append(ih.TableStats, ts)
 	}
+	if err := rows.Err(); err != nil {
+		log.Warn().Err(err).Str("pod", ih.PodName).Str("db", ds.DatabaseName).Msg("error iterating table stat rows")
+	}
 }
 
 // collectSlowQueries reads top slow queries from pg_stat_statements (if available).
@@ -447,6 +453,9 @@ func (m *Monitor) collectSlowQueries(ctx context.Context, conn *pgx.Conn, ih *pg
 			continue
 		}
 		ih.SlowQueries = append(ih.SlowQueries, sq)
+	}
+	if err := rows.Err(); err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("error iterating slow query rows")
 	}
 }
 

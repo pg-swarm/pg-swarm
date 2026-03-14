@@ -15,7 +15,6 @@ spec:
     targetPort: 5432
   selector:
     app.kubernetes.io/managed-by: pg-swarm
-    app.kubernetes.io/name: postgresql
     pg-swarm.io/cluster: pg-nocreds
     pg-swarm.io/role: replica
 status:

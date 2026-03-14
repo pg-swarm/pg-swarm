@@ -34,6 +34,7 @@ var mandatoryHbaRules = []string{
 	"host replication repl_user 0.0.0.0/0 md5",
 }
 
+// buildConfigMap creates the ConfigMap containing postgresql.conf and pg_hba.conf.
 func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
@@ -49,6 +50,7 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	}
 }
 
+// buildPostgresConf generates the postgresql.conf content by merging mandatory HA params with user overrides.
 func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec) string {
 	merged := make(map[string]string, len(mandatoryPgParams)+len(userParams)+4)
 	for k, v := range mandatoryPgParams {
@@ -92,6 +94,7 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 	return sb.String()
 }
 
+// buildHbaConf generates the pg_hba.conf content with mandatory HA rules followed by user rules.
 func buildHbaConf(userRules []string) string {
 	var sb strings.Builder
 	sb.WriteString("# TYPE  DATABASE  USER  ADDRESS  METHOD\n")

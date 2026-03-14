@@ -54,6 +54,8 @@ func (c *Connector) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Reset backoff after a connection was established (and then broke).
+		backoff = time.Second
 		log.Warn().Err(err).Dur("backoff", backoff).Msg("stream disconnected, reconnecting...")
 
 		select {

@@ -8,18 +8,22 @@ import (
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 )
 
+// failoverEnabled returns true if automatic failover is enabled for the cluster.
 func failoverEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.Failover != nil && cfg.Failover.Enabled
 }
 
+// failoverServiceAccountName returns the ServiceAccount name used by the failover sidecar.
 func failoverServiceAccountName(clusterName string) string {
 	return resourceName(clusterName, "failover")
 }
 
+// failoverLeaseName returns the Lease resource name used for leader election.
 func failoverLeaseName(clusterName string) string {
 	return resourceName(clusterName, "leader")
 }
 
+// buildFailoverServiceAccount creates the ServiceAccount for the failover sidecar.
 func buildFailoverServiceAccount(cfg *pgswarmv1.ClusterConfig) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
@@ -31,6 +35,7 @@ func buildFailoverServiceAccount(cfg *pgswarmv1.ClusterConfig) *corev1.ServiceAc
 	}
 }
 
+// buildFailoverRole creates the RBAC Role granting pod, exec, and lease access for failover.
 func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 	return &rbacv1.Role{
 		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
@@ -59,6 +64,7 @@ func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 	}
 }
 
+// buildFailoverRoleBinding creates the RoleBinding linking the failover ServiceAccount to its Role.
 func buildFailoverRoleBinding(cfg *pgswarmv1.ClusterConfig) *rbacv1.RoleBinding {
 	saName := failoverServiceAccountName(cfg.ClusterName)
 	return &rbacv1.RoleBinding{

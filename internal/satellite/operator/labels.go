@@ -37,6 +37,15 @@ func clusterLabels(clusterName, profileName string, labelSelector map[string]str
 	return labels
 }
 
+// selectorLabels returns the minimal immutable labels used for StatefulSet selectors.
+// These must not change after creation since K8s Selector is immutable.
+func selectorLabels(clusterName string) map[string]string {
+	return map[string]string{
+		LabelManagedBy: ManagedByValue,
+		LabelCluster:   clusterName,
+	}
+}
+
 // resourceName builds a deterministic resource name from cluster name and suffix.
 func resourceName(clusterName, suffix string) string {
 	return fmt.Sprintf("%s-%s", clusterName, suffix)

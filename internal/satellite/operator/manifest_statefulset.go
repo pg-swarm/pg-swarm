@@ -28,14 +28,17 @@ func podSecurityContext(image string) *corev1.PodSecurityContext {
 	}
 }
 
+// archiveEnabled returns true if WAL archiving is configured.
 func archiveEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.Archive != nil && cfg.Archive.Mode != ""
 }
 
+// walStorageEnabled returns true if a separate WAL storage volume is configured.
 func walStorageEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.WalStorage != nil && cfg.WalStorage.Size != ""
 }
 
+// buildWalVCT creates the PersistentVolumeClaim template for the dedicated WAL volume.
 func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	objMeta := metav1.ObjectMeta{
 		Name:   "wal",
@@ -61,8 +64,10 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	return pvc
 }
 
+// buildStatefulSet creates the StatefulSet for the PostgreSQL cluster.
 func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) *appsv1.StatefulSet {
-	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
+	selLabels := selectorLabels(cfg.ClusterName)
+	allLabels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
 	replicas := cfg.Replicas
 
@@ -71,17 +76,17 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cfg.ClusterName,
 			Namespace: cfg.Namespace,
-			Labels:    labels,
+			Labels:    allLabels,
 		},
 		Spec: appsv1.StatefulSetSpec{
 			ServiceName: headlessSvc,
 			Replicas:    &replicas,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
+				MatchLabels: selLabels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels: selLabels,
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: podSecurityContext(cfg.Postgres.Image),
@@ -141,6 +146,7 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 	return sts
 }
 
+// buildWalArchiveVCT creates the PersistentVolumeClaim template for the WAL archive volume.
 func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	objMeta := metav1.ObjectMeta{
 		Name:   "wal-archive",
@@ -166,6 +172,7 @@ func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeCla
 	return pvc
 }
 
+// buildVCT creates the PersistentVolumeClaim template for the main data volume.
 func buildVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	objMeta := metav1.ObjectMeta{
 		Name:   "data",
@@ -210,6 +217,7 @@ func buildDatabaseSQL(databases []*pgswarmv1.DatabaseSpec) string {
 	return sb.String()
 }
 
+// buildInitContainer creates the init container that bootstraps PG data and handles replication setup.
 func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.Container {
 	rwSvc := resourceName(cfg.ClusterName, "rw")
 
@@ -445,6 +453,7 @@ fi
 	return c
 }
 
+// buildMainContainer creates the main postgres container with a restart-loop wrapper script.
 func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.Container {
 	rwSvc := resourceName(cfg.ClusterName, "rw")
 	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, cfg.Namespace)
@@ -663,6 +672,7 @@ done
 	return c
 }
 
+// buildFailoverSidecar creates the failover sidecar container for leader election and promotion.
 func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) corev1.Container {
 	image := cfg.Failover.SidecarImage
 	if image == "" {

@@ -8,6 +8,7 @@ import (
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 )
 
+// buildHeadlessService creates the headless Service used by the StatefulSet for pod DNS.
 func buildHeadlessService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
@@ -18,7 +19,7 @@ func buildHeadlessService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
-			Selector:  clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+			Selector:  selectorLabels(cfg.ClusterName),
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "postgres",
@@ -31,8 +32,9 @@ func buildHeadlessService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
 	}
 }
 
+// buildRWService creates the read-write Service that routes to the primary pod.
 func buildRWService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
-	sel := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
+	sel := selectorLabels(cfg.ClusterName)
 	sel[LabelRole] = RolePrimary
 
 	return &corev1.Service{
@@ -56,8 +58,9 @@ func buildRWService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
 	}
 }
 
+// buildROService creates the read-only Service that routes to replica pods.
 func buildROService(cfg *pgswarmv1.ClusterConfig) *corev1.Service {
-	sel := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
+	sel := selectorLabels(cfg.ClusterName)
 	sel[LabelRole] = RoleReplica
 
 	return &corev1.Service{

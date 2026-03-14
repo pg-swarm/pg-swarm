@@ -36,10 +36,11 @@ func buildSecret(cfg *pgswarmv1.ClusterConfig) *corev1.Secret {
 	}
 }
 
+// randomPassword generates a cryptographically random hex string of the given length.
 func randomPassword(length int) string {
-	b := make([]byte, length)
+	b := make([]byte, (length+1)/2)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand unavailable: " + err.Error())
+		panic("crypto/rand failed: " + err.Error())
 	}
 	return hex.EncodeToString(b)[:length]
 }
