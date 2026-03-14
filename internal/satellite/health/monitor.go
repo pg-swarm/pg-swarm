@@ -31,6 +31,7 @@ type Monitor struct {
 	onEvent    func(*pgswarmv1.EventReport)
 	interval   time.Duration
 	lastStates map[string]pgswarmv1.ClusterState
+	mu         sync.Mutex
 	firstSeen  map[string]time.Time // tracks when each cluster was first observed
 }
 
@@ -81,31 +82,48 @@ func (m *Monitor) Run(ctx context.Context) {
 
 func (m *Monitor) checkAll(ctx context.Context) {
 	clusters := m.operator.ManagedClusters()
-	for _, mc := range clusters {
-		report := m.checkCluster(ctx, mc)
-		if report == nil {
+
+	// Check all clusters in parallel so a broken cluster doesn't block
+	// health reporting for healthy ones.
+	type result struct {
+		mc     operator.ManagedCluster
+		report *pgswarmv1.ClusterHealthReport
+	}
+	results := make([]result, len(clusters))
+	var wg sync.WaitGroup
+	for i, mc := range clusters {
+		wg.Add(1)
+		go func(idx int, mc operator.ManagedCluster) {
+			defer wg.Done()
+			results[idx] = result{mc: mc, report: m.checkCluster(ctx, mc)}
+		}(i, mc)
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.report == nil {
 			continue
 		}
 
 		if m.onHealth != nil {
-			m.onHealth(report)
+			m.onHealth(r.report)
 		}
 
 		// Detect state transitions and emit events
-		key := mc.Namespace + "/" + mc.ClusterName
+		key := r.mc.Namespace + "/" + r.mc.ClusterName
 		prev, existed := m.lastStates[key]
-		if existed && prev != report.State {
+		if existed && prev != r.report.State {
 			if m.onEvent != nil {
 				m.onEvent(&pgswarmv1.EventReport{
-					ClusterName: mc.ClusterName,
-					Severity:    severityForTransition(report.State),
-					Message:     fmt.Sprintf("cluster state changed: %s -> %s", prev, report.State),
+					ClusterName: r.mc.ClusterName,
+					Severity:    severityForTransition(r.report.State),
+					Message:     fmt.Sprintf("cluster state changed: %s -> %s", prev, r.report.State),
 					Source:      "health-monitor",
 					Timestamp:   timestamppb.Now(),
 				})
 			}
 		}
-		m.lastStates[key] = report.State
+		m.lastStates[key] = r.report.State
 	}
 }
 
@@ -113,9 +131,12 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	clusterKey := mc.Namespace + "/" + mc.ClusterName
 
 	// Track when we first observed this cluster for the startup grace period.
+	m.mu.Lock()
 	if _, ok := m.firstSeen[clusterKey]; !ok {
 		m.firstSeen[clusterKey] = time.Now()
 	}
+	clusterAge := time.Since(m.firstSeen[clusterKey])
+	m.mu.Unlock()
 
 	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -146,8 +167,7 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	}
 	wg.Wait()
 
-	age := time.Since(m.firstSeen[clusterKey])
-	state := DeriveClusterState(instances, mc.Replicas, age)
+	state := DeriveClusterState(instances, mc.Replicas, clusterAge)
 	if mc.Paused {
 		state = pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED
 	}
