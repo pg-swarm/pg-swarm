@@ -482,6 +482,12 @@ tbody tr:hover { background: var(--green-light); }
   overflow-y: auto;
   flex: 1;
 }
+.confirm-body-standalone {
+  background: var(--white);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 24px;
+}
 .confirm-footer {
   padding: 14px 24px;
   border-top: 1px solid var(--border);

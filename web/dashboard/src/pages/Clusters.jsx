@@ -55,10 +55,13 @@ export default function Clusters() {
     setBusy(clusterId);
     try {
       await api.switchover(clusterId, targetPod);
+      // The switchover is complete on the satellite, but the health monitor
+      // needs a tick (~10s) to report the new roles. Refresh twice: once
+      // immediately for the config state, and once after a delay for health.
       refresh();
+      setTimeout(() => { refresh(); setBusy(null); }, 12000);
     } catch (e) {
       alert('Switchover failed: ' + e.message);
-    } finally {
       setBusy(null);
     }
   }
