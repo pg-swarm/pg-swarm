@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -92,6 +91,9 @@ func (m *Monitor) Run(ctx context.Context) error {
 	}
 }
 
+// tick runs a single iteration of the monitoring loop: connects to PG,
+// determines whether the local instance is primary or replica, and delegates
+// to the appropriate handler.
 func (m *Monitor) tick(ctx context.Context) {
 	conn, err := pgx.Connect(ctx, m.cfg.PGConnString)
 	if err != nil {
@@ -188,16 +190,16 @@ func (m *Monitor) demotePrimary(ctx context.Context) error {
 	rwSvc := fmt.Sprintf("%s-rw", m.cfg.ClusterName)
 	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, m.cfg.Namespace)
 
-	replPassword := m.cfg.ReplicationPassword
-
 	pgdata := "/var/lib/postgresql/data/pgdata"
+	// Passwords are read from container env vars (REPLICATION_PASSWORD) set in
+	// the StatefulSet manifest, avoiding shell injection via interpolated values.
 	script := fmt.Sprintf(`set -e
 PGDATA="%s"
 touch "$PGDATA/standby.signal"
 sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
-echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=%s application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
+echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
 pg_ctl -D "$PGDATA" stop -m fast`,
-		pgdata, primaryHost, replPassword, m.cfg.PodName)
+		pgdata, primaryHost, m.cfg.PodName)
 
 	req := m.client.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -299,7 +301,11 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn *pgx.Conn) {
 	// WAL receiver is not streaming. Check if there's a valid primary first —
 	// if the lease is expired, failover logic below will handle it.
 	expired, err := m.isLeaseExpired(ctx)
-	if err != nil || expired {
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to check leader lease for WAL recovery decision")
+		return
+	}
+	if expired {
 		return
 	}
 
@@ -416,11 +422,6 @@ func (m *Monitor) rewindOrReinit(ctx context.Context) error {
 
 	rwSvc := fmt.Sprintf("%s-rw", m.cfg.ClusterName)
 	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, m.cfg.Namespace)
-	replPassword := m.cfg.ReplicationPassword
-
-	// Extract the postgres superuser password from PGConnString for pg_rewind.
-	// PGConnString format: "host=localhost ... password=XXX ..."
-	pgPassword := extractPassword(m.cfg.PGConnString)
 
 	pgdata := "/var/lib/postgresql/data/pgdata"
 
@@ -429,20 +430,22 @@ func (m *Monitor) rewindOrReinit(ctx context.Context) error {
 	// NOTE: no `set -e` — we need the fallback to run if pg_rewind fails.
 	// pg_rewind uses the postgres superuser because it needs pg_read_binary_file(),
 	// pg_ls_dir(), and pg_stat_file() which require superuser privileges.
+	//
+	// Passwords are read from container env vars (POSTGRES_PASSWORD,
+	// REPLICATION_PASSWORD) set in the StatefulSet manifest, avoiding shell
+	// injection via interpolated values.
 	script := fmt.Sprintf(`
 PGDATA="%s"
 PRIMARY_HOST="%s"
-REPL_PASSWORD="%s"
-PG_PASSWORD="%s"
 POD_NAME="%s"
 
 echo "Stopping PostgreSQL for recovery..."
 pg_ctl -D "$PGDATA" stop -m fast -w 2>/dev/null || true
 
 echo "Attempting pg_rewind..."
-if PGPASSWORD="$PG_PASSWORD" pg_rewind \
+if PGPASSWORD="$POSTGRES_PASSWORD" pg_rewind \
     -D "$PGDATA" \
-    --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$PG_PASSWORD dbname=postgres" \
+    --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$POSTGRES_PASSWORD dbname=postgres" \
     --progress 2>&1; then
     echo "pg_rewind succeeded"
 else
@@ -450,7 +453,7 @@ else
 
     rm -rf "$PGDATA"/*
 
-    PGPASSWORD="$REPL_PASSWORD" pg_basebackup \
+    PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
         -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
 
     if [ $? -ne 0 ]; then
@@ -466,11 +469,11 @@ fi
 # Ensure standby.signal and primary_conninfo are set correctly
 touch "$PGDATA/standby.signal"
 sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
-echo "primary_conninfo = 'host=$PRIMARY_HOST port=5432 user=repl_user password=$REPL_PASSWORD application_name=$POD_NAME'" >> "$PGDATA/postgresql.auto.conf"
+echo "primary_conninfo = 'host=$PRIMARY_HOST port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=$POD_NAME'" >> "$PGDATA/postgresql.auto.conf"
 
 echo "Recovery complete — PG will restart as standby"
 # Do NOT start PG here — K8s will restart the container
-`, pgdata, primaryHost, replPassword, pgPassword, m.cfg.PodName)
+`, pgdata, primaryHost, m.cfg.PodName)
 
 	req := m.client.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -583,6 +586,8 @@ func (m *Monitor) acquireOrRenew(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// createLease creates a new leader lease owned by this pod. Returns false
+// if the lease already exists (another pod created it first).
 func (m *Monitor) createLease(ctx context.Context) (bool, error) {
 	now := metav1.NewMicroTime(time.Now())
 	dur := int32(leaseDuration.Seconds())
@@ -620,6 +625,8 @@ func (m *Monitor) isLeaseExpired(ctx context.Context) (bool, error) {
 	return leaseExpired(lease), nil
 }
 
+// leaseExpired returns true if the given lease's renew time plus its duration
+// is in the past, or if the lease is missing required fields.
 func leaseExpired(lease *coordinationv1.Lease) bool {
 	if lease.Spec.RenewTime == nil || lease.Spec.LeaseDurationSeconds == nil {
 		return true
@@ -628,12 +635,3 @@ func leaseExpired(lease *coordinationv1.Lease) bool {
 	return time.Now().After(expiry)
 }
 
-// extractPassword parses "password=XXX" from a libpq-style connection string.
-func extractPassword(connStr string) string {
-	for _, part := range strings.Fields(connStr) {
-		if strings.HasPrefix(part, "password=") {
-			return strings.TrimPrefix(part, "password=")
-		}
-	}
-	return ""
-}

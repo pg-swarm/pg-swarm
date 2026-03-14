@@ -19,14 +19,57 @@
 - Timeline divergence detection via `pg_control_checkpoint()` and WAL history file checks — skips the grace period for fatal divergence.
 - Rewind/re-basebackup via K8s exec with injectable `rewindFunc` for testing.
 
+### Code review — security and bug fixes
+
+Full codebase review across all 28 Go files. Fixed 12 issues, added ~100 doc comments.
+
+#### Critical / Security
+
+| # | Fix | Files |
+|---|-----|-------|
+| 1 | Shell injection eliminated — passwords now read from container env vars instead of Go `fmt.Sprintf` interpolation | `failover/monitor.go` |
+| 2 | `extractPassword` removed — no longer needed | `failover/monitor.go` |
+| 3 | `unaryAuthInterceptor` now enforces auth — extracts token, validates via store, injects satellite ID | `central/server/grpc.go` |
+| 4 | Timing side-channel fixed — `ValidateToken` uses `subtle.ConstantTimeCompare` | `central/auth/tokens.go` |
+| 5 | Label selector matching fixed (Go) — removed exact-count check, satellites with extra labels now match | `central/server/rest.go` |
+| 6 | Label selector matching fixed (SQL) — changed `labels =` to `labels @>` for JSONB containment | `central/store/postgres.go` |
+| 7 | StatefulSet Selector uses immutable labels — new `selectorLabels()` prevents update failures on profile/selector changes | `operator/labels.go`, `manifest_statefulset.go`, `manifest_service.go` |
+
+#### Bugs
+
+| # | Fix | Files |
+|---|-----|-------|
+| 8 | `randomPassword` entropy corrected — generates `(length+1)/2` bytes so hex output has full entropy | `operator/manifest_secret.go` |
+| 9 | `rows.Err()` checks added after all 3 `rows.Next()` loops in health monitor | `satellite/health/monitor.go` |
+| 10 | Stream backoff reset — resets to 1s after a stable connection breaks instead of using stale backoff | `satellite/stream/connector.go` |
+
+#### Error handling and consistency
+
+| # | Fix | Files |
+|---|-----|-------|
+| 11 | Missing error log in `checkWalReceiver` — `isLeaseExpired` error now logged consistently | `failover/monitor.go` |
+| 12 | `Store` interface documented | `central/store/store.go` |
+
+#### Documentation
+
+- Added Go doc comments to ~100 functions across `central/server`, `central/store`, `failover`, and `satellite/operator` packages.
+
+#### Known issues (deferred)
+
+- Connection string injection in failover-sidecar `main.go` (password in libpq string)
+- `CheckApproval` token regeneration race in registry
+- Non-atomic satellite approve (token set + state update not transactional)
+- `resource.MustParse` panics on malformed config input (needs validation layer)
+- SQL injection in `buildDatabaseSQL` (needs input sanitization from central)
+- `context.Background()` used for switchover/K8s calls in agent (not cancellable on shutdown)
+- No rollback on partial switchover failure (lease transferred but promotion fails)
+
 ### Documentation
 
 - Added project README with architecture overview, module descriptions, current state, quick start guide, and roadmap.
 - Added CHANGELOG.md.
 
 ---
-
-## 2026-03-14
 
 ### SQL fencing and split-brain prevention
 
@@ -81,8 +124,6 @@
 - Added `internal/satellite/health/monitor_test.go`.
 
 ---
-
-## 2026-02-08
 
 ### Deployment rules with label selectors
 

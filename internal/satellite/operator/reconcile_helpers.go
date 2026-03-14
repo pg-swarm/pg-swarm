@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ensureNamespace creates the namespace if it does not already exist.
 func ensureNamespace(ctx context.Context, client kubernetes.Interface, name string) error {
 	if name == "default" {
 		return nil
@@ -28,6 +29,7 @@ func ensureNamespace(ctx context.Context, client kubernetes.Interface, name stri
 	return err
 }
 
+// buildNamespace constructs a Namespace object with pg-swarm managed-by labels.
 func buildNamespace(name string) *corev1.Namespace {
 	return &corev1.Namespace{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
@@ -55,6 +57,7 @@ func createOrPreserveSecret(ctx context.Context, client kubernetes.Interface, de
 	return err
 }
 
+// createOrUpdateConfigMap creates or updates a ConfigMap to match the desired state.
 func createOrUpdateConfigMap(ctx context.Context, client kubernetes.Interface, desired *corev1.ConfigMap) error {
 	existing, err := client.CoreV1().ConfigMaps(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -71,6 +74,7 @@ func createOrUpdateConfigMap(ctx context.Context, client kubernetes.Interface, d
 	return err
 }
 
+// createOrUpdateService creates or updates a Service, preserving the immutable ClusterIP.
 func createOrUpdateService(ctx context.Context, client kubernetes.Interface, desired *corev1.Service) error {
 	existing, err := client.CoreV1().Services(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -88,6 +92,7 @@ func createOrUpdateService(ctx context.Context, client kubernetes.Interface, des
 	return err
 }
 
+// createOrUpdateStatefulSet creates or updates a StatefulSet, preserving immutable VolumeClaimTemplates.
 func createOrUpdateStatefulSet(ctx context.Context, client kubernetes.Interface, desired *appsv1.StatefulSet) error {
 	existing, err := client.AppsV1().StatefulSets(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -168,6 +173,7 @@ func labelPods(ctx context.Context, client kubernetes.Interface, namespace, clus
 	return nil
 }
 
+// createOrUpdateServiceAccount creates a ServiceAccount if it does not already exist.
 func createOrUpdateServiceAccount(ctx context.Context, client kubernetes.Interface, desired *corev1.ServiceAccount) error {
 	_, err := client.CoreV1().ServiceAccounts(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -177,6 +183,7 @@ func createOrUpdateServiceAccount(ctx context.Context, client kubernetes.Interfa
 	return err // already exists — no update needed for ServiceAccount
 }
 
+// createOrUpdateRole creates or updates an RBAC Role to match the desired rules.
 func createOrUpdateRole(ctx context.Context, client kubernetes.Interface, desired *rbacv1.Role) error {
 	existing, err := client.RbacV1().Roles(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -192,6 +199,7 @@ func createOrUpdateRole(ctx context.Context, client kubernetes.Interface, desire
 	return err
 }
 
+// createOrUpdateRoleBinding creates a RoleBinding if it does not already exist.
 func createOrUpdateRoleBinding(ctx context.Context, client kubernetes.Interface, desired *rbacv1.RoleBinding) error {
 	_, err := client.RbacV1().RoleBindings(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {

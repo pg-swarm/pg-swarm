@@ -749,13 +749,10 @@ func (s *RESTServer) pauseUnmatchedClusters(ctx context.Context, satelliteID uui
 	}
 }
 
-// labelsMatch returns true if the satellite labels exactly match the selector.
-// An empty selector matches nothing.
+// labelsMatch returns true if the satellite labels contain all selector key-value pairs.
+// An empty selector matches nothing. Satellites may have extra labels beyond the selector.
 func labelsMatch(labels, selector map[string]string) bool {
 	if len(selector) == 0 {
-		return false
-	}
-	if len(labels) != len(selector) {
 		return false
 	}
 	for k, v := range selector {
