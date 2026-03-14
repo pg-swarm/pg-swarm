@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,11 @@ import (
 
 const (
 	leaseDuration = 15 * time.Second
+
+	// rewindGracePeriod is how long we wait with WAL receiver down before
+	// attempting pg_rewind / re-basebackup. This gives PG time to reconnect
+	// on its own after a normal primary switchover.
+	rewindGracePeriod = 30 * time.Second
 
 	labelRole    = "pg-swarm.io/role"
 	rolePrimary  = "primary"
@@ -48,6 +54,12 @@ type Monitor struct {
 	leaseName  string
 	fenceFunc  func(ctx context.Context, db pgfence.PGExecer) error // nil = pgfence.FencePrimary
 	demoteFunc func(ctx context.Context) error                      // nil = real demotePrimary
+	rewindFunc func(ctx context.Context) error                      // nil = real rewindOrReinit
+
+	// walReceiverDownSince tracks when the WAL receiver was first observed as
+	// inactive on a replica. Zero means the receiver is active (or we haven't
+	// checked yet). After rewindGracePeriod, we attempt pg_rewind / re-basebackup.
+	walReceiverDownSince time.Time
 }
 
 // NewMonitor creates a new failover monitor.
@@ -97,7 +109,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	if !isInRecovery {
 		m.handlePrimary(ctx, conn)
 	} else {
-		m.handleReplica(ctx)
+		m.handleReplica(ctx, conn)
 	}
 }
 
@@ -161,26 +173,20 @@ func (m *Monitor) doDemote(ctx context.Context) {
 }
 
 // demotePrimary uses K8s exec to convert the local PG instance to a standby.
-// It creates standby.signal, sets primary_conninfo, and stops PG.
-// K8s will restart the container and PG will come up as a streaming standby.
+// It creates standby.signal, sets primary_conninfo pointing at the RW service,
+// and stops PG. K8s will restart the container and PG comes up as a standby.
+//
+// Using the RW service (which selects pg-swarm.io/role=primary) instead of a
+// specific pod hostname means the standby always streams from whoever is the
+// current primary, even after subsequent failovers.
 func (m *Monitor) demotePrimary(ctx context.Context) error {
 	if m.cfg.RestConfig == nil {
 		return fmt.Errorf("rest.Config not set — cannot exec into container")
 	}
 
-	// Determine the new primary from the lease holder
-	lease, err := m.client.CoordinationV1().Leases(m.cfg.Namespace).Get(ctx, m.leaseName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get lease for demote: %w", err)
-	}
-	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
-		return fmt.Errorf("lease has no holder — cannot determine new primary")
-	}
-	newPrimary := *lease.Spec.HolderIdentity
-
-	// Build headless service hostname for the new primary
-	headlessSvc := fmt.Sprintf("%s-headless", m.cfg.ClusterName)
-	primaryHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local", newPrimary, headlessSvc, m.cfg.Namespace)
+	// Point primary_conninfo at the RW service — it follows the primary label.
+	rwSvc := fmt.Sprintf("%s-rw", m.cfg.ClusterName)
+	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, m.cfg.Namespace)
 
 	replPassword := m.cfg.ReplicationPassword
 
@@ -220,15 +226,19 @@ pg_ctl -D "$PGDATA" stop -m fast`,
 
 	log.Info().
 		Str("pod", m.cfg.PodName).
-		Str("new_primary", newPrimary).
+		Str("primary_host", primaryHost).
 		Msg("demotion completed — PG will restart as standby")
 
 	return nil
 }
 
-// handleReplica labels the pod as replica and checks if failover is needed.
-func (m *Monitor) handleReplica(ctx context.Context) {
+// handleReplica labels the pod as replica, checks WAL receiver health,
+// and initiates failover if the leader lease has expired.
+func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	m.labelPod(ctx, roleReplica)
+
+	// Check if WAL receiver is actively streaming from the primary.
+	m.checkWalReceiver(ctx, conn)
 
 	expired, err := m.isLeaseExpired(ctx)
 	if err != nil {
@@ -258,7 +268,242 @@ func (m *Monitor) handleReplica(ctx context.Context) {
 	}
 
 	m.labelPod(ctx, rolePrimary)
+	m.walReceiverDownSince = time.Time{} // reset on promotion
 	log.Info().Msg("promotion successful — now primary")
+}
+
+// checkWalReceiver monitors whether this replica is actively streaming WAL.
+// If the WAL receiver has been down for longer than rewindGracePeriod and a
+// valid primary exists (lease not expired), we attempt pg_rewind to re-sync
+// with the new timeline, falling back to a full re-basebackup.
+//
+// If the replica's timeline doesn't match the primary's (fatal divergence),
+// we skip the grace period and trigger recovery immediately.
+func (m *Monitor) checkWalReceiver(ctx context.Context, conn *pgx.Conn) {
+	var active bool
+	err := conn.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_stat_wal_receiver WHERE status = 'streaming')").Scan(&active)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to check pg_stat_wal_receiver")
+		return
+	}
+
+	if active {
+		if !m.walReceiverDownSince.IsZero() {
+			log.Info().Msg("WAL receiver reconnected — replication restored")
+		}
+		m.walReceiverDownSince = time.Time{}
+		return
+	}
+
+	// WAL receiver is not streaming. Check if there's a valid primary first —
+	// if the lease is expired, failover logic below will handle it.
+	expired, err := m.isLeaseExpired(ctx)
+	if err != nil || expired {
+		return
+	}
+
+	// Check for timeline divergence — this is fatal and will never self-heal.
+	// The replica's timeline won't match the new primary's after a promotion.
+	if m.hasTimelineDivergence(ctx, conn) {
+		log.Warn().Msg("timeline divergence detected — triggering immediate recovery")
+		m.doRewind(ctx)
+		m.walReceiverDownSince = time.Time{}
+		return
+	}
+
+	// No timeline divergence — use grace period for transient issues.
+	now := time.Now()
+	if m.walReceiverDownSince.IsZero() {
+		m.walReceiverDownSince = now
+		log.Warn().Msg("WAL receiver not streaming — starting grace period")
+		return
+	}
+
+	downFor := now.Sub(m.walReceiverDownSince)
+	if downFor < rewindGracePeriod {
+		log.Warn().
+			Dur("down_for", downFor).
+			Dur("grace_period", rewindGracePeriod).
+			Msg("WAL receiver still down — waiting before recovery")
+		return
+	}
+
+	log.Warn().
+		Dur("down_for", downFor).
+		Msg("WAL receiver down beyond grace period — attempting pg_rewind / re-basebackup")
+
+	m.doRewind(ctx)
+	m.walReceiverDownSince = time.Time{} // reset so we wait again if it fails
+}
+
+// hasTimelineDivergence checks if this replica's timeline differs from the
+// primary's. After a promotion, the new primary moves to timeline N+1 while
+// other replicas are still on timeline N. PG logs "requested timeline X is
+// not a child of this server's history" and will never recover on its own.
+func (m *Monitor) hasTimelineDivergence(ctx context.Context, conn *pgx.Conn) bool {
+	// Get our current timeline from pg_control_checkpoint().
+	var localTimeline int64
+	err := conn.QueryRow(ctx,
+		"SELECT timeline_id FROM pg_control_checkpoint()").Scan(&localTimeline)
+	if err != nil {
+		log.Debug().Err(err).Msg("failed to get local timeline")
+		return false
+	}
+
+	// Get the primary's timeline from the lease holder.
+	// We can't query the primary directly from the sidecar, but we can check
+	// if the WAL receiver's last known timeline (from its conninfo) differs.
+	// A simpler heuristic: if WAL receiver is absent/not streaming AND our
+	// timeline differs from what pg_stat_wal_receiver last reported, we've diverged.
+	var receiverTimeline *int64
+	err = conn.QueryRow(ctx,
+		"SELECT received_tli FROM pg_stat_wal_receiver LIMIT 1").Scan(&receiverTimeline)
+	if err != nil || receiverTimeline == nil {
+		// No WAL receiver row at all — PG may have never connected to the new primary.
+		// Check if there are multiple timeline history files as a signal of promotion.
+		var historyCount int64
+		err = conn.QueryRow(ctx,
+			"SELECT count(*) FROM pg_ls_waldir() WHERE name LIKE '%.history'").Scan(&historyCount)
+		if err != nil {
+			log.Debug().Err(err).Msg("failed to check timeline history files")
+			return false
+		}
+		// If we have fewer history files than our timeline - 1, we're missing
+		// the new timeline's history file (it was never streamed to us).
+		// Timeline 1 has 0 history files, timeline 2 has 1, etc.
+		expectedHistories := localTimeline - 1
+		if historyCount < expectedHistories {
+			log.Warn().
+				Int64("local_timeline", localTimeline).
+				Int64("history_files", historyCount).
+				Int64("expected", expectedHistories).
+				Msg("missing timeline history files — divergence likely")
+			return true
+		}
+		return false
+	}
+
+	if *receiverTimeline != localTimeline {
+		log.Warn().
+			Int64("local_timeline", localTimeline).
+			Int64("receiver_timeline", *receiverTimeline).
+			Msg("timeline mismatch between local and receiver")
+		return true
+	}
+
+	return false
+}
+
+// doRewind calls the rewind function (real or injected for tests).
+func (m *Monitor) doRewind(ctx context.Context) {
+	rewind := m.rewindFunc
+	if rewind == nil {
+		rewind = m.rewindOrReinit
+	}
+	if err := rewind(ctx); err != nil {
+		log.Error().Err(err).Msg("rewind/re-basebackup failed — will retry after grace period")
+	}
+}
+
+// rewindOrReinit uses K8s exec to run pg_rewind against the current primary.
+// If pg_rewind fails (e.g. diverged too far), falls back to a full re-basebackup.
+// In both cases PG is stopped and K8s restarts the container.
+func (m *Monitor) rewindOrReinit(ctx context.Context) error {
+	if m.cfg.RestConfig == nil {
+		return fmt.Errorf("rest.Config not set — cannot exec into container")
+	}
+
+	rwSvc := fmt.Sprintf("%s-rw", m.cfg.ClusterName)
+	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, m.cfg.Namespace)
+	replPassword := m.cfg.ReplicationPassword
+
+	// Extract the postgres superuser password from PGConnString for pg_rewind.
+	// PGConnString format: "host=localhost ... password=XXX ..."
+	pgPassword := extractPassword(m.cfg.PGConnString)
+
+	pgdata := "/var/lib/postgresql/data/pgdata"
+
+	// Try pg_rewind first — it's fast and preserves most of PGDATA.
+	// Falls back to wiping PGDATA and running pg_basebackup if rewind fails.
+	// NOTE: no `set -e` — we need the fallback to run if pg_rewind fails.
+	// pg_rewind uses the postgres superuser because it needs pg_read_binary_file(),
+	// pg_ls_dir(), and pg_stat_file() which require superuser privileges.
+	script := fmt.Sprintf(`
+PGDATA="%s"
+PRIMARY_HOST="%s"
+REPL_PASSWORD="%s"
+PG_PASSWORD="%s"
+POD_NAME="%s"
+
+echo "Stopping PostgreSQL for recovery..."
+pg_ctl -D "$PGDATA" stop -m fast -w 2>/dev/null || true
+
+echo "Attempting pg_rewind..."
+if PGPASSWORD="$PG_PASSWORD" pg_rewind \
+    -D "$PGDATA" \
+    --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$PG_PASSWORD dbname=postgres" \
+    --progress 2>&1; then
+    echo "pg_rewind succeeded"
+else
+    echo "pg_rewind failed — falling back to full re-basebackup"
+
+    rm -rf "$PGDATA"/*
+
+    PGPASSWORD="$REPL_PASSWORD" pg_basebackup \
+        -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
+
+    if [ $? -ne 0 ]; then
+        echo "FATAL: re-basebackup also failed"
+        exit 1
+    fi
+
+    # Restore config files from mounted configmap
+    cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf" 2>/dev/null || true
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf" 2>/dev/null || true
+fi
+
+# Ensure standby.signal and primary_conninfo are set correctly
+touch "$PGDATA/standby.signal"
+sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
+echo "primary_conninfo = 'host=$PRIMARY_HOST port=5432 user=repl_user password=$REPL_PASSWORD application_name=$POD_NAME'" >> "$PGDATA/postgresql.auto.conf"
+
+echo "Recovery complete — PG will restart as standby"
+# Do NOT start PG here — K8s will restart the container
+`, pgdata, primaryHost, replPassword, pgPassword, m.cfg.PodName)
+
+	req := m.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(m.cfg.PodName).
+		Namespace(m.cfg.Namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "postgres",
+			Command:   []string{"bash", "-c", script},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(m.cfg.RestConfig, "POST", req.URL())
+	if err != nil {
+		return fmt.Errorf("create SPDY executor: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}); err != nil {
+		return fmt.Errorf("exec rewind script: %w (stdout: %s, stderr: %s)", err, stdout.String(), stderr.String())
+	}
+
+	log.Info().
+		Str("pod", m.cfg.PodName).
+		Str("primary_host", primaryHost).
+		Str("output", stdout.String()).
+		Msg("rewind/re-basebackup completed — PG will restart as standby")
+
+	return nil
 }
 
 // promote calls pg_promote() on the local PostgreSQL instance.
@@ -381,4 +626,14 @@ func leaseExpired(lease *coordinationv1.Lease) bool {
 	}
 	expiry := lease.Spec.RenewTime.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second)
 	return time.Now().After(expiry)
+}
+
+// extractPassword parses "password=XXX" from a libpq-style connection string.
+func extractPassword(connStr string) string {
+	for _, part := range strings.Fields(connStr) {
+		if strings.HasPrefix(part, "password=") {
+			return strings.TrimPrefix(part, "password=")
+		}
+	}
+	return ""
 }

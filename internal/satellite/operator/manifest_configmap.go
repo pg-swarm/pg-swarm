@@ -14,13 +14,17 @@ import (
 // mandatoryPgParams are HA-required PostgreSQL parameters that are always set.
 // User pg_params can override these.
 var mandatoryPgParams = map[string]string{
-	"listen_addresses":    "'*'",
-	"wal_level":           "replica",
-	"max_wal_senders":     "10",
-	"max_replication_slots": "10",
-	"hot_standby":         "on",
-	"wal_log_hints":            "on",
-	"max_slot_wal_keep_size":   "-1",
+	"listen_addresses":          "'*'",
+	"wal_level":                 "replica",
+	"max_wal_senders":           "10",
+	"max_replication_slots":     "10",
+	"hot_standby":               "on",
+	"wal_log_hints":             "on",
+	"max_slot_wal_keep_size":    "-1",
+	"recovery_target_timeline":  "'latest'",
+	"wal_keep_size":             "'512MB'",
+	"shared_preload_libraries":  "'pg_stat_statements'",
+	"pg_stat_statements.track":  "all",
 }
 
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.
