@@ -12,14 +12,12 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/managed-by: pg-swarm
-      app.kubernetes.io/name: postgresql
       pg-swarm.io/cluster: app-pg
   serviceName: app-pg-headless
   template:
     metadata:
       labels:
         app.kubernetes.io/managed-by: pg-swarm
-        app.kubernetes.io/name: postgresql
         pg-swarm.io/cluster: app-pg
     spec:
       containers:

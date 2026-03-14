@@ -44,6 +44,8 @@ type SatelliteStream struct {
 	Cancel      context.CancelFunc
 }
 
+// NewGRPCServer creates a GRPCServer wired to the given registry and store,
+// with authentication interceptors for both unary and streaming RPCs.
 func NewGRPCServer(reg *registry.Registry, s store.Store) *GRPCServer {
 	srv := &GRPCServer{
 		registry: reg,
@@ -62,12 +64,15 @@ func NewGRPCServer(reg *registry.Registry, s store.Store) *GRPCServer {
 	return srv
 }
 
+// NewStreamManager creates an empty StreamManager ready to track satellite streams.
 func NewStreamManager() *StreamManager {
 	return &StreamManager{
 		streams: make(map[uuid.UUID]*SatelliteStream),
 	}
 }
 
+// Start listens on the given address and serves gRPC requests. It blocks
+// until the server is stopped or an error occurs.
 func (s *GRPCServer) Start(addr string) error {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -77,6 +82,7 @@ func (s *GRPCServer) Start(addr string) error {
 	return s.server.Serve(lis)
 }
 
+// Stop gracefully shuts down the gRPC server, waiting for in-flight RPCs to complete.
 func (s *GRPCServer) Stop() {
 	s.server.GracefulStop()
 }
@@ -290,18 +296,21 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 
 // StreamManager methods
 
+// Add registers a satellite stream, replacing any previous stream for the same ID.
 func (sm *StreamManager) Add(id uuid.UUID, stream *SatelliteStream) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.streams[id] = stream
 }
 
+// Remove deletes the satellite stream associated with the given ID.
 func (sm *StreamManager) Remove(id uuid.UUID) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	delete(sm.streams, id)
 }
 
+// Get returns the satellite stream for the given ID, or false if not connected.
 func (sm *StreamManager) Get(id uuid.UUID) (*SatelliteStream, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -309,6 +318,9 @@ func (sm *StreamManager) Get(id uuid.UUID) (*SatelliteStream, bool) {
 	return s, ok
 }
 
+// PushConfig sends a cluster configuration to the specified satellite over its
+// active stream. Returns an error if the satellite is not connected or its
+// send channel is full.
 func (sm *StreamManager) PushConfig(satelliteID uuid.UUID, config *pgswarmv1.ClusterConfig) error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -332,6 +344,8 @@ func (sm *StreamManager) PushConfig(satelliteID uuid.UUID, config *pgswarmv1.Clu
 	}
 }
 
+// RequestStorageClasses asks the specified satellite to report its available
+// Kubernetes storage classes.
 func (sm *StreamManager) RequestStorageClasses(satelliteID uuid.UUID) error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -355,6 +369,8 @@ func (sm *StreamManager) RequestStorageClasses(satelliteID uuid.UUID) error {
 	}
 }
 
+// PushSwitchover sends a switchover request to the specified satellite,
+// instructing it to promote a replica to primary.
 func (sm *StreamManager) PushSwitchover(satelliteID uuid.UUID, req *pgswarmv1.SwitchoverRequest) error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -385,15 +401,36 @@ func (s *GRPCServer) GetStreams() *StreamManager {
 
 // Auth interceptors
 
+// unaryAuthInterceptor enforces authentication on all unary RPCs except
+// Register and CheckApproval, which are part of the unauthenticated
+// registration handshake.
 func (s *GRPCServer) unaryAuthInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	// Registration RPCs don't need auth
 	if info.FullMethod == pgswarmv1.RegistrationService_Register_FullMethodName ||
 		info.FullMethod == pgswarmv1.RegistrationService_CheckApproval_FullMethodName {
 		return handler(ctx, req)
 	}
+
+	// All other unary RPCs require authentication.
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
+	}
+	tokens := md.Get("authorization")
+	if len(tokens) == 0 {
+		return nil, status.Errorf(codes.Unauthenticated, "missing authorization token")
+	}
+	tokenHash := auth.HashToken(tokens[0])
+	sat, err := s.store.GetSatelliteByToken(ctx, tokenHash)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid token")
+	}
+	ctx = contextWithSatelliteID(ctx, sat.ID)
 	return handler(ctx, req)
 }
 
+// streamAuthInterceptor validates the authorization token in stream metadata
+// and injects the authenticated satellite ID into the stream context.
 func (s *GRPCServer) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	ctx := ss.Context()
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -421,10 +458,13 @@ func (s *GRPCServer) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream
 
 type satelliteIDKey struct{}
 
+// contextWithSatelliteID returns a new context carrying the given satellite UUID.
 func contextWithSatelliteID(ctx context.Context, id uuid.UUID) context.Context {
 	return context.WithValue(ctx, satelliteIDKey{}, id)
 }
 
+// satelliteIDFromContext extracts the satellite UUID previously stored by
+// contextWithSatelliteID. The boolean is false if no ID is present.
 func satelliteIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	id, ok := ctx.Value(satelliteIDKey{}).(uuid.UUID)
 	return id, ok
@@ -513,6 +553,8 @@ type tableStatJSON struct {
 	DatabaseName   string `json:"database_name,omitempty"`
 }
 
+// protoRoleToString converts a protobuf InstanceRole enum value to a
+// human-readable lowercase string (e.g. "primary", "replica").
 func protoRoleToString(r pgswarmv1.InstanceRole) string {
 	switch r {
 	case pgswarmv1.InstanceRole_INSTANCE_ROLE_PRIMARY:

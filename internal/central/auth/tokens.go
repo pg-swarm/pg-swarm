@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 )
@@ -24,5 +25,5 @@ func HashToken(token string) string {
 
 // ValidateToken checks if a raw token matches a stored hash
 func ValidateToken(token, hash string) bool {
-	return HashToken(token) == hash
+	return subtle.ConstantTimeCompare([]byte(HashToken(token)), []byte(hash)) == 1
 }
