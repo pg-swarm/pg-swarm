@@ -208,6 +208,10 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					log.Error().Err(err).Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Msg("failed to upsert health")
 				} else {
 					log.Debug().Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Str("state", string(h.State)).Msg("health report processed")
+					// Sync cluster config state with health-reported state
+					if err := s.store.UpdateClusterConfigState(ctx, satID, report.ClusterName, h.State); err != nil {
+						log.Warn().Err(err).Str("cluster", report.ClusterName).Msg("failed to update cluster config state")
+					}
 				}
 
 			case *pgswarmv1.SatelliteMessage_EventReport:
@@ -445,6 +449,8 @@ func protoStateToModel(s pgswarmv1.ClusterState) models.ClusterState {
 		return models.ClusterStateDegraded
 	case pgswarmv1.ClusterState_CLUSTER_STATE_FAILED:
 		return models.ClusterStateFailed
+	case pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED:
+		return models.ClusterStatePaused
 	case pgswarmv1.ClusterState_CLUSTER_STATE_DELETING:
 		return models.ClusterStateDeleting
 	default:
@@ -454,18 +460,57 @@ func protoStateToModel(s pgswarmv1.ClusterState) models.ClusterState {
 
 // instanceJSON mirrors InstanceHealth for JSON serialization into the store.
 type instanceJSON struct {
-	PodName               string  `json:"pod_name"`
-	Role                  string  `json:"role"`
-	Ready                 bool    `json:"ready"`
-	ReplicationLagBytes   int64   `json:"replication_lag_bytes"`
-	ReplicationLagSeconds float64 `json:"replication_lag_seconds,omitempty"`
-	ConnectionsUsed       int32   `json:"connections_used,omitempty"`
-	ConnectionsMax        int32   `json:"connections_max,omitempty"`
-	DiskUsedBytes         int64   `json:"disk_used_bytes,omitempty"`
-	TimelineID            int64   `json:"timeline_id,omitempty"`
-	PgStartTime           string  `json:"pg_start_time,omitempty"`
-	WalReceiverActive     bool    `json:"wal_receiver_active,omitempty"`
-	ErrorMessage          string  `json:"error_message,omitempty"`
+	PodName               string             `json:"pod_name"`
+	Role                  string             `json:"role"`
+	Ready                 bool               `json:"ready"`
+	ReplicationLagBytes   int64              `json:"replication_lag_bytes"`
+	ReplicationLagSeconds float64            `json:"replication_lag_seconds,omitempty"`
+	ConnectionsUsed       int32              `json:"connections_used,omitempty"`
+	ConnectionsMax        int32              `json:"connections_max,omitempty"`
+	DiskUsedBytes         int64              `json:"disk_used_bytes,omitempty"`
+	TimelineID            int64              `json:"timeline_id,omitempty"`
+	PgStartTime           string             `json:"pg_start_time,omitempty"`
+	WalReceiverActive     bool               `json:"wal_receiver_active,omitempty"`
+	ErrorMessage          string             `json:"error_message,omitempty"`
+	WalRecords            int64              `json:"wal_records,omitempty"`
+	WalBytes              int64              `json:"wal_bytes,omitempty"`
+	WalBuffersFull        int64              `json:"wal_buffers_full,omitempty"`
+	WalDiskBytes          int64              `json:"wal_disk_bytes,omitempty"`
+	TableStats            []tableStatJSON    `json:"table_stats,omitempty"`
+	DatabaseStats         []databaseStatJSON `json:"database_stats,omitempty"`
+	SlowQueries           []slowQueryJSON    `json:"slow_queries,omitempty"`
+}
+
+type databaseStatJSON struct {
+	DatabaseName  string  `json:"database_name"`
+	SizeBytes     int64   `json:"size_bytes"`
+	CacheHitRatio float64 `json:"cache_hit_ratio,omitempty"`
+}
+
+type slowQueryJSON struct {
+	Query           string  `json:"query"`
+	DatabaseName    string  `json:"database_name"`
+	Calls           int64   `json:"calls"`
+	TotalExecTimeMs float64 `json:"total_exec_time_ms"`
+	MeanExecTimeMs  float64 `json:"mean_exec_time_ms"`
+	MaxExecTimeMs   float64 `json:"max_exec_time_ms"`
+	Rows            int64   `json:"rows"`
+}
+
+type tableStatJSON struct {
+	SchemaName     string `json:"schema_name"`
+	TableName      string `json:"table_name"`
+	LiveTuples     int64  `json:"live_tuples"`
+	DeadTuples     int64  `json:"dead_tuples"`
+	SeqScan        int64  `json:"seq_scan"`
+	IdxScan        int64  `json:"idx_scan"`
+	NTupIns        int64  `json:"n_tup_ins"`
+	NTupUpd        int64  `json:"n_tup_upd"`
+	NTupDel        int64  `json:"n_tup_del"`
+	LastVacuum     string `json:"last_vacuum,omitempty"`
+	LastAutovacuum string `json:"last_autovacuum,omitempty"`
+	TableSizeBytes int64  `json:"table_size_bytes"`
+	DatabaseName   string `json:"database_name,omitempty"`
 }
 
 func protoRoleToString(r pgswarmv1.InstanceRole) string {
@@ -497,9 +542,48 @@ func protoInstancesToJSON(instances []*pgswarmv1.InstanceHealth) (json.RawMessag
 			TimelineID:            inst.TimelineId,
 			WalReceiverActive:     inst.WalReceiverActive,
 			ErrorMessage:          inst.ErrorMessage,
+			WalRecords:            inst.WalRecords,
+			WalBytes:              inst.WalBytes,
+			WalBuffersFull:        inst.WalBuffersFull,
+			WalDiskBytes:          inst.WalDiskBytes,
 		}
 		if inst.PgStartTime != nil {
 			ij.PgStartTime = inst.PgStartTime.AsTime().Format(time.RFC3339)
+		}
+		for _, ds := range inst.DatabaseStats {
+			ij.DatabaseStats = append(ij.DatabaseStats, databaseStatJSON{
+				DatabaseName:  ds.DatabaseName,
+				SizeBytes:     ds.SizeBytes,
+				CacheHitRatio: ds.CacheHitRatio,
+			})
+		}
+		for _, sq := range inst.SlowQueries {
+			ij.SlowQueries = append(ij.SlowQueries, slowQueryJSON{
+				Query:           sq.Query,
+				DatabaseName:    sq.DatabaseName,
+				Calls:           sq.Calls,
+				TotalExecTimeMs: sq.TotalExecTimeMs,
+				MeanExecTimeMs:  sq.MeanExecTimeMs,
+				MaxExecTimeMs:   sq.MaxExecTimeMs,
+				Rows:            sq.Rows,
+			})
+		}
+		for _, ts := range inst.TableStats {
+			ij.TableStats = append(ij.TableStats, tableStatJSON{
+				SchemaName:     ts.SchemaName,
+				TableName:      ts.TableName,
+				LiveTuples:     ts.LiveTuples,
+				DeadTuples:     ts.DeadTuples,
+				SeqScan:        ts.SeqScan,
+				IdxScan:        ts.IdxScan,
+				NTupIns:        ts.NTupIns,
+				NTupUpd:        ts.NTupUpd,
+				NTupDel:        ts.NTupDel,
+				LastVacuum:     ts.LastVacuum,
+				LastAutovacuum: ts.LastAutovacuum,
+				TableSizeBytes: ts.TableSizeBytes,
+				DatabaseName:   ts.DatabaseName,
+			})
 		}
 		out = append(out, ij)
 	}

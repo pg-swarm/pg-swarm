@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
+	"github.com/pg-swarm/pg-swarm/internal/shared/pgfence"
 )
 
 // Switchover performs a planned primary switchover: demotes the current
@@ -83,6 +84,11 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 
 	if _, err := primaryConn.Exec(ctx, "CHECKPOINT"); err != nil {
 		log.Warn().Err(err).Msg("checkpoint on primary failed (proceeding anyway)")
+	}
+
+	// 4b. Fence the old primary — block new writes and terminate client connections
+	if err := pgfence.FencePrimary(ctx, primaryConn); err != nil {
+		log.Warn().Err(err).Msg("fencing old primary failed (proceeding with switchover)")
 	}
 
 	// 5. Transfer the leader lease to the target pod

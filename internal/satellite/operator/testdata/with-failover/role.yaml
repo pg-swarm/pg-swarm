@@ -16,6 +16,12 @@ rules:
   - get
   - patch
 - apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
   - coordination.k8s.io
   resources:
   - leases

@@ -324,15 +324,15 @@ func (s *PostgresStore) UpdateSatelliteStorageClasses(ctx context.Context, id uu
 }
 
 func (s *PostgresStore) ListSatellitesByLabelSelector(ctx context.Context, selector map[string]string) ([]*models.Satellite, error) {
-	if selector == nil {
-		selector = make(map[string]string)
+	if len(selector) == 0 {
+		return nil, nil
 	}
 	selectorJSON, err := json.Marshal(selector)
 	if err != nil {
 		return nil, fmt.Errorf("marshal label selector: %w", err)
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+satCols+` FROM satellites WHERE labels @> $1::jsonb ORDER BY created_at DESC`, selectorJSON)
+		`SELECT `+satCols+` FROM satellites WHERE labels = $1::jsonb ORDER BY created_at DESC`, selectorJSON)
 	if err != nil {
 		return nil, fmt.Errorf("list satellites by label selector: %w", err)
 	}
@@ -435,7 +435,7 @@ func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.Clu
 func (s *PostgresStore) SetClusterPaused(ctx context.Context, id uuid.UUID, paused bool) (*models.ClusterConfig, error) {
 	state := models.ClusterStatePaused
 	if !paused {
-		state = models.ClusterStateRunning
+		state = models.ClusterStateCreating
 	}
 	row := s.pool.QueryRow(ctx,
 		`UPDATE cluster_configs SET paused = $1, state = $2, config_version = config_version + 1, updated_at = NOW()
@@ -826,6 +826,20 @@ func (s *PostgresStore) SetDefaultPostgresVersion(ctx context.Context, id uuid.U
 }
 
 // ---------- Health ----------
+
+// UpdateClusterConfigState sets the cluster config state based on health reports.
+// It only updates if the current state is not paused or deleting (user-controlled states).
+func (s *PostgresStore) UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE cluster_configs SET state = $1, updated_at = NOW()
+		 WHERE satellite_id = $2 AND name = $3 AND state NOT IN ('paused', 'deleting')`,
+		state, satelliteID, clusterName,
+	)
+	if err != nil {
+		return fmt.Errorf("update cluster config state: %w", err)
+	}
+	return nil
+}
 
 func (s *PostgresStore) UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error {
 	if health.Instances == nil {

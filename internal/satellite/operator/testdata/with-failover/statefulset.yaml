@@ -88,6 +88,11 @@ spec:
             secretKeyRef:
               key: superuser-password
               name: ha-pg-secret
+        - name: REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: replication-password
+              name: ha-pg-secret
         image: my-registry/failover:v1
         imagePullPolicy: IfNotPresent
         name: failover

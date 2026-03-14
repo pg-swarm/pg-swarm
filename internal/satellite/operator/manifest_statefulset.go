@@ -240,6 +240,19 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 
 	databaseSQL := buildDatabaseSQL(cfg.Databases)
 
+	// Block for creating databases on an already-initialised primary (config updates / pod restarts).
+	// Only runs on ordinal 0 when databases are defined and standby.signal is absent.
+	reinitDatabaseBlock := ""
+	if len(cfg.Databases) > 0 {
+		reinitDatabaseBlock = fmt.Sprintf(`
+    if [ "$ORDINAL" = "0" ] && [ ! -f "$PGDATA/standby.signal" ]; then
+        echo "Ensuring application databases exist"
+        pg_ctl -D "$PGDATA" start -w -o "-c listen_addresses='localhost'"
+%s
+        pg_ctl -D "$PGDATA" stop -w
+    fi`, databaseSQL)
+	}
+
 	// WAL symlink script block (used after initdb/pg_basebackup and in re-init path)
 	walSymlinkBlock := ""
 	walSymlinkIdempotentBlock := ""
@@ -269,7 +282,7 @@ PGDATA="%s"
 if [ -f "$PGDATA/PG_VERSION" ]; then
     echo "PGDATA already initialized, copying config only"
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s%s
     exit 0
 fi
 
@@ -299,7 +312,7 @@ else
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
     cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s%s
 fi
-`, pgDataPath, walSymlinkIdempotentBlock, databaseSQL, primaryArchiveBlock, walSymlinkBlock, cfg.ClusterName, headlessSvc, cfg.Namespace, replicaRestoreBlock, walSymlinkBlock)
+`, pgDataPath, walSymlinkIdempotentBlock, reinitDatabaseBlock, databaseSQL, primaryArchiveBlock, walSymlinkBlock, cfg.ClusterName, headlessSvc, cfg.Namespace, replicaRestoreBlock, walSymlinkBlock)
 
 	c := corev1.Container{
 		Name:    "pg-init",
@@ -506,6 +519,15 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
 						Key:                  "superuser-password",
+					},
+				},
+			},
+			{
+				Name: "REPLICATION_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "replication-password",
 					},
 				},
 			},

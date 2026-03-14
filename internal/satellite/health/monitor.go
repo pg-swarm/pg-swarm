@@ -133,6 +133,9 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	wg.Wait()
 
 	state := DeriveClusterState(instances, mc.Replicas)
+	if mc.Paused {
+		state = pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED
+	}
 
 	return &pgswarmv1.ClusterHealthReport{
 		ClusterName: mc.ClusterName,
@@ -236,6 +239,18 @@ func (m *Monitor) checkInstance(ctx context.Context, pod *corev1.Pod, namespace,
 		m.checkPrimary(ctx, conn, ih)
 	}
 
+	// 7. WAL statistics (pg_stat_wal)
+	m.collectWalStats(ctx, conn, ih)
+
+	// 8. WAL on-disk size
+	m.collectWalDiskSize(ctx, conn, ih)
+
+	// 9. Per-database sizes and table statistics
+	m.collectDatabaseStats(ctx, conn, ih, host, password)
+
+	// 10. Slow queries (pg_stat_statements — requires extension)
+	m.collectSlowQueries(ctx, conn, ih)
+
 	return ih
 }
 
@@ -284,6 +299,157 @@ func (m *Monitor) checkReplica(ctx context.Context, conn *pgx.Conn, ih *pgswarmv
 	}
 }
 
+// collectWalStats reads WAL write statistics from pg_stat_wal.
+func (m *Monitor) collectWalStats(ctx context.Context, conn *pgx.Conn, ih *pgswarmv1.InstanceHealth) {
+	err := conn.QueryRow(ctx,
+		"SELECT COALESCE(wal_records, 0)::bigint, COALESCE(wal_bytes, 0)::bigint, COALESCE(wal_buffers_full, 0)::bigint FROM pg_stat_wal",
+	).Scan(&ih.WalRecords, &ih.WalBytes, &ih.WalBuffersFull)
+	if err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to read WAL stats")
+	}
+}
+
+// collectWalDiskSize reads the total WAL directory size from pg_ls_waldir().
+func (m *Monitor) collectWalDiskSize(ctx context.Context, conn *pgx.Conn, ih *pgswarmv1.InstanceHealth) {
+	var walSize int64
+	if err := conn.QueryRow(ctx, "SELECT COALESCE(SUM(size), 0)::bigint FROM pg_ls_waldir()").Scan(&walSize); err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to read WAL disk size")
+	} else {
+		ih.WalDiskBytes = walSize
+	}
+}
+
+// collectDatabaseStats collects per-database sizes, cache hit ratios, and table statistics.
+func (m *Monitor) collectDatabaseStats(ctx context.Context, conn *pgx.Conn, ih *pgswarmv1.InstanceHealth, host, password string) {
+	rows, err := conn.Query(ctx,
+		"SELECT datname, pg_database_size(datname)::bigint FROM pg_database WHERE NOT datistemplate ORDER BY pg_database_size(datname) DESC")
+	if err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to read database sizes")
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		ds := &pgswarmv1.DatabaseStat{}
+		if err := rows.Scan(&ds.DatabaseName, &ds.SizeBytes); err != nil {
+			log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to scan database stat row")
+			continue
+		}
+		ih.DatabaseStats = append(ih.DatabaseStats, ds)
+	}
+
+	// Collect table stats + cache hit ratio from each database (limit to 5)
+	limit := 5
+	if len(ih.DatabaseStats) < limit {
+		limit = len(ih.DatabaseStats)
+	}
+	for _, ds := range ih.DatabaseStats[:limit] {
+		m.collectTablesForDB(ctx, ih, ds, host, password)
+	}
+}
+
+// collectTablesForDB opens a connection to a specific database, collects table stats
+// and the database-level cache hit ratio.
+func (m *Monitor) collectTablesForDB(ctx context.Context, ih *pgswarmv1.InstanceHealth, ds *pgswarmv1.DatabaseStat, host, password string) {
+	connStr := fmt.Sprintf("postgres://postgres:%s@%s:5432/%s?connect_timeout=3&sslmode=disable",
+		url.QueryEscape(password), host, url.PathEscape(ds.DatabaseName))
+
+	connCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(connCtx, connStr)
+	if err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Str("db", ds.DatabaseName).Msg("failed to connect for table stats")
+		return
+	}
+	defer conn.Close(ctx)
+
+	// Cache hit ratio from pg_statio_user_tables
+	var hits, reads int64
+	if err := conn.QueryRow(ctx, `
+		SELECT COALESCE(SUM(heap_blks_hit + idx_blks_hit + toast_blks_hit + tidx_blks_hit), 0)::bigint,
+		       COALESCE(SUM(heap_blks_read + idx_blks_read + toast_blks_read + tidx_blks_read), 0)::bigint
+		FROM pg_statio_user_tables`).Scan(&hits, &reads); err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Str("db", ds.DatabaseName).Msg("failed to read cache hit ratio")
+	} else if hits+reads > 0 {
+		ds.CacheHitRatio = float64(hits) / float64(hits+reads)
+	}
+
+	// Table stats
+	rows, err := conn.Query(ctx, `
+		SELECT schemaname, relname,
+			n_live_tup::bigint, n_dead_tup::bigint,
+			seq_scan::bigint, COALESCE(idx_scan, 0)::bigint,
+			n_tup_ins::bigint, n_tup_upd::bigint, n_tup_del::bigint,
+			COALESCE(to_char(last_vacuum, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			COALESCE(to_char(last_autovacuum, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			pg_total_relation_size(relid)::bigint
+		FROM pg_stat_user_tables
+		ORDER BY pg_total_relation_size(relid) DESC
+		LIMIT 30`)
+	if err != nil {
+		log.Debug().Err(err).Str("pod", ih.PodName).Str("db", ds.DatabaseName).Msg("failed to read table stats")
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		ts := &pgswarmv1.TableStat{DatabaseName: ds.DatabaseName}
+		if err := rows.Scan(
+			&ts.SchemaName, &ts.TableName,
+			&ts.LiveTuples, &ts.DeadTuples,
+			&ts.SeqScan, &ts.IdxScan,
+			&ts.NTupIns, &ts.NTupUpd, &ts.NTupDel,
+			&ts.LastVacuum, &ts.LastAutovacuum,
+			&ts.TableSizeBytes,
+		); err != nil {
+			log.Debug().Err(err).Str("pod", ih.PodName).Str("db", ds.DatabaseName).Msg("failed to scan table stat row")
+			continue
+		}
+		ih.TableStats = append(ih.TableStats, ts)
+	}
+}
+
+// collectSlowQueries reads top slow queries from pg_stat_statements (if available).
+func (m *Monitor) collectSlowQueries(ctx context.Context, conn *pgx.Conn, ih *pgswarmv1.InstanceHealth) {
+	rows, err := conn.Query(ctx, `
+		SELECT s.query, d.datname,
+			s.calls::bigint,
+			s.total_exec_time,
+			s.mean_exec_time,
+			s.max_exec_time,
+			s.rows::bigint
+		FROM pg_stat_statements s
+		JOIN pg_database d ON s.dbid = d.oid
+		WHERE s.query NOT LIKE 'SHOW%'
+		  AND s.query NOT LIKE '%pg_stat%'
+		  AND s.query NOT LIKE '%pg_database%'
+		  AND s.query NOT LIKE '%pg_ls_waldir%'
+		  AND s.calls > 0
+		ORDER BY s.mean_exec_time DESC
+		LIMIT 10`)
+	if err != nil {
+		// pg_stat_statements extension may not be installed — not an error
+		log.Debug().Err(err).Str("pod", ih.PodName).Msg("pg_stat_statements not available (extension may not be loaded)")
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		sq := &pgswarmv1.SlowQuery{}
+		if err := rows.Scan(
+			&sq.Query, &sq.DatabaseName,
+			&sq.Calls,
+			&sq.TotalExecTimeMs, &sq.MeanExecTimeMs, &sq.MaxExecTimeMs,
+			&sq.Rows,
+		); err != nil {
+			log.Debug().Err(err).Str("pod", ih.PodName).Msg("failed to scan slow query row")
+			continue
+		}
+		ih.SlowQueries = append(ih.SlowQueries, sq)
+	}
+}
+
 // DeriveClusterState determines the overall cluster state from instance health.
 func DeriveClusterState(instances []*pgswarmv1.InstanceHealth, expectedReplicas int32) pgswarmv1.ClusterState {
 	if len(instances) == 0 {
@@ -326,7 +492,8 @@ func severityForTransition(newState pgswarmv1.ClusterState) string {
 	switch newState {
 	case pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING:
 		return "info"
-	case pgswarmv1.ClusterState_CLUSTER_STATE_DEGRADED:
+	case pgswarmv1.ClusterState_CLUSTER_STATE_DEGRADED,
+		pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED:
 		return "warning"
 	case pgswarmv1.ClusterState_CLUSTER_STATE_FAILED:
 		return "error"

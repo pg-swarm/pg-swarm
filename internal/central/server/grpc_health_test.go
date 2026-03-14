@@ -17,6 +17,7 @@ func TestProtoStateToModel(t *testing.T) {
 		{pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING, models.ClusterStateRunning},
 		{pgswarmv1.ClusterState_CLUSTER_STATE_DEGRADED, models.ClusterStateDegraded},
 		{pgswarmv1.ClusterState_CLUSTER_STATE_FAILED, models.ClusterStateFailed},
+		{pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED, models.ClusterStatePaused},
 		{pgswarmv1.ClusterState_CLUSTER_STATE_DELETING, models.ClusterStateDeleting},
 		{pgswarmv1.ClusterState_CLUSTER_STATE_CREATING, models.ClusterStateCreating},
 		{pgswarmv1.ClusterState_CLUSTER_STATE_UNSPECIFIED, models.ClusterStateCreating},

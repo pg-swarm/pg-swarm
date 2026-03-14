@@ -2,6 +2,11 @@ import { useState } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
+import { ClusterBadge } from '../components/Badge';
+import {
+  ChevronDown, ChevronRight, Plus, Pencil, Trash2, Save, X,
+  FileCode, ArrowRight, Layers, Database, Server, GitBranch
+} from 'lucide-react';
 
 export default function DeploymentRules() {
   const { deploymentRules, profiles, clusters, refresh } = useData();
@@ -113,7 +118,7 @@ export default function DeploymentRules() {
     <>
       <div className="card-head-bar">
         <span className="card-head-title">Deployment Rules</span>
-        <button className="btn btn-approve" onClick={startCreate}>+ New Rule</button>
+        <button className="btn btn-approve" onClick={startCreate}><Plus size={14} /> New Rule</button>
       </div>
 
       <p className="muted sm" style={{ marginBottom: 16 }}>
@@ -143,12 +148,9 @@ export default function DeploymentRules() {
               <div>
                 <div style={{ marginBottom: 4 }}>
                   {Object.entries(form.label_selector).map(([k, v]) => (
-                    <span key={k} className="tag" style={{ marginRight: 4 }}>
+                    <span key={k} className="tag tag-removable" style={{ marginRight: 4 }}>
                       {k}={v}
-                      <button
-                        style={{ marginLeft: 4, cursor: 'pointer', background: 'none', border: 'none', color: 'inherit', padding: 0, fontSize: '0.85em' }}
-                        onClick={() => removeSelectorEntry(k)}
-                      >x</button>
+                      <button className="tag-x" onClick={() => removeSelectorEntry(k)}><X size={10} /></button>
                     </span>
                   ))}
                   {Object.keys(form.label_selector).length === 0 && <span className="muted sm">Empty = matches all satellites</span>}
@@ -156,7 +158,7 @@ export default function DeploymentRules() {
                 <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                   <input className="input" placeholder="key" value={selectorKey} onChange={e => setSelectorKey(e.target.value)} style={{ width: 120 }} />
                   <input className="input" placeholder="value" value={selectorVal} onChange={e => setSelectorVal(e.target.value)} style={{ width: 120 }} />
-                  <button className="btn btn-sm" onClick={addSelectorEntry}>+</button>
+                  <button className="btn btn-sm" onClick={addSelectorEntry}><Plus size={12} /></button>
                 </div>
               </div>
             </div>
@@ -170,15 +172,19 @@ export default function DeploymentRules() {
             </div>
           </div>
           <div className="actions" style={{ marginTop: 12 }}>
-            <button className="btn btn-approve" onClick={save} disabled={!canSave}>Save</button>
-            <button className="btn btn-reject" onClick={() => { setCreating(false); setEditing(null); }}>Cancel</button>
+            <button className="btn btn-approve" onClick={save} disabled={!canSave}><Save size={13} /> Save</button>
+            <button className="btn btn-reject" onClick={() => { setCreating(false); setEditing(null); }}><X size={13} /> Cancel</button>
           </div>
         </div>
       )}
 
       {/* List */}
       {deploymentRules.length === 0 && !showForm ? (
-        <div className="empty">No deployment rules yet. Create one to deploy a profile to matching satellites.</div>
+        <div className="empty-state">
+          <GitBranch size={48} strokeWidth={1.2} />
+          <h3>No deployment rules yet</h3>
+          <p>Create one to deploy a profile to matching satellites.</p>
+        </div>
       ) : (
         <div className="dg-list">
           {deploymentRules.map(rule => {
@@ -191,7 +197,9 @@ export default function DeploymentRules() {
               <div className={'dg-card' + (isExpanded ? ' dg-expanded' : '')} key={rule.id}>
                 <div className="dg-header" onClick={() => toggleExpand(rule.id)}>
                   <div className="dg-header-left">
-                    <span className="dg-expand-icon">{isExpanded ? '\u25bc' : '\u25b6'}</span>
+                    {isExpanded
+                      ? <ChevronDown size={14} className="dg-expand-icon" />
+                      : <ChevronRight size={14} className="dg-expand-icon" />}
                     <div>
                       <h3 className="dg-name">{rule.name}</h3>
                       <p className="muted sm">{rule.namespace}/{rule.cluster_name}</p>
@@ -200,27 +208,27 @@ export default function DeploymentRules() {
                   <div className="dg-header-right">
                     <div className="dg-meta">
                       <span className="dg-meta-item">
-                        <span className="dg-meta-icon">{'\u2630'}</span>
+                        <FileCode size={13} />
                         {profileName(rule.profile_id)}
                       </span>
                       <span className="dg-meta-item">
-                        <span className="dg-meta-icon">{'\u21d2'}</span>
+                        <ArrowRight size={13} />
                         {renderSelector(rule.label_selector)}
                       </span>
                       <span className="dg-meta-item">
-                        <span className="dg-meta-icon">{'\u26C1'}</span>
+                        <Layers size={13} />
                         {count} cluster{count !== 1 ? 's' : ''}
                       </span>
                       {spec.replicas && (
                         <span className="dg-meta-item">
-                          <span className="dg-meta-icon">{'\u2261'}</span>
+                          <Server size={13} />
                           {spec.replicas} replicas
                         </span>
                       )}
                     </div>
                     <div className="actions" onClick={e => e.stopPropagation()}>
-                      <button className="btn btn-sm" onClick={() => startEdit(rule)}>Edit</button>
-                      <button className="btn btn-sm btn-reject" onClick={() => remove(rule.id)}>Delete</button>
+                      <button className="btn btn-sm" onClick={() => startEdit(rule)}><Pencil size={11} /> Edit</button>
+                      <button className="btn btn-sm btn-reject" onClick={() => remove(rule.id)}><Trash2 size={11} /> Delete</button>
                     </div>
                   </div>
                 </div>
@@ -260,7 +268,7 @@ export default function DeploymentRules() {
                                 <td className="mono">{cl.name}</td>
                                 <td className="muted">{cl.namespace}</td>
                                 <td className="muted">{cl.satellite_id?.slice(0, 8) || '-'}</td>
-                                <td><ClusterStateBadge state={cl.state} /></td>
+                                <td><ClusterBadge state={cl.state} /></td>
                                 <td className="muted">v{cl.config_version}</td>
                                 <td className="muted">{timeAgo(cl.updated_at)}</td>
                               </tr>
@@ -277,20 +285,5 @@ export default function DeploymentRules() {
         </div>
       )}
     </>
-  );
-}
-
-function ClusterStateBadge({ state }) {
-  const colors = {
-    running: 'badge-green',
-    creating: 'badge-amber',
-    degraded: 'badge-amber',
-    failed: 'badge-red',
-    deleting: 'badge-gray',
-  };
-  return (
-    <span className={'badge ' + (colors[state] || 'badge-gray')}>
-      <span className="dot" />{state}
-    </span>
   );
 }

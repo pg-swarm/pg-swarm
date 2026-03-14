@@ -104,8 +104,20 @@ type InstanceHealth struct {
 	TimelineId            int64                  `protobuf:"varint,10,opt,name=timeline_id,json=timelineId,proto3" json:"timeline_id,omitempty"`                                    // pg_control_checkpoint() timeline
 	PgStartTime           *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=pg_start_time,json=pgStartTime,proto3" json:"pg_start_time,omitempty"`                                // pg_postmaster_start_time()
 	WalReceiverActive     bool                   `protobuf:"varint,12,opt,name=wal_receiver_active,json=walReceiverActive,proto3" json:"wal_receiver_active,omitempty"`             // pg_stat_wal_receiver.status = 'streaming' (replicas)
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// WAL statistics (from pg_stat_wal)
+	WalRecords     int64 `protobuf:"varint,13,opt,name=wal_records,json=walRecords,proto3" json:"wal_records,omitempty"`
+	WalBytes       int64 `protobuf:"varint,14,opt,name=wal_bytes,json=walBytes,proto3" json:"wal_bytes,omitempty"`
+	WalBuffersFull int64 `protobuf:"varint,15,opt,name=wal_buffers_full,json=walBuffersFull,proto3" json:"wal_buffers_full,omitempty"`
+	// User table statistics (from pg_stat_user_tables, per-database)
+	TableStats []*TableStat `protobuf:"bytes,16,rep,name=table_stats,json=tableStats,proto3" json:"table_stats,omitempty"`
+	// Actual WAL directory size on disk (from pg_ls_waldir)
+	WalDiskBytes int64 `protobuf:"varint,17,opt,name=wal_disk_bytes,json=walDiskBytes,proto3" json:"wal_disk_bytes,omitempty"`
+	// Per-database sizes
+	DatabaseStats []*DatabaseStat `protobuf:"bytes,18,rep,name=database_stats,json=databaseStats,proto3" json:"database_stats,omitempty"`
+	// Slow queries (from pg_stat_statements, top by mean_exec_time)
+	SlowQueries   []*SlowQuery `protobuf:"bytes,19,rep,name=slow_queries,json=slowQueries,proto3" json:"slow_queries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InstanceHealth) Reset() {
@@ -222,6 +234,347 @@ func (x *InstanceHealth) GetWalReceiverActive() bool {
 	return false
 }
 
+func (x *InstanceHealth) GetWalRecords() int64 {
+	if x != nil {
+		return x.WalRecords
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetWalBytes() int64 {
+	if x != nil {
+		return x.WalBytes
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetWalBuffersFull() int64 {
+	if x != nil {
+		return x.WalBuffersFull
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetTableStats() []*TableStat {
+	if x != nil {
+		return x.TableStats
+	}
+	return nil
+}
+
+func (x *InstanceHealth) GetWalDiskBytes() int64 {
+	if x != nil {
+		return x.WalDiskBytes
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetDatabaseStats() []*DatabaseStat {
+	if x != nil {
+		return x.DatabaseStats
+	}
+	return nil
+}
+
+func (x *InstanceHealth) GetSlowQueries() []*SlowQuery {
+	if x != nil {
+		return x.SlowQueries
+	}
+	return nil
+}
+
+type DatabaseStat struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DatabaseName  string                 `protobuf:"bytes,1,opt,name=database_name,json=databaseName,proto3" json:"database_name,omitempty"`
+	SizeBytes     int64                  `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	CacheHitRatio float64                `protobuf:"fixed64,3,opt,name=cache_hit_ratio,json=cacheHitRatio,proto3" json:"cache_hit_ratio,omitempty"` // 0.0–1.0, from pg_statio_user_tables
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DatabaseStat) Reset() {
+	*x = DatabaseStat{}
+	mi := &file_health_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DatabaseStat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DatabaseStat) ProtoMessage() {}
+
+func (x *DatabaseStat) ProtoReflect() protoreflect.Message {
+	mi := &file_health_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DatabaseStat.ProtoReflect.Descriptor instead.
+func (*DatabaseStat) Descriptor() ([]byte, []int) {
+	return file_health_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *DatabaseStat) GetDatabaseName() string {
+	if x != nil {
+		return x.DatabaseName
+	}
+	return ""
+}
+
+func (x *DatabaseStat) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *DatabaseStat) GetCacheHitRatio() float64 {
+	if x != nil {
+		return x.CacheHitRatio
+	}
+	return 0
+}
+
+type SlowQuery struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Query           string                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
+	DatabaseName    string                 `protobuf:"bytes,2,opt,name=database_name,json=databaseName,proto3" json:"database_name,omitempty"`
+	Calls           int64                  `protobuf:"varint,3,opt,name=calls,proto3" json:"calls,omitempty"`
+	TotalExecTimeMs float64                `protobuf:"fixed64,4,opt,name=total_exec_time_ms,json=totalExecTimeMs,proto3" json:"total_exec_time_ms,omitempty"`
+	MeanExecTimeMs  float64                `protobuf:"fixed64,5,opt,name=mean_exec_time_ms,json=meanExecTimeMs,proto3" json:"mean_exec_time_ms,omitempty"`
+	MaxExecTimeMs   float64                `protobuf:"fixed64,6,opt,name=max_exec_time_ms,json=maxExecTimeMs,proto3" json:"max_exec_time_ms,omitempty"`
+	Rows            int64                  `protobuf:"varint,7,opt,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SlowQuery) Reset() {
+	*x = SlowQuery{}
+	mi := &file_health_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SlowQuery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SlowQuery) ProtoMessage() {}
+
+func (x *SlowQuery) ProtoReflect() protoreflect.Message {
+	mi := &file_health_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SlowQuery.ProtoReflect.Descriptor instead.
+func (*SlowQuery) Descriptor() ([]byte, []int) {
+	return file_health_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SlowQuery) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+func (x *SlowQuery) GetDatabaseName() string {
+	if x != nil {
+		return x.DatabaseName
+	}
+	return ""
+}
+
+func (x *SlowQuery) GetCalls() int64 {
+	if x != nil {
+		return x.Calls
+	}
+	return 0
+}
+
+func (x *SlowQuery) GetTotalExecTimeMs() float64 {
+	if x != nil {
+		return x.TotalExecTimeMs
+	}
+	return 0
+}
+
+func (x *SlowQuery) GetMeanExecTimeMs() float64 {
+	if x != nil {
+		return x.MeanExecTimeMs
+	}
+	return 0
+}
+
+func (x *SlowQuery) GetMaxExecTimeMs() float64 {
+	if x != nil {
+		return x.MaxExecTimeMs
+	}
+	return 0
+}
+
+func (x *SlowQuery) GetRows() int64 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+type TableStat struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	SchemaName     string                 `protobuf:"bytes,1,opt,name=schema_name,json=schemaName,proto3" json:"schema_name,omitempty"`
+	TableName      string                 `protobuf:"bytes,2,opt,name=table_name,json=tableName,proto3" json:"table_name,omitempty"`
+	LiveTuples     int64                  `protobuf:"varint,3,opt,name=live_tuples,json=liveTuples,proto3" json:"live_tuples,omitempty"`
+	DeadTuples     int64                  `protobuf:"varint,4,opt,name=dead_tuples,json=deadTuples,proto3" json:"dead_tuples,omitempty"`
+	SeqScan        int64                  `protobuf:"varint,5,opt,name=seq_scan,json=seqScan,proto3" json:"seq_scan,omitempty"`
+	IdxScan        int64                  `protobuf:"varint,6,opt,name=idx_scan,json=idxScan,proto3" json:"idx_scan,omitempty"`
+	NTupIns        int64                  `protobuf:"varint,7,opt,name=n_tup_ins,json=nTupIns,proto3" json:"n_tup_ins,omitempty"`
+	NTupUpd        int64                  `protobuf:"varint,8,opt,name=n_tup_upd,json=nTupUpd,proto3" json:"n_tup_upd,omitempty"`
+	NTupDel        int64                  `protobuf:"varint,9,opt,name=n_tup_del,json=nTupDel,proto3" json:"n_tup_del,omitempty"`
+	LastVacuum     string                 `protobuf:"bytes,10,opt,name=last_vacuum,json=lastVacuum,proto3" json:"last_vacuum,omitempty"`             // RFC3339 timestamp or empty
+	LastAutovacuum string                 `protobuf:"bytes,11,opt,name=last_autovacuum,json=lastAutovacuum,proto3" json:"last_autovacuum,omitempty"` // RFC3339 timestamp or empty
+	TableSizeBytes int64                  `protobuf:"varint,12,opt,name=table_size_bytes,json=tableSizeBytes,proto3" json:"table_size_bytes,omitempty"`
+	DatabaseName   string                 `protobuf:"bytes,13,opt,name=database_name,json=databaseName,proto3" json:"database_name,omitempty"` // which database this table belongs to
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *TableStat) Reset() {
+	*x = TableStat{}
+	mi := &file_health_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TableStat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TableStat) ProtoMessage() {}
+
+func (x *TableStat) ProtoReflect() protoreflect.Message {
+	mi := &file_health_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TableStat.ProtoReflect.Descriptor instead.
+func (*TableStat) Descriptor() ([]byte, []int) {
+	return file_health_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *TableStat) GetSchemaName() string {
+	if x != nil {
+		return x.SchemaName
+	}
+	return ""
+}
+
+func (x *TableStat) GetTableName() string {
+	if x != nil {
+		return x.TableName
+	}
+	return ""
+}
+
+func (x *TableStat) GetLiveTuples() int64 {
+	if x != nil {
+		return x.LiveTuples
+	}
+	return 0
+}
+
+func (x *TableStat) GetDeadTuples() int64 {
+	if x != nil {
+		return x.DeadTuples
+	}
+	return 0
+}
+
+func (x *TableStat) GetSeqScan() int64 {
+	if x != nil {
+		return x.SeqScan
+	}
+	return 0
+}
+
+func (x *TableStat) GetIdxScan() int64 {
+	if x != nil {
+		return x.IdxScan
+	}
+	return 0
+}
+
+func (x *TableStat) GetNTupIns() int64 {
+	if x != nil {
+		return x.NTupIns
+	}
+	return 0
+}
+
+func (x *TableStat) GetNTupUpd() int64 {
+	if x != nil {
+		return x.NTupUpd
+	}
+	return 0
+}
+
+func (x *TableStat) GetNTupDel() int64 {
+	if x != nil {
+		return x.NTupDel
+	}
+	return 0
+}
+
+func (x *TableStat) GetLastVacuum() string {
+	if x != nil {
+		return x.LastVacuum
+	}
+	return ""
+}
+
+func (x *TableStat) GetLastAutovacuum() string {
+	if x != nil {
+		return x.LastAutovacuum
+	}
+	return ""
+}
+
+func (x *TableStat) GetTableSizeBytes() int64 {
+	if x != nil {
+		return x.TableSizeBytes
+	}
+	return 0
+}
+
+func (x *TableStat) GetDatabaseName() string {
+	if x != nil {
+		return x.DatabaseName
+	}
+	return ""
+}
+
 type EventReport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
@@ -235,7 +588,7 @@ type EventReport struct {
 
 func (x *EventReport) Reset() {
 	*x = EventReport{}
-	mi := &file_health_proto_msgTypes[2]
+	mi := &file_health_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -247,7 +600,7 @@ func (x *EventReport) String() string {
 func (*EventReport) ProtoMessage() {}
 
 func (x *EventReport) ProtoReflect() protoreflect.Message {
-	mi := &file_health_proto_msgTypes[2]
+	mi := &file_health_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -260,7 +613,7 @@ func (x *EventReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventReport.ProtoReflect.Descriptor instead.
 func (*EventReport) Descriptor() ([]byte, []int) {
-	return file_health_proto_rawDescGZIP(), []int{2}
+	return file_health_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *EventReport) GetClusterName() string {
@@ -308,7 +661,7 @@ const file_health_proto_rawDesc = "" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12.\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x18.pgswarm.v1.ClusterStateR\x05state\x128\n" +
 	"\tinstances\x18\x03 \x03(\v2\x1a.pgswarm.v1.InstanceHealthR\tinstances\x128\n" +
-	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\x8d\x04\n" +
+	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xce\x06\n" +
 	"\x0eInstanceHealth\x12\x19\n" +
 	"\bpod_name\x18\x01 \x01(\tR\apodName\x12,\n" +
 	"\x04role\x18\x02 \x01(\x0e2\x18.pgswarm.v1.InstanceRoleR\x04role\x12\x14\n" +
@@ -323,7 +676,49 @@ const file_health_proto_rawDesc = "" +
 	" \x01(\x03R\n" +
 	"timelineId\x12>\n" +
 	"\rpg_start_time\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\vpgStartTime\x12.\n" +
-	"\x13wal_receiver_active\x18\f \x01(\bR\x11walReceiverActive\"\xb8\x01\n" +
+	"\x13wal_receiver_active\x18\f \x01(\bR\x11walReceiverActive\x12\x1f\n" +
+	"\vwal_records\x18\r \x01(\x03R\n" +
+	"walRecords\x12\x1b\n" +
+	"\twal_bytes\x18\x0e \x01(\x03R\bwalBytes\x12(\n" +
+	"\x10wal_buffers_full\x18\x0f \x01(\x03R\x0ewalBuffersFull\x126\n" +
+	"\vtable_stats\x18\x10 \x03(\v2\x15.pgswarm.v1.TableStatR\n" +
+	"tableStats\x12$\n" +
+	"\x0ewal_disk_bytes\x18\x11 \x01(\x03R\fwalDiskBytes\x12?\n" +
+	"\x0edatabase_stats\x18\x12 \x03(\v2\x18.pgswarm.v1.DatabaseStatR\rdatabaseStats\x128\n" +
+	"\fslow_queries\x18\x13 \x03(\v2\x15.pgswarm.v1.SlowQueryR\vslowQueries\"z\n" +
+	"\fDatabaseStat\x12#\n" +
+	"\rdatabase_name\x18\x01 \x01(\tR\fdatabaseName\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\x12&\n" +
+	"\x0fcache_hit_ratio\x18\x03 \x01(\x01R\rcacheHitRatio\"\xf1\x01\n" +
+	"\tSlowQuery\x12\x14\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\x12#\n" +
+	"\rdatabase_name\x18\x02 \x01(\tR\fdatabaseName\x12\x14\n" +
+	"\x05calls\x18\x03 \x01(\x03R\x05calls\x12+\n" +
+	"\x12total_exec_time_ms\x18\x04 \x01(\x01R\x0ftotalExecTimeMs\x12)\n" +
+	"\x11mean_exec_time_ms\x18\x05 \x01(\x01R\x0emeanExecTimeMs\x12'\n" +
+	"\x10max_exec_time_ms\x18\x06 \x01(\x01R\rmaxExecTimeMs\x12\x12\n" +
+	"\x04rows\x18\a \x01(\x03R\x04rows\"\xb0\x03\n" +
+	"\tTableStat\x12\x1f\n" +
+	"\vschema_name\x18\x01 \x01(\tR\n" +
+	"schemaName\x12\x1d\n" +
+	"\n" +
+	"table_name\x18\x02 \x01(\tR\ttableName\x12\x1f\n" +
+	"\vlive_tuples\x18\x03 \x01(\x03R\n" +
+	"liveTuples\x12\x1f\n" +
+	"\vdead_tuples\x18\x04 \x01(\x03R\n" +
+	"deadTuples\x12\x19\n" +
+	"\bseq_scan\x18\x05 \x01(\x03R\aseqScan\x12\x19\n" +
+	"\bidx_scan\x18\x06 \x01(\x03R\aidxScan\x12\x1a\n" +
+	"\tn_tup_ins\x18\a \x01(\x03R\anTupIns\x12\x1a\n" +
+	"\tn_tup_upd\x18\b \x01(\x03R\anTupUpd\x12\x1a\n" +
+	"\tn_tup_del\x18\t \x01(\x03R\anTupDel\x12\x1f\n" +
+	"\vlast_vacuum\x18\n" +
+	" \x01(\tR\n" +
+	"lastVacuum\x12'\n" +
+	"\x0flast_autovacuum\x18\v \x01(\tR\x0elastAutovacuum\x12(\n" +
+	"\x10table_size_bytes\x18\f \x01(\x03R\x0etableSizeBytes\x12#\n" +
+	"\rdatabase_name\x18\r \x01(\tR\fdatabaseName\"\xb8\x01\n" +
 	"\vEventReport\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1a\n" +
 	"\bseverity\x18\x02 \x01(\tR\bseverity\x12\x18\n" +
@@ -343,27 +738,33 @@ func file_health_proto_rawDescGZIP() []byte {
 	return file_health_proto_rawDescData
 }
 
-var file_health_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_health_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_health_proto_goTypes = []any{
 	(*ClusterHealthReport)(nil),   // 0: pgswarm.v1.ClusterHealthReport
 	(*InstanceHealth)(nil),        // 1: pgswarm.v1.InstanceHealth
-	(*EventReport)(nil),           // 2: pgswarm.v1.EventReport
-	(ClusterState)(0),             // 3: pgswarm.v1.ClusterState
-	(*timestamppb.Timestamp)(nil), // 4: google.protobuf.Timestamp
-	(InstanceRole)(0),             // 5: pgswarm.v1.InstanceRole
+	(*DatabaseStat)(nil),          // 2: pgswarm.v1.DatabaseStat
+	(*SlowQuery)(nil),             // 3: pgswarm.v1.SlowQuery
+	(*TableStat)(nil),             // 4: pgswarm.v1.TableStat
+	(*EventReport)(nil),           // 5: pgswarm.v1.EventReport
+	(ClusterState)(0),             // 6: pgswarm.v1.ClusterState
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+	(InstanceRole)(0),             // 8: pgswarm.v1.InstanceRole
 }
 var file_health_proto_depIdxs = []int32{
-	3, // 0: pgswarm.v1.ClusterHealthReport.state:type_name -> pgswarm.v1.ClusterState
+	6, // 0: pgswarm.v1.ClusterHealthReport.state:type_name -> pgswarm.v1.ClusterState
 	1, // 1: pgswarm.v1.ClusterHealthReport.instances:type_name -> pgswarm.v1.InstanceHealth
-	4, // 2: pgswarm.v1.ClusterHealthReport.timestamp:type_name -> google.protobuf.Timestamp
-	5, // 3: pgswarm.v1.InstanceHealth.role:type_name -> pgswarm.v1.InstanceRole
-	4, // 4: pgswarm.v1.InstanceHealth.pg_start_time:type_name -> google.protobuf.Timestamp
-	4, // 5: pgswarm.v1.EventReport.timestamp:type_name -> google.protobuf.Timestamp
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	7, // 2: pgswarm.v1.ClusterHealthReport.timestamp:type_name -> google.protobuf.Timestamp
+	8, // 3: pgswarm.v1.InstanceHealth.role:type_name -> pgswarm.v1.InstanceRole
+	7, // 4: pgswarm.v1.InstanceHealth.pg_start_time:type_name -> google.protobuf.Timestamp
+	4, // 5: pgswarm.v1.InstanceHealth.table_stats:type_name -> pgswarm.v1.TableStat
+	2, // 6: pgswarm.v1.InstanceHealth.database_stats:type_name -> pgswarm.v1.DatabaseStat
+	3, // 7: pgswarm.v1.InstanceHealth.slow_queries:type_name -> pgswarm.v1.SlowQuery
+	7, // 8: pgswarm.v1.EventReport.timestamp:type_name -> google.protobuf.Timestamp
+	9, // [9:9] is the sub-list for method output_type
+	9, // [9:9] is the sub-list for method input_type
+	9, // [9:9] is the sub-list for extension type_name
+	9, // [9:9] is the sub-list for extension extendee
+	0, // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_health_proto_init() }
@@ -378,7 +779,7 @@ func file_health_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_health_proto_rawDesc), len(file_health_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

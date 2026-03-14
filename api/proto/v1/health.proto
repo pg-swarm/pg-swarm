@@ -27,6 +27,55 @@ message InstanceHealth {
   int64 timeline_id = 10;             // pg_control_checkpoint() timeline
   google.protobuf.Timestamp pg_start_time = 11; // pg_postmaster_start_time()
   bool wal_receiver_active = 12;      // pg_stat_wal_receiver.status = 'streaming' (replicas)
+
+  // WAL statistics (from pg_stat_wal)
+  int64 wal_records = 13;
+  int64 wal_bytes = 14;
+  int64 wal_buffers_full = 15;
+
+  // User table statistics (from pg_stat_user_tables, per-database)
+  repeated TableStat table_stats = 16;
+
+  // Actual WAL directory size on disk (from pg_ls_waldir)
+  int64 wal_disk_bytes = 17;
+
+  // Per-database sizes
+  repeated DatabaseStat database_stats = 18;
+
+  // Slow queries (from pg_stat_statements, top by mean_exec_time)
+  repeated SlowQuery slow_queries = 19;
+}
+
+message DatabaseStat {
+  string database_name = 1;
+  int64 size_bytes = 2;
+  double cache_hit_ratio = 3; // 0.0–1.0, from pg_statio_user_tables
+}
+
+message SlowQuery {
+  string query = 1;
+  string database_name = 2;
+  int64 calls = 3;
+  double total_exec_time_ms = 4;
+  double mean_exec_time_ms = 5;
+  double max_exec_time_ms = 6;
+  int64 rows = 7;
+}
+
+message TableStat {
+  string schema_name = 1;
+  string table_name = 2;
+  int64 live_tuples = 3;
+  int64 dead_tuples = 4;
+  int64 seq_scan = 5;
+  int64 idx_scan = 6;
+  int64 n_tup_ins = 7;
+  int64 n_tup_upd = 8;
+  int64 n_tup_del = 9;
+  string last_vacuum = 10;       // RFC3339 timestamp or empty
+  string last_autovacuum = 11;   // RFC3339 timestamp or empty
+  int64 table_size_bytes = 12;
+  string database_name = 13;    // which database this table belongs to
 }
 
 message EventReport {

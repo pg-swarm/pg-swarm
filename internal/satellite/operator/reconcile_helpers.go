@@ -201,6 +201,50 @@ func createOrUpdateRoleBinding(ctx context.Context, client kubernetes.Interface,
 	return err // RoleBinding roleRef is immutable — no update needed
 }
 
+// reconcilePVCFinalizers ensures PVC finalizers match the current DeletionProtection
+// setting. VolumeClaimTemplates are immutable after StatefulSet creation, so we
+// must patch the actual PVCs to add or remove the finalizer.
+func reconcilePVCFinalizers(ctx context.Context, client kubernetes.Interface, namespace, clusterName string, protect bool) error {
+	pvcs, err := client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", LabelCluster, clusterName),
+	})
+	if err != nil {
+		return fmt.Errorf("list PVCs: %w", err)
+	}
+
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		has := false
+		for _, f := range pvc.Finalizers {
+			if f == FinalizerPGSwarm {
+				has = true
+				break
+			}
+		}
+
+		if protect && !has {
+			// Add finalizer
+			pvc.Finalizers = append(pvc.Finalizers, FinalizerPGSwarm)
+			if _, err := client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
+				log.Warn().Err(err).Str("pvc", pvc.Name).Msg("failed to add finalizer to PVC")
+			}
+		} else if !protect && has {
+			// Remove finalizer
+			filtered := make([]string, 0, len(pvc.Finalizers))
+			for _, f := range pvc.Finalizers {
+				if f != FinalizerPGSwarm {
+					filtered = append(filtered, f)
+				}
+			}
+			pvc.Finalizers = filtered
+			if _, err := client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
+				log.Warn().Err(err).Str("pvc", pvc.Name).Msg("failed to remove finalizer from PVC")
+			}
+		}
+	}
+	return nil
+}
+
 // removeFinalizedPVCs strips the pg-swarm finalizer from PVCs belonging to the
 // cluster's StatefulSet and deletes them. PVCs follow the naming convention
 // <vct-name>-<sts-name>-<ordinal>.
