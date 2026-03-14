@@ -346,8 +346,8 @@ func TestManifests_CustomNamespace(t *testing.T) {
 	// Init script DNS should reference the custom namespace
 	init := sts.Spec.Template.Spec.InitContainers[0]
 	initScript := init.Command[2]
-	if !strings.Contains(initScript, "edge-pg-headless.tenant-alpha.svc.cluster.local") {
-		t.Error("init script PRIMARY_HOST should use tenant-alpha namespace")
+	if !strings.Contains(initScript, "edge-pg-rw.tenant-alpha.svc.cluster.local") {
+		t.Error("init script PRIMARY_HOST should use tenant-alpha namespace via RW service")
 	}
 }
 
