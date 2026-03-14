@@ -17,6 +17,8 @@ message SatelliteMessage {
     ClusterHealthReport health_report = 2;
     EventReport event_report = 3;
     ConfigAck config_ack = 4;
+    StorageClassReport storage_class_report = 5;
+    SwitchoverResult switchover_result = 6;
   }
 }
 
@@ -25,8 +27,38 @@ message CentralMessage {
     ClusterConfig cluster_config = 1;
     DeleteCluster delete_cluster = 2;
     HeartbeatAck heartbeat_ack = 3;
+    RequestStorageClasses request_storage_classes = 4;
+    SwitchoverRequest switchover = 5;
   }
 }
+
+// SwitchoverRequest tells the satellite to promote a specific replica to primary.
+message SwitchoverRequest {
+  string cluster_name = 1;
+  string namespace = 2;
+  string target_pod = 3; // pod to promote (must be a replica)
+}
+
+// SwitchoverResult is sent back by the satellite after a switchover attempt.
+message SwitchoverResult {
+  string cluster_name = 1;
+  bool success = 2;
+  string error_message = 3;
+}
+
+message StorageClassReport {
+  repeated StorageClassInfo storage_classes = 1;
+}
+
+message StorageClassInfo {
+  string name = 1;
+  string provisioner = 2;
+  string reclaim_policy = 3;
+  string volume_binding_mode = 4;
+  bool is_default = 5;
+}
+
+message RequestStorageClasses {}
 
 message Heartbeat {
   google.protobuf.Timestamp timestamp = 1;
@@ -56,6 +88,11 @@ message ClusterConfig {
   ArchiveSpec archive = 10;           // optional WAL archiving config
   repeated DatabaseSpec databases = 11; // databases to create with their owner users
   FailoverSpec failover = 12;            // optional automatic failover sidecar
+  StorageSpec wal_storage = 13;          // optional separate WAL volume
+  string profile_name = 14;                      // name of the source profile (for K8s labels)
+  map<string, string> label_selector = 15;       // deployment rule label selector (for K8s labels)
+  bool paused = 16;                              // when true, RW service is removed (read-only mode)
+  bool deletion_protection = 17;                  // when true, PVCs get a finalizer to prevent accidental deletion
 }
 
 message PostgresSpec {

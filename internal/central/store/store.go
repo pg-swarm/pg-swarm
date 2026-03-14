@@ -16,12 +16,9 @@ type Store interface {
 	UpdateSatelliteState(ctx context.Context, id uuid.UUID, state models.SatelliteState) error
 	SetSatelliteAuthToken(ctx context.Context, id uuid.UUID, tokenHash string) error
 	UpdateSatelliteHeartbeat(ctx context.Context, id uuid.UUID) error
-
-	// Groups
-	CreateGroup(ctx context.Context, group *models.EdgeGroup) error
-	GetGroup(ctx context.Context, id uuid.UUID) (*models.EdgeGroup, error)
-	ListGroups(ctx context.Context) ([]*models.EdgeGroup, error)
-	AssignSatelliteToGroup(ctx context.Context, satelliteID, groupID uuid.UUID) error
+	UpdateSatelliteLabels(ctx context.Context, id uuid.UUID, labels map[string]string) error
+	UpdateSatelliteStorageClasses(ctx context.Context, id uuid.UUID, classes []models.StorageClassInfo) error
+	ListSatellitesByLabelSelector(ctx context.Context, selector map[string]string) ([]*models.Satellite, error)
 
 	// Cluster Configs
 	CreateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error
@@ -29,10 +26,37 @@ type Store interface {
 	ListClusterConfigs(ctx context.Context) ([]*models.ClusterConfig, error)
 	UpdateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error
 	DeleteClusterConfig(ctx context.Context, id uuid.UUID) error
+	SetClusterPaused(ctx context.Context, id uuid.UUID, paused bool) (*models.ClusterConfig, error)
 	GetClusterConfigsBySatellite(ctx context.Context, satelliteID uuid.UUID) ([]*models.ClusterConfig, error)
-	GetClusterConfigsByGroup(ctx context.Context, groupID uuid.UUID) ([]*models.ClusterConfig, error)
+
+	// Profiles
+	CreateProfile(ctx context.Context, profile *models.ClusterProfile) error
+	GetProfile(ctx context.Context, id uuid.UUID) (*models.ClusterProfile, error)
+	ListProfiles(ctx context.Context) ([]*models.ClusterProfile, error)
+	UpdateProfile(ctx context.Context, profile *models.ClusterProfile) error
+	DeleteProfile(ctx context.Context, id uuid.UUID) error
+	LockProfile(ctx context.Context, id uuid.UUID) error
+
+	// Deployment Rules
+	CreateDeploymentRule(ctx context.Context, rule *models.DeploymentRule) error
+	GetDeploymentRule(ctx context.Context, id uuid.UUID) (*models.DeploymentRule, error)
+	ListDeploymentRules(ctx context.Context) ([]*models.DeploymentRule, error)
+	UpdateDeploymentRule(ctx context.Context, rule *models.DeploymentRule) error
+	DeleteDeploymentRule(ctx context.Context, id uuid.UUID) error
+	GetClusterConfigsByDeploymentRule(ctx context.Context, ruleID uuid.UUID) ([]*models.ClusterConfig, error)
+	GetDeploymentRulesByProfile(ctx context.Context, profileID uuid.UUID) ([]*models.DeploymentRule, error)
+
+	// Postgres Versions
+	ListPostgresVersions(ctx context.Context) ([]*models.PostgresVersion, error)
+	GetPostgresVersion(ctx context.Context, id uuid.UUID) (*models.PostgresVersion, error)
+	GetPostgresVersionBySpec(ctx context.Context, version, variant string) (*models.PostgresVersion, error)
+	CreatePostgresVersion(ctx context.Context, pv *models.PostgresVersion) error
+	UpdatePostgresVersion(ctx context.Context, pv *models.PostgresVersion) error
+	DeletePostgresVersion(ctx context.Context, id uuid.UUID) error
+	SetDefaultPostgresVersion(ctx context.Context, id uuid.UUID) error
 
 	// Health
+	UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error
 	UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error
 	GetClusterHealth(ctx context.Context, satelliteID uuid.UUID, clusterName string) (*models.ClusterHealth, error)
 	ListClusterHealth(ctx context.Context) ([]*models.ClusterHealth, error)

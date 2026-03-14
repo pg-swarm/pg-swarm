@@ -14,16 +14,60 @@ import (
 
 const pgDataPath = "/var/lib/postgresql/data/pgdata"
 
+// podSecurityContext returns the PodSecurityContext for all PG pods.
+// Alpine-based images use UID/GID 70; Debian-based images use UID/GID 999.
+func podSecurityContext(image string) *corev1.PodSecurityContext {
+	id := int64(70)
+	if !strings.Contains(image, "alpine") {
+		id = 999
+	}
+	return &corev1.PodSecurityContext{
+		RunAsUser:  &id,
+		RunAsGroup: &id,
+		FSGroup:    &id,
+	}
+}
+
 func archiveEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.Archive != nil && cfg.Archive.Mode != ""
 }
 
-func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.StatefulSet {
-	labels := clusterLabels(cfg.ClusterName)
+func walStorageEnabled(cfg *pgswarmv1.ClusterConfig) bool {
+	return cfg.WalStorage != nil && cfg.WalStorage.Size != ""
+}
+
+func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
+	objMeta := metav1.ObjectMeta{
+		Name:   "wal",
+		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+	}
+	if cfg.DeletionProtection {
+		objMeta.Finalizers = []string{FinalizerPGSwarm}
+	}
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: objMeta,
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(cfg.WalStorage.Size),
+				},
+			},
+		},
+	}
+	if cfg.WalStorage.StorageClass != "" {
+		pvc.Spec.StorageClassName = &cfg.WalStorage.StorageClass
+	}
+	return pvc
+}
+
+func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) *appsv1.StatefulSet {
+	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
 	replicas := cfg.Replicas
 
 	sts := &appsv1.StatefulSet{
+		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cfg.ClusterName,
 			Namespace: cfg.Namespace,
@@ -40,6 +84,7 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					SecurityContext: podSecurityContext(cfg.Postgres.Image),
 					InitContainers: []corev1.Container{
 						buildInitContainer(cfg, secretName),
 					},
@@ -74,6 +119,11 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 		},
 	}
 
+	// Separate WAL volume
+	if walStorageEnabled(cfg) {
+		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalVCT(cfg))
+	}
+
 	// PVC archive mode: add wal-archive VolumeClaimTemplate
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" && cfg.Archive.ArchiveStorage != nil {
 		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalArchiveVCT(cfg))
@@ -83,7 +133,7 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 	if failoverEnabled(cfg) {
 		sts.Spec.Template.Spec.Containers = append(
 			sts.Spec.Template.Spec.Containers,
-			buildFailoverSidecar(cfg, secretName),
+			buildFailoverSidecar(cfg, secretName, defaultFailoverImage),
 		)
 		sts.Spec.Template.Spec.ServiceAccountName = failoverServiceAccountName(cfg.ClusterName)
 	}
@@ -92,10 +142,15 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 }
 
 func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
+	objMeta := metav1.ObjectMeta{
+		Name:   "wal-archive",
+		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+	}
+	if cfg.DeletionProtection {
+		objMeta.Finalizers = []string{FinalizerPGSwarm}
+	}
 	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "wal-archive",
-		},
+		ObjectMeta: objMeta,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{
@@ -112,10 +167,15 @@ func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeCla
 }
 
 func buildVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
+	objMeta := metav1.ObjectMeta{
+		Name:   "data",
+		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+	}
+	if cfg.DeletionProtection {
+		objMeta.Finalizers = []string{FinalizerPGSwarm}
+	}
 	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "data",
-		},
+		ObjectMeta: objMeta,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{
@@ -180,6 +240,38 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 
 	databaseSQL := buildDatabaseSQL(cfg.Databases)
 
+	// Block for creating databases on an already-initialised primary (config updates / pod restarts).
+	// Only runs on ordinal 0 when databases are defined and standby.signal is absent.
+	reinitDatabaseBlock := ""
+	if len(cfg.Databases) > 0 {
+		reinitDatabaseBlock = fmt.Sprintf(`
+    if [ "$ORDINAL" = "0" ] && [ ! -f "$PGDATA/standby.signal" ]; then
+        echo "Ensuring application databases exist"
+        pg_ctl -D "$PGDATA" start -w -o "-c listen_addresses='localhost'"
+%s
+        pg_ctl -D "$PGDATA" stop -w
+    fi`, databaseSQL)
+	}
+
+	// WAL symlink script block (used after initdb/pg_basebackup and in re-init path)
+	walSymlinkBlock := ""
+	walSymlinkIdempotentBlock := ""
+	if walStorageEnabled(cfg) {
+		walSymlinkBlock = `
+    # Move WAL to separate volume and symlink
+    if [ -d "/var/lib/postgresql/wal" ]; then
+        mv "$PGDATA/pg_wal"/* /var/lib/postgresql/wal/ 2>/dev/null || true
+        rm -rf "$PGDATA/pg_wal"
+        ln -s /var/lib/postgresql/wal "$PGDATA/pg_wal"
+    fi`
+		walSymlinkIdempotentBlock = `
+    if [ -d "/var/lib/postgresql/wal" ] && [ ! -L "$PGDATA/pg_wal" ]; then
+        mv "$PGDATA/pg_wal"/* /var/lib/postgresql/wal/ 2>/dev/null || true
+        rm -rf "$PGDATA/pg_wal"
+        ln -s /var/lib/postgresql/wal "$PGDATA/pg_wal"
+    fi`
+	}
+
 	initScript := fmt.Sprintf(`#!/bin/bash
 set -e
 
@@ -190,7 +282,7 @@ PGDATA="%s"
 if [ -f "$PGDATA/PG_VERSION" ]; then
     echo "PGDATA already initialized, copying config only"
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s%s
     exit 0
 fi
 
@@ -207,7 +299,7 @@ if [ "$ORDINAL" = "0" ]; then
 
     # Copy config
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s%s
 else
     echo "Initializing replica (ordinal $ORDINAL)"
     PRIMARY_HOST="%s-0.%s.%s.svc.cluster.local"
@@ -218,9 +310,9 @@ else
     PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
         -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"%s%s
 fi
-`, pgDataPath, databaseSQL, primaryArchiveBlock, cfg.ClusterName, headlessSvc, cfg.Namespace, replicaRestoreBlock)
+`, pgDataPath, walSymlinkIdempotentBlock, reinitDatabaseBlock, databaseSQL, primaryArchiveBlock, walSymlinkBlock, cfg.ClusterName, headlessSvc, cfg.Namespace, replicaRestoreBlock, walSymlinkBlock)
 
 	c := corev1.Container{
 		Name:    "pg-init",
@@ -269,6 +361,14 @@ fi
 					Key:                  fmt.Sprintf("password-%s", db.User),
 				},
 			},
+		})
+	}
+
+	// Mount WAL volume on init container
+	if walStorageEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "wal",
+			MountPath: "/var/lib/postgresql/wal",
 		})
 	}
 
@@ -352,6 +452,14 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 		}
 	}
 
+	// Mount WAL volume on main container
+	if walStorageEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "wal",
+			MountPath: "/var/lib/postgresql/wal",
+		})
+	}
+
 	// PVC archive mode: mount wal-archive volume
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" {
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
@@ -376,9 +484,7 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 	return c
 }
 
-const defaultFailoverImage = "pg-swarm-failover:latest"
-
-func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.Container {
+func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) corev1.Container {
 	image := cfg.Failover.SidecarImage
 	if image == "" {
 		image = defaultFailoverImage
@@ -389,8 +495,9 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName string) corev
 	}
 
 	return corev1.Container{
-		Name:  "failover",
-		Image: image,
+		Name:            "failover",
+		Image:           image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
 		Env: []corev1.EnvVar{
 			{
 				Name: "POD_NAME",
@@ -412,6 +519,15 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName string) corev
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
 						Key:                  "superuser-password",
+					},
+				},
+			},
+			{
+				Name: "REPLICATION_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "replication-password",
 					},
 				},
 			},
