@@ -1,0 +1,1 @@
+ALTER TABLE satellites ADD COLUMN IF NOT EXISTS storage_classes JSONB NOT NULL DEFAULT '[]';

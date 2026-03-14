@@ -15,15 +15,16 @@ import (
 const pgDataPath = "/var/lib/postgresql/data/pgdata"
 
 // podSecurityContext returns the PodSecurityContext for all PG pods.
-// UID/GID 999 is the postgres user in the official postgres images.
-func podSecurityContext() *corev1.PodSecurityContext {
-	uid := int64(999)
-	gid := int64(999)
-	fsGroup := int64(999)
+// Alpine-based images use UID/GID 70; Debian-based images use UID/GID 999.
+func podSecurityContext(image string) *corev1.PodSecurityContext {
+	id := int64(70)
+	if !strings.Contains(image, "alpine") {
+		id = 999
+	}
 	return &corev1.PodSecurityContext{
-		RunAsUser:  &uid,
-		RunAsGroup: &gid,
-		FSGroup:    &fsGroup,
+		RunAsUser:  &id,
+		RunAsGroup: &id,
+		FSGroup:    &id,
 	}
 }
 
@@ -36,10 +37,15 @@ func walStorageEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 }
 
 func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
+	objMeta := metav1.ObjectMeta{
+		Name:   "wal",
+		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+	}
+	if cfg.DeletionProtection {
+		objMeta.Finalizers = []string{FinalizerPGSwarm}
+	}
 	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "wal",
-		},
+		ObjectMeta: objMeta,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{
@@ -55,7 +61,7 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	return pvc
 }
 
-func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.StatefulSet {
+func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) *appsv1.StatefulSet {
 	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
 	replicas := cfg.Replicas
@@ -78,7 +84,7 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					SecurityContext: podSecurityContext(),
+					SecurityContext: podSecurityContext(cfg.Postgres.Image),
 					InitContainers: []corev1.Container{
 						buildInitContainer(cfg, secretName),
 					},
@@ -127,7 +133,7 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 	if failoverEnabled(cfg) {
 		sts.Spec.Template.Spec.Containers = append(
 			sts.Spec.Template.Spec.Containers,
-			buildFailoverSidecar(cfg, secretName),
+			buildFailoverSidecar(cfg, secretName, defaultFailoverImage),
 		)
 		sts.Spec.Template.Spec.ServiceAccountName = failoverServiceAccountName(cfg.ClusterName)
 	}
@@ -136,10 +142,15 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName string) *appsv1.S
 }
 
 func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
+	objMeta := metav1.ObjectMeta{
+		Name:   "wal-archive",
+		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+	}
+	if cfg.DeletionProtection {
+		objMeta.Finalizers = []string{FinalizerPGSwarm}
+	}
 	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "wal-archive",
-		},
+		ObjectMeta: objMeta,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{
@@ -156,10 +167,15 @@ func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeCla
 }
 
 func buildVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
+	objMeta := metav1.ObjectMeta{
+		Name:   "data",
+		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+	}
+	if cfg.DeletionProtection {
+		objMeta.Finalizers = []string{FinalizerPGSwarm}
+	}
 	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "data",
-		},
+		ObjectMeta: objMeta,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{
@@ -455,9 +471,7 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 	return c
 }
 
-const defaultFailoverImage = "pg-swarm-failover:latest"
-
-func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.Container {
+func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) corev1.Container {
 	image := cfg.Failover.SidecarImage
 	if image == "" {
 		image = defaultFailoverImage
@@ -468,8 +482,9 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName string) corev
 	}
 
 	return corev1.Container{
-		Name:  "failover",
-		Image: image,
+		Name:            "failover",
+		Image:           image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
 		Env: []corev1.EnvVar{
 			{
 				Name: "POD_NAME",

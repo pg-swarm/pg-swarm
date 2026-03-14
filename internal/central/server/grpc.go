@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -189,10 +191,77 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 				}
 
 			case *pgswarmv1.SatelliteMessage_HealthReport:
-				log.Debug().Str("satellite_id", satID.String()).Msg("health report received (deferred to Phase 4)")
+				report := payload.HealthReport
+				instances, err := protoInstancesToJSON(report.Instances)
+				if err != nil {
+					log.Error().Err(err).Str("satellite_id", satID.String()).Msg("failed to marshal instances")
+					break
+				}
+				h := models.ClusterHealth{
+					SatelliteID: satID,
+					ClusterName: report.ClusterName,
+					State:       protoStateToModel(report.State),
+					Instances:   instances,
+					UpdatedAt:   time.Now(),
+				}
+				if err := s.store.UpsertClusterHealth(ctx, &h); err != nil {
+					log.Error().Err(err).Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Msg("failed to upsert health")
+				} else {
+					log.Debug().Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Str("state", string(h.State)).Msg("health report processed")
+				}
 
 			case *pgswarmv1.SatelliteMessage_EventReport:
-				log.Debug().Str("satellite_id", satID.String()).Msg("event report received (deferred to Phase 4)")
+				report := payload.EventReport
+				evt := models.Event{
+					ID:          uuid.New(),
+					SatelliteID: satID,
+					ClusterName: report.ClusterName,
+					Severity:    report.Severity,
+					Message:     report.Message,
+					Source:      report.Source,
+					CreatedAt:   time.Now(),
+				}
+				if err := s.store.CreateEvent(ctx, &evt); err != nil {
+					log.Error().Err(err).Str("satellite_id", satID.String()).Msg("failed to create event")
+				} else {
+					log.Info().Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Str("severity", report.Severity).Msg("event recorded")
+				}
+
+			case *pgswarmv1.SatelliteMessage_SwitchoverResult:
+				result := payload.SwitchoverResult
+				if result.Success {
+					log.Info().Str("satellite_id", satID.String()).Str("cluster", result.ClusterName).Msg("switchover succeeded")
+					_ = s.store.CreateEvent(ctx, &models.Event{
+						ID: uuid.New(), SatelliteID: satID, ClusterName: result.ClusterName,
+						Severity: "info", Message: "planned switchover completed successfully", Source: "switchover",
+						CreatedAt: time.Now(),
+					})
+				} else {
+					log.Warn().Str("satellite_id", satID.String()).Str("cluster", result.ClusterName).Str("error", result.ErrorMessage).Msg("switchover failed")
+					_ = s.store.CreateEvent(ctx, &models.Event{
+						ID: uuid.New(), SatelliteID: satID, ClusterName: result.ClusterName,
+						Severity: "error", Message: "switchover failed: " + result.ErrorMessage, Source: "switchover",
+						CreatedAt: time.Now(),
+					})
+				}
+
+			case *pgswarmv1.SatelliteMessage_StorageClassReport:
+				report := payload.StorageClassReport
+				classes := make([]models.StorageClassInfo, 0, len(report.StorageClasses))
+				for _, sc := range report.StorageClasses {
+					classes = append(classes, models.StorageClassInfo{
+						Name:              sc.Name,
+						Provisioner:       sc.Provisioner,
+						ReclaimPolicy:     sc.ReclaimPolicy,
+						VolumeBindingMode: sc.VolumeBindingMode,
+						IsDefault:         sc.IsDefault,
+					})
+				}
+				if err := s.store.UpdateSatelliteStorageClasses(ctx, satID, classes); err != nil {
+					log.Error().Err(err).Str("satellite_id", satID.String()).Msg("failed to store storage classes")
+				} else {
+					log.Info().Str("satellite_id", satID.String()).Int("count", len(classes)).Msg("storage classes updated")
+				}
 			}
 		}
 	}()
@@ -248,6 +317,52 @@ func (sm *StreamManager) PushConfig(satelliteID uuid.UUID, config *pgswarmv1.Clu
 	msg := &pgswarmv1.CentralMessage{
 		Payload: &pgswarmv1.CentralMessage_ClusterConfig{
 			ClusterConfig: config,
+		},
+	}
+
+	select {
+	case stream.SendCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("satellite %s send channel full", satelliteID)
+	}
+}
+
+func (sm *StreamManager) RequestStorageClasses(satelliteID uuid.UUID) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	stream, ok := sm.streams[satelliteID]
+	if !ok {
+		return fmt.Errorf("satellite %s not connected", satelliteID)
+	}
+
+	msg := &pgswarmv1.CentralMessage{
+		Payload: &pgswarmv1.CentralMessage_RequestStorageClasses{
+			RequestStorageClasses: &pgswarmv1.RequestStorageClasses{},
+		},
+	}
+
+	select {
+	case stream.SendCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("satellite %s send channel full", satelliteID)
+	}
+}
+
+func (sm *StreamManager) PushSwitchover(satelliteID uuid.UUID, req *pgswarmv1.SwitchoverRequest) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	stream, ok := sm.streams[satelliteID]
+	if !ok {
+		return fmt.Errorf("satellite %s not connected", satelliteID)
+	}
+
+	msg := &pgswarmv1.CentralMessage{
+		Payload: &pgswarmv1.CentralMessage_Switchover{
+			Switchover: req,
 		},
 	}
 
@@ -319,4 +434,74 @@ type wrappedServerStream struct {
 
 func (w *wrappedServerStream) Context() context.Context {
 	return w.ctx
+}
+
+// protoStateToModel converts a proto ClusterState enum to the model string.
+func protoStateToModel(s pgswarmv1.ClusterState) models.ClusterState {
+	switch s {
+	case pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING:
+		return models.ClusterStateRunning
+	case pgswarmv1.ClusterState_CLUSTER_STATE_DEGRADED:
+		return models.ClusterStateDegraded
+	case pgswarmv1.ClusterState_CLUSTER_STATE_FAILED:
+		return models.ClusterStateFailed
+	case pgswarmv1.ClusterState_CLUSTER_STATE_DELETING:
+		return models.ClusterStateDeleting
+	default:
+		return models.ClusterStateCreating
+	}
+}
+
+// instanceJSON mirrors InstanceHealth for JSON serialization into the store.
+type instanceJSON struct {
+	PodName               string  `json:"pod_name"`
+	Role                  string  `json:"role"`
+	Ready                 bool    `json:"ready"`
+	ReplicationLagBytes   int64   `json:"replication_lag_bytes"`
+	ReplicationLagSeconds float64 `json:"replication_lag_seconds,omitempty"`
+	ConnectionsUsed       int32   `json:"connections_used,omitempty"`
+	ConnectionsMax        int32   `json:"connections_max,omitempty"`
+	DiskUsedBytes         int64   `json:"disk_used_bytes,omitempty"`
+	TimelineID            int64   `json:"timeline_id,omitempty"`
+	PgStartTime           string  `json:"pg_start_time,omitempty"`
+	WalReceiverActive     bool    `json:"wal_receiver_active,omitempty"`
+	ErrorMessage          string  `json:"error_message,omitempty"`
+}
+
+func protoRoleToString(r pgswarmv1.InstanceRole) string {
+	switch r {
+	case pgswarmv1.InstanceRole_INSTANCE_ROLE_PRIMARY:
+		return "primary"
+	case pgswarmv1.InstanceRole_INSTANCE_ROLE_REPLICA:
+		return "replica"
+	case pgswarmv1.InstanceRole_INSTANCE_ROLE_FAILED_PRIMARY:
+		return "failed_primary"
+	default:
+		return "unknown"
+	}
+}
+
+// protoInstancesToJSON converts proto InstanceHealth list to json.RawMessage.
+func protoInstancesToJSON(instances []*pgswarmv1.InstanceHealth) (json.RawMessage, error) {
+	out := make([]instanceJSON, 0, len(instances))
+	for _, inst := range instances {
+		ij := instanceJSON{
+			PodName:               inst.PodName,
+			Role:                  protoRoleToString(inst.Role),
+			Ready:                 inst.Ready,
+			ReplicationLagBytes:   inst.ReplicationLagBytes,
+			ReplicationLagSeconds: inst.ReplicationLagSeconds,
+			ConnectionsUsed:       inst.ConnectionsUsed,
+			ConnectionsMax:        inst.ConnectionsMax,
+			DiskUsedBytes:         inst.DiskUsedBytes,
+			TimelineID:            inst.TimelineId,
+			WalReceiverActive:     inst.WalReceiverActive,
+			ErrorMessage:          inst.ErrorMessage,
+		}
+		if inst.PgStartTime != nil {
+			ij.PgStartTime = inst.PgStartTime.AsTime().Format(time.RFC3339)
+		}
+		out = append(out, ij)
+	}
+	return json.Marshal(out)
 }

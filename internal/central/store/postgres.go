@@ -22,8 +22,8 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 
 // Column lists used across queries (keep in sync with scanners below).
 const (
-	satCols = `id, hostname, k8s_cluster_name, region, labels, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
-	cfgCols = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, created_at, updated_at`
+	satCols = `id, hostname, k8s_cluster_name, region, labels, storage_classes, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
+	cfgCols = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at`
 	ruleCols = `id, name, profile_id, label_selector, namespace, cluster_name, created_at, updated_at`
 )
 
@@ -31,12 +31,14 @@ const (
 func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 	var sat models.Satellite
 	var labelsJSON []byte
+	var scJSON []byte
 	err := row.Scan(
 		&sat.ID,
 		&sat.Hostname,
 		&sat.K8sClusterName,
 		&sat.Region,
 		&labelsJSON,
+		&scJSON,
 		&sat.State,
 		&sat.AuthTokenHash,
 		&sat.TempTokenHash,
@@ -55,6 +57,14 @@ func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 	if sat.Labels == nil {
 		sat.Labels = make(map[string]string)
 	}
+	if scJSON != nil {
+		if err := json.Unmarshal(scJSON, &sat.StorageClasses); err != nil {
+			return nil, fmt.Errorf("unmarshal satellite storage_classes: %w", err)
+		}
+	}
+	if sat.StorageClasses == nil {
+		sat.StorageClasses = []models.StorageClassInfo{}
+	}
 	return &sat, nil
 }
 
@@ -71,6 +81,7 @@ func scanClusterConfig(row pgx.Row) (*models.ClusterConfig, error) {
 		&cfg.Config,
 		&cfg.ConfigVersion,
 		&cfg.State,
+		&cfg.Paused,
 		&cfg.CreatedAt,
 		&cfg.UpdatedAt,
 	)
@@ -293,6 +304,25 @@ func (s *PostgresStore) UpdateSatelliteLabels(ctx context.Context, id uuid.UUID,
 	return nil
 }
 
+func (s *PostgresStore) UpdateSatelliteStorageClasses(ctx context.Context, id uuid.UUID, classes []models.StorageClassInfo) error {
+	if classes == nil {
+		classes = []models.StorageClassInfo{}
+	}
+	scJSON, err := json.Marshal(classes)
+	if err != nil {
+		return fmt.Errorf("marshal storage classes: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE satellites SET storage_classes = $1, updated_at = NOW() WHERE id = $2`, scJSON, id)
+	if err != nil {
+		return fmt.Errorf("update satellite storage classes: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("satellite %s not found", id)
+	}
+	return nil
+}
+
 func (s *PostgresStore) ListSatellitesByLabelSelector(ctx context.Context, selector map[string]string) ([]*models.Satellite, error) {
 	if selector == nil {
 		selector = make(map[string]string)
@@ -342,10 +372,10 @@ func (s *PostgresStore) CreateClusterConfig(ctx context.Context, cfg *models.Clu
 	cfg.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO cluster_configs (id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		`INSERT INTO cluster_configs (id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		cfg.ID, cfg.Name, cfg.Namespace, cfg.SatelliteID, cfg.ProfileID,
-		cfg.DeploymentRuleID, cfg.Config, cfg.ConfigVersion, cfg.State, cfg.CreatedAt, cfg.UpdatedAt,
+		cfg.DeploymentRuleID, cfg.Config, cfg.ConfigVersion, cfg.State, cfg.Paused, cfg.CreatedAt, cfg.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create cluster config: %w", err)
@@ -388,10 +418,10 @@ func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.Clu
 
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE cluster_configs SET name = $1, namespace = $2, satellite_id = $3,
-		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, state = $7, updated_at = $8
-		 WHERE id = $9`,
+		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, state = $7, paused = $8, updated_at = $9
+		 WHERE id = $10`,
 		cfg.Name, cfg.Namespace, cfg.SatelliteID,
-		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.State, cfg.UpdatedAt, cfg.ID,
+		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.State, cfg.Paused, cfg.UpdatedAt, cfg.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update cluster config: %w", err)
@@ -400,6 +430,23 @@ func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.Clu
 		return fmt.Errorf("cluster config %s not found", cfg.ID)
 	}
 	return nil
+}
+
+func (s *PostgresStore) SetClusterPaused(ctx context.Context, id uuid.UUID, paused bool) (*models.ClusterConfig, error) {
+	state := models.ClusterStatePaused
+	if !paused {
+		state = models.ClusterStateRunning
+	}
+	row := s.pool.QueryRow(ctx,
+		`UPDATE cluster_configs SET paused = $1, state = $2, config_version = config_version + 1, updated_at = NOW()
+		 WHERE id = $3 RETURNING `+cfgCols,
+		paused, state, id,
+	)
+	cfg, err := scanClusterConfig(row)
+	if err != nil {
+		return nil, fmt.Errorf("set cluster paused %s: %w", id, err)
+	}
+	return cfg, nil
 }
 
 func (s *PostgresStore) DeleteClusterConfig(ctx context.Context, id uuid.UUID) error {
@@ -661,6 +708,121 @@ func (s *PostgresStore) GetDeploymentRulesByProfile(ctx context.Context, profile
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+// ---------- Postgres Versions ----------
+
+const pvCols = `id, version, variant, image_tag, is_default, created_at, updated_at`
+
+func scanPostgresVersion(row pgx.Row) (*models.PostgresVersion, error) {
+	var pv models.PostgresVersion
+	err := row.Scan(&pv.ID, &pv.Version, &pv.Variant, &pv.ImageTag, &pv.IsDefault, &pv.CreatedAt, &pv.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &pv, nil
+}
+
+func (s *PostgresStore) ListPostgresVersions(ctx context.Context) ([]*models.PostgresVersion, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+pvCols+` FROM postgres_versions ORDER BY version, variant`)
+	if err != nil {
+		return nil, fmt.Errorf("list postgres versions: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.PostgresVersion
+	for rows.Next() {
+		pv, err := scanPostgresVersion(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan postgres version row: %w", err)
+		}
+		result = append(result, pv)
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) GetPostgresVersion(ctx context.Context, id uuid.UUID) (*models.PostgresVersion, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+pvCols+` FROM postgres_versions WHERE id = $1`, id)
+	pv, err := scanPostgresVersion(row)
+	if err != nil {
+		return nil, fmt.Errorf("get postgres version %s: %w", id, err)
+	}
+	return pv, nil
+}
+
+func (s *PostgresStore) GetPostgresVersionBySpec(ctx context.Context, version, variant string) (*models.PostgresVersion, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+pvCols+` FROM postgres_versions WHERE version = $1 AND variant = $2`, version, variant)
+	pv, err := scanPostgresVersion(row)
+	if err != nil {
+		return nil, fmt.Errorf("get postgres version %s/%s: %w", version, variant, err)
+	}
+	return pv, nil
+}
+
+func (s *PostgresStore) CreatePostgresVersion(ctx context.Context, pv *models.PostgresVersion) error {
+	if pv.ID == uuid.Nil {
+		pv.ID = uuid.New()
+	}
+	now := time.Now()
+	pv.CreatedAt = now
+	pv.UpdatedAt = now
+
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO postgres_versions (id, version, variant, image_tag, is_default, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		pv.ID, pv.Version, pv.Variant, pv.ImageTag, pv.IsDefault, pv.CreatedAt, pv.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create postgres version: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdatePostgresVersion(ctx context.Context, pv *models.PostgresVersion) error {
+	pv.UpdatedAt = time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE postgres_versions SET version = $1, variant = $2, image_tag = $3, is_default = $4, updated_at = $5
+		 WHERE id = $6`,
+		pv.Version, pv.Variant, pv.ImageTag, pv.IsDefault, pv.UpdatedAt, pv.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update postgres version: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres version %s not found", pv.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeletePostgresVersion(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM postgres_versions WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete postgres version: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres version %s not found", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetDefaultPostgresVersion(ctx context.Context, id uuid.UUID) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `UPDATE postgres_versions SET is_default = FALSE WHERE is_default = TRUE`); err != nil {
+		return fmt.Errorf("clear default: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE postgres_versions SET is_default = TRUE, updated_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("set default: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres version %s not found", id)
+	}
+	return tx.Commit(ctx)
 }
 
 // ---------- Health ----------

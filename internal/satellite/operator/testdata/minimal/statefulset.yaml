@@ -148,6 +148,10 @@ spec:
   updateStrategy: {}
   volumeClaimTemplates:
   - metadata:
+      labels:
+        app.kubernetes.io/managed-by: pg-swarm
+        app.kubernetes.io/name: postgresql
+        pg-swarm.io/cluster: minimal
       name: data
     spec:
       accessModes:

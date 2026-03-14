@@ -91,14 +91,21 @@ func (x *ClusterHealthReport) GetTimestamp() *timestamppb.Timestamp {
 }
 
 type InstanceHealth struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	PodName             string                 `protobuf:"bytes,1,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
-	Role                InstanceRole           `protobuf:"varint,2,opt,name=role,proto3,enum=pgswarm.v1.InstanceRole" json:"role,omitempty"`
-	Ready               bool                   `protobuf:"varint,3,opt,name=ready,proto3" json:"ready,omitempty"`
-	ReplicationLagBytes int64                  `protobuf:"varint,4,opt,name=replication_lag_bytes,json=replicationLagBytes,proto3" json:"replication_lag_bytes,omitempty"`
-	ErrorMessage        string                 `protobuf:"bytes,5,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	PodName               string                 `protobuf:"bytes,1,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
+	Role                  InstanceRole           `protobuf:"varint,2,opt,name=role,proto3,enum=pgswarm.v1.InstanceRole" json:"role,omitempty"`
+	Ready                 bool                   `protobuf:"varint,3,opt,name=ready,proto3" json:"ready,omitempty"`
+	ReplicationLagBytes   int64                  `protobuf:"varint,4,opt,name=replication_lag_bytes,json=replicationLagBytes,proto3" json:"replication_lag_bytes,omitempty"`
+	ErrorMessage          string                 `protobuf:"bytes,5,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	ReplicationLagSeconds float64                `protobuf:"fixed64,6,opt,name=replication_lag_seconds,json=replicationLagSeconds,proto3" json:"replication_lag_seconds,omitempty"` // time-based lag from pg_last_xact_replay_timestamp (replicas)
+	ConnectionsUsed       int32                  `protobuf:"varint,7,opt,name=connections_used,json=connectionsUsed,proto3" json:"connections_used,omitempty"`                      // current connection count
+	ConnectionsMax        int32                  `protobuf:"varint,8,opt,name=connections_max,json=connectionsMax,proto3" json:"connections_max,omitempty"`                         // max_connections setting
+	DiskUsedBytes         int64                  `protobuf:"varint,9,opt,name=disk_used_bytes,json=diskUsedBytes,proto3" json:"disk_used_bytes,omitempty"`                          // sum of pg_database_size()
+	TimelineId            int64                  `protobuf:"varint,10,opt,name=timeline_id,json=timelineId,proto3" json:"timeline_id,omitempty"`                                    // pg_control_checkpoint() timeline
+	PgStartTime           *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=pg_start_time,json=pgStartTime,proto3" json:"pg_start_time,omitempty"`                                // pg_postmaster_start_time()
+	WalReceiverActive     bool                   `protobuf:"varint,12,opt,name=wal_receiver_active,json=walReceiverActive,proto3" json:"wal_receiver_active,omitempty"`             // pg_stat_wal_receiver.status = 'streaming' (replicas)
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *InstanceHealth) Reset() {
@@ -164,6 +171,55 @@ func (x *InstanceHealth) GetErrorMessage() string {
 		return x.ErrorMessage
 	}
 	return ""
+}
+
+func (x *InstanceHealth) GetReplicationLagSeconds() float64 {
+	if x != nil {
+		return x.ReplicationLagSeconds
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetConnectionsUsed() int32 {
+	if x != nil {
+		return x.ConnectionsUsed
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetConnectionsMax() int32 {
+	if x != nil {
+		return x.ConnectionsMax
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetDiskUsedBytes() int64 {
+	if x != nil {
+		return x.DiskUsedBytes
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetTimelineId() int64 {
+	if x != nil {
+		return x.TimelineId
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetPgStartTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.PgStartTime
+	}
+	return nil
+}
+
+func (x *InstanceHealth) GetWalReceiverActive() bool {
+	if x != nil {
+		return x.WalReceiverActive
+	}
+	return false
 }
 
 type EventReport struct {
@@ -252,13 +308,22 @@ const file_health_proto_rawDesc = "" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12.\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x18.pgswarm.v1.ClusterStateR\x05state\x128\n" +
 	"\tinstances\x18\x03 \x03(\v2\x1a.pgswarm.v1.InstanceHealthR\tinstances\x128\n" +
-	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xc8\x01\n" +
+	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\x8d\x04\n" +
 	"\x0eInstanceHealth\x12\x19\n" +
 	"\bpod_name\x18\x01 \x01(\tR\apodName\x12,\n" +
 	"\x04role\x18\x02 \x01(\x0e2\x18.pgswarm.v1.InstanceRoleR\x04role\x12\x14\n" +
 	"\x05ready\x18\x03 \x01(\bR\x05ready\x122\n" +
 	"\x15replication_lag_bytes\x18\x04 \x01(\x03R\x13replicationLagBytes\x12#\n" +
-	"\rerror_message\x18\x05 \x01(\tR\ferrorMessage\"\xb8\x01\n" +
+	"\rerror_message\x18\x05 \x01(\tR\ferrorMessage\x126\n" +
+	"\x17replication_lag_seconds\x18\x06 \x01(\x01R\x15replicationLagSeconds\x12)\n" +
+	"\x10connections_used\x18\a \x01(\x05R\x0fconnectionsUsed\x12'\n" +
+	"\x0fconnections_max\x18\b \x01(\x05R\x0econnectionsMax\x12&\n" +
+	"\x0fdisk_used_bytes\x18\t \x01(\x03R\rdiskUsedBytes\x12\x1f\n" +
+	"\vtimeline_id\x18\n" +
+	" \x01(\x03R\n" +
+	"timelineId\x12>\n" +
+	"\rpg_start_time\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\vpgStartTime\x12.\n" +
+	"\x13wal_receiver_active\x18\f \x01(\bR\x11walReceiverActive\"\xb8\x01\n" +
 	"\vEventReport\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1a\n" +
 	"\bseverity\x18\x02 \x01(\tR\bseverity\x12\x18\n" +
@@ -292,12 +357,13 @@ var file_health_proto_depIdxs = []int32{
 	1, // 1: pgswarm.v1.ClusterHealthReport.instances:type_name -> pgswarm.v1.InstanceHealth
 	4, // 2: pgswarm.v1.ClusterHealthReport.timestamp:type_name -> google.protobuf.Timestamp
 	5, // 3: pgswarm.v1.InstanceHealth.role:type_name -> pgswarm.v1.InstanceRole
-	4, // 4: pgswarm.v1.EventReport.timestamp:type_name -> google.protobuf.Timestamp
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	4, // 4: pgswarm.v1.InstanceHealth.pg_start_time:type_name -> google.protobuf.Timestamp
+	4, // 5: pgswarm.v1.EventReport.timestamp:type_name -> google.protobuf.Timestamp
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_health_proto_init() }

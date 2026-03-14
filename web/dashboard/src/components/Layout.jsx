@@ -9,6 +9,7 @@ const NAV = [
   { to: '/deployment-rules',  label: 'Deployment Rules' },
   { to: '/clusters',          label: 'Clusters' },
   { to: '/events',            label: 'Events' },
+  { to: '/admin',             label: 'Admin' },
 ];
 
 function StatusDot({ satellites }) {

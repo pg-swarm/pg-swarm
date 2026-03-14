@@ -30,12 +30,6 @@ RUN apk add --no-cache ca-certificates tzdata postgresql17-client \
 
 COPY --from=builder /out/satellite /usr/local/bin/satellite
 
-# Default data directory for persisting identity.json
-RUN install -d -o pgswarm -g pgswarm -m 0700 /var/lib/pg-swarm
-
 USER pgswarm
-
-ENV CENTRAL_ADDR=localhost:9090 \
-    DATA_DIR=/var/lib/pg-swarm
 
 ENTRYPOINT ["satellite"]

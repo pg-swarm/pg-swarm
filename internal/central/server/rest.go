@@ -75,6 +75,7 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/satellites/:id/approve", s.approveSatellite)
 	api.Post("/satellites/:id/reject", s.rejectSatellite)
 	api.Put("/satellites/:id/labels", s.updateSatelliteLabels)
+	api.Post("/satellites/:id/refresh-storage-classes", s.refreshStorageClasses)
 
 	// Cluster configs
 	api.Get("/clusters", s.listClusterConfigs)
@@ -82,6 +83,9 @@ func (s *RESTServer) setupRoutes() {
 	api.Get("/clusters/:id", s.getClusterConfig)
 	api.Put("/clusters/:id", s.updateClusterConfig)
 	api.Delete("/clusters/:id", s.deleteClusterConfig)
+	api.Post("/clusters/:id/pause", s.pauseCluster)
+	api.Post("/clusters/:id/resume", s.resumeCluster)
+	api.Post("/clusters/:id/switchover", s.switchoverCluster)
 
 	// Deployment Rules
 	api.Get("/deployment-rules", s.listDeploymentRules)
@@ -98,6 +102,13 @@ func (s *RESTServer) setupRoutes() {
 	api.Put("/profiles/:id", s.updateProfile)
 	api.Delete("/profiles/:id", s.deleteProfile)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
+
+	// Postgres Versions (admin)
+	api.Get("/postgres-versions", s.listPostgresVersions)
+	api.Post("/postgres-versions", s.createPostgresVersion)
+	api.Put("/postgres-versions/:id", s.updatePostgresVersion)
+	api.Delete("/postgres-versions/:id", s.deletePostgresVersion)
+	api.Post("/postgres-versions/:id/default", s.setDefaultPostgresVersion)
 
 	// Health
 	api.Get("/health", s.listClusterHealth)
@@ -264,6 +275,90 @@ func (s *RESTServer) deleteClusterConfig(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
+func (s *RESTServer) refreshStorageClasses(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	if s.streams == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "stream manager not available"})
+	}
+
+	if err := s.streams.RequestStorageClasses(id); err != nil {
+		log.Error().Err(err).Str("satellite_id", id.String()).Msg("failed to request storage classes")
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("satellite_id", id.String()).Msg("storage class refresh requested")
+	return c.JSON(fiber.Map{"status": "refresh requested"})
+}
+
+func (s *RESTServer) pauseCluster(c *fiber.Ctx) error {
+	return s.setClusterPaused(c, true)
+}
+
+func (s *RESTServer) resumeCluster(c *fiber.Ctx) error {
+	return s.setClusterPaused(c, false)
+}
+
+func (s *RESTServer) setClusterPaused(c *fiber.Ctx, paused bool) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	cfg, err := s.store.SetClusterPaused(c.Context(), id, paused)
+	if err != nil {
+		action := "pause"
+		if !paused {
+			action = "resume"
+		}
+		log.Error().Err(err).Str("config_id", id.String()).Msg("failed to " + action + " cluster")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to " + action + " cluster"})
+	}
+
+	log.Info().Str("config_id", id.String()).Bool("paused", paused).Msg("cluster pause state changed")
+	s.pushConfigToSatellite(cfg)
+	return c.JSON(cfg)
+}
+
+func (s *RESTServer) switchoverCluster(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	var body struct {
+		TargetPod string `json:"target_pod"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.TargetPod == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "target_pod is required"})
+	}
+
+	cfg, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "cluster not found"})
+	}
+	if cfg.SatelliteID == nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "cluster has no satellite"})
+	}
+
+	req := &pgswarmv1.SwitchoverRequest{
+		ClusterName: cfg.Name,
+		Namespace:   cfg.Namespace,
+		TargetPod:   body.TargetPod,
+	}
+
+	if err := s.streams.PushSwitchover(*cfg.SatelliteID, req); err != nil {
+		log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to send switchover request")
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("cluster", cfg.Name).Str("target", body.TargetPod).Msg("switchover request sent")
+	return c.JSON(fiber.Map{"status": "switchover initiated", "target_pod": body.TargetPod})
+}
+
 func (s *RESTServer) updateSatelliteLabels(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -287,7 +382,10 @@ func (s *RESTServer) updateSatelliteLabels(c *fiber.Ctx) error {
 
 	log.Info().Str("satellite_id", id.String()).Interface("labels", body.Labels).Msg("satellite labels updated")
 
-	// Re-evaluate deployment rules for this satellite
+	// Pause clusters whose deployment rule no longer matches the new labels
+	s.pauseUnmatchedClusters(c.Context(), id, body.Labels)
+
+	// Re-evaluate deployment rules for this satellite (creates new clusters for newly matching rules)
 	s.fanOutRulesForSatellite(c.Context(), id, body.Labels)
 
 	sat, err := s.store.GetSatellite(c.Context(), id)
@@ -564,6 +662,53 @@ func (s *RESTServer) fanOutRulesForSatellite(ctx context.Context, satelliteID uu
 	}
 }
 
+// pauseUnmatchedClusters pauses clusters on a satellite whose deployment rule's
+// label selector no longer matches the satellite's updated labels.
+func (s *RESTServer) pauseUnmatchedClusters(ctx context.Context, satelliteID uuid.UUID, newLabels map[string]string) {
+	clusters, err := s.store.GetClusterConfigsBySatellite(ctx, satelliteID)
+	if err != nil {
+		log.Error().Err(err).Str("satellite_id", satelliteID.String()).Msg("pause-unmatched: failed to list clusters")
+		return
+	}
+
+	for _, cfg := range clusters {
+		if cfg.DeploymentRuleID == nil {
+			continue // manually created cluster, not managed by a rule
+		}
+		rule, err := s.store.GetDeploymentRule(ctx, *cfg.DeploymentRuleID)
+		if err != nil {
+			log.Error().Err(err).Str("rule_id", cfg.DeploymentRuleID.String()).Msg("pause-unmatched: failed to get rule")
+			continue
+		}
+		if labelsMatch(newLabels, rule.LabelSelector) {
+			// Still matches — if it was paused due to label mismatch, resume it
+			if cfg.Paused {
+				updated, err := s.store.SetClusterPaused(ctx, cfg.ID, false)
+				if err != nil {
+					log.Error().Err(err).Str("config_id", cfg.ID.String()).Msg("pause-unmatched: failed to resume cluster")
+					continue
+				}
+				log.Info().Str("config_id", cfg.ID.String()).Msg("pause-unmatched: cluster resumed (labels match again)")
+				s.pushConfigToSatellite(updated)
+			}
+			continue
+		}
+		// No longer matches — pause it
+		if !cfg.Paused {
+			updated, err := s.store.SetClusterPaused(ctx, cfg.ID, true)
+			if err != nil {
+				log.Error().Err(err).Str("config_id", cfg.ID.String()).Msg("pause-unmatched: failed to pause cluster")
+				continue
+			}
+			log.Info().
+				Str("config_id", cfg.ID.String()).
+				Str("satellite_id", satelliteID.String()).
+				Msg("pause-unmatched: cluster paused (labels no longer match rule)")
+			s.pushConfigToSatellite(updated)
+		}
+	}
+}
+
 // labelsMatch returns true if the satellite labels contain all key-value pairs in the selector.
 func labelsMatch(labels, selector map[string]string) bool {
 	for k, v := range selector {
@@ -707,6 +852,107 @@ func (s *RESTServer) cloneProfile(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(clone)
 }
 
+// --- Postgres Versions (admin) ---
+
+func (s *RESTServer) listPostgresVersions(c *fiber.Ctx) error {
+	versions, err := s.store.ListPostgresVersions(c.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list postgres versions")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list postgres versions"})
+	}
+	return c.JSON(versions)
+}
+
+func (s *RESTServer) createPostgresVersion(c *fiber.Ctx) error {
+	var pv models.PostgresVersion
+	if err := c.BodyParser(&pv); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if pv.Version == "" || pv.Variant == "" || pv.ImageTag == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "version, variant, and image_tag are required"})
+	}
+
+	if err := s.store.CreatePostgresVersion(c.Context(), &pv); err != nil {
+		log.Error().Err(err).Msg("failed to create postgres version")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create postgres version"})
+	}
+
+	log.Info().Str("version", pv.Version).Str("variant", pv.Variant).Msg("postgres version created")
+	return c.Status(fiber.StatusCreated).JSON(pv)
+}
+
+func (s *RESTServer) updatePostgresVersion(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid version id"})
+	}
+
+	var pv models.PostgresVersion
+	if err := c.BodyParser(&pv); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if pv.Version == "" || pv.Variant == "" || pv.ImageTag == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "version, variant, and image_tag are required"})
+	}
+
+	pv.ID = id
+	if err := s.store.UpdatePostgresVersion(c.Context(), &pv); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("id", id.String()).Str("version", pv.Version).Msg("postgres version updated")
+	return c.JSON(pv)
+}
+
+func (s *RESTServer) deletePostgresVersion(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid version id"})
+	}
+
+	if err := s.store.DeletePostgresVersion(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("id", id.String()).Msg("postgres version deleted")
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (s *RESTServer) setDefaultPostgresVersion(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid version id"})
+	}
+
+	if err := s.store.SetDefaultPostgresVersion(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("id", id.String()).Msg("default postgres version set")
+	return c.JSON(fiber.Map{"status": "default set"})
+}
+
+// resolvePostgresImage looks up the image tag for a version+variant and prepends the registry.
+func (s *RESTServer) resolvePostgresImage(spec *models.ClusterSpec) string {
+	version := spec.Postgres.Version
+	variant := spec.Postgres.Variant
+	if variant == "" {
+		variant = "alpine"
+	}
+
+	pv, err := s.store.GetPostgresVersionBySpec(context.Background(), version, variant)
+	if err != nil {
+		log.Warn().Str("version", version).Str("variant", variant).Msg("postgres version not found in DB, using image field as-is")
+		return spec.Postgres.Image
+	}
+
+	image := "postgres:" + pv.ImageTag
+	if spec.Postgres.Registry != "" {
+		image = spec.Postgres.Registry + "/postgres:" + pv.ImageTag
+	}
+	return image
+}
+
 // --- Config push helper ---
 
 func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
@@ -737,6 +983,9 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		}
 	}
 
+	// Resolve the image from the postgres_versions table
+	resolvedImage := s.resolvePostgresImage(spec)
+
 	protoConfig := &pgswarmv1.ClusterConfig{
 		ClusterName:   cfg.Name,
 		Namespace:     cfg.Namespace,
@@ -744,9 +993,11 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		ConfigVersion: cfg.ConfigVersion,
 		ProfileName:   profileName,
 		LabelSelector: labelSelector,
+		Paused:             cfg.Paused,
+		DeletionProtection: spec.DeletionProtection,
 		Postgres: &pgswarmv1.PostgresSpec{
 			Version: spec.Postgres.Version,
-			Image:   spec.Postgres.Image,
+			Image:   resolvedImage,
 		},
 		Storage: &pgswarmv1.StorageSpec{
 			Size:         spec.Storage.Size,

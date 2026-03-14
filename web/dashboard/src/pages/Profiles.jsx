@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
@@ -136,7 +136,7 @@ const DEFAULT_HBA_RULES = [
 function emptySpec() {
   return {
     replicas: 3,
-    postgres: { version: '16', image: '' },
+    postgres: { version: '17', variant: 'alpine', registry: '', image: '' },
     storage: { size: '10Gi', storage_class: '' },
     wal_storage: null,
     resources: { cpu_request: '250m', cpu_limit: '1000m', memory_request: '512Mi', memory_limit: '1Gi' },
@@ -148,11 +148,38 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, refresh } = useData();
+  const { profiles, postgresVersions, satellites, refresh } = useData();
   const toast = useToast();
   const [editing, setEditing] = useState(null);
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
+  const [scRefreshing, setScRefreshing] = useState(false);
+
+  // Deduplicate storage classes across all satellites
+  const storageClasses = useMemo(() => {
+    const seen = new Set();
+    const result = [];
+    for (const sat of satellites) {
+      for (const sc of (sat.storage_classes || [])) {
+        if (!seen.has(sc.name)) {
+          seen.add(sc.name);
+          result.push(sc);
+        }
+      }
+    }
+    return result.sort((a, b) => a.name.localeCompare(b.name));
+  }, [satellites]);
+
+  async function refreshAllStorageClasses() {
+    setScRefreshing(true);
+    try {
+      await Promise.all(satellites.map(s => api.refreshStorageClasses(s.id).catch(() => {})));
+      // Wait briefly for reports to arrive, then refresh
+      setTimeout(() => { refresh(); setScRefreshing(false); }, 2000);
+    } catch {
+      setScRefreshing(false);
+    }
+  }
 
   function startCreate() {
     setEditing({ name: '', description: '', spec: emptySpec(), isNew: true });
@@ -215,7 +242,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} />;
   }
 
   return (
@@ -257,7 +284,7 @@ export default function Profiles() {
                 {p.description && <p className="sm muted" style={{ marginBottom: 8 }}>{p.description}</p>}
                 <dl className="cl-grid">
                   <KV label="Replicas" value={spec.replicas || '-'} />
-                  <KV label="PostgreSQL" value={spec.postgres?.version || '-'} />
+                  <KV label="PostgreSQL" value={spec.postgres?.version ? `${spec.postgres.version} ${spec.postgres.variant || 'alpine'}` : '-'} />
                   <KV label="Storage" value={spec.storage?.size || '-'} />
                   <KV label="CPU" value={`${spec.resources?.cpu_request || '-'} / ${spec.resources?.cpu_limit || '-'}`} />
                   <KV label="Memory" value={`${spec.resources?.memory_request || '-'} / ${spec.resources?.memory_limit || '-'}`} />
@@ -308,12 +335,26 @@ const TABS = [
 
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, storageClasses, scRefreshing, onRefreshStorageClasses }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
   const [pgSearch, setPgSearch] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState({});
+
+  // Build version options from postgres_versions table
+  const versionOptions = useMemo(() => {
+    const opts = [];
+    const seen = new Set();
+    for (const pv of (postgresVersions || [])) {
+      const key = `${pv.version} ${pv.variant.charAt(0).toUpperCase() + pv.variant.slice(1)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        opts.push({ version: pv.version, variant: pv.variant, label: key, image_tag: pv.image_tag });
+      }
+    }
+    return opts;
+  }, [postgresVersions]);
 
   function setSpec(fn) {
     setState(prev => ({ ...prev, spec: fn(prev.spec) }));
@@ -463,11 +504,21 @@ function ProfileForm({ state, setState, onSave, onCancel }) {
               </div>
               <div className="form-row">
                 <label>PostgreSQL Version</label>
-                <input className="input" value={spec.postgres.version} onChange={e => setSpec(s => ({ ...s, postgres: { ...s.postgres, version: e.target.value } }))} />
+                <select className="input" value={`${spec.postgres.version}|${spec.postgres.variant || 'alpine'}`}
+                  onChange={e => {
+                    const [v, var_] = e.target.value.split('|');
+                    setSpec(s => ({ ...s, postgres: { ...s.postgres, version: v, variant: var_ } }));
+                  }}>
+                  {versionOptions.length === 0
+                    ? <option value={`${spec.postgres.version}|${spec.postgres.variant || 'alpine'}`}>{spec.postgres.version} {spec.postgres.variant || 'alpine'}</option>
+                    : versionOptions.map(o => (
+                      <option key={`${o.version}|${o.variant}`} value={`${o.version}|${o.variant}`}>{o.label}</option>
+                    ))}
+                </select>
               </div>
               <div className="form-row">
-                <label>PostgreSQL Image</label>
-                <input className="input" value={spec.postgres.image} onChange={e => setSpec(s => ({ ...s, postgres: { ...s.postgres, image: e.target.value } }))} placeholder="Default" />
+                <label>Registry (optional)</label>
+                <input className="input" value={spec.postgres.registry || ''} onChange={e => setSpec(s => ({ ...s, postgres: { ...s.postgres, registry: e.target.value } }))} placeholder="Docker Hub (default)" />
               </div>
               <div className="form-row">
                 <label>Failover</label>
@@ -482,7 +533,21 @@ function ProfileForm({ state, setState, onSave, onCancel }) {
 
         {activeTab === 'volumes' && (
           <section className="form-section">
-            <h4>Volumes</h4>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <h4>Volumes</h4>
+              <button className="btn-sm" onClick={onRefreshStorageClasses} disabled={scRefreshing}>
+                {scRefreshing ? 'Refreshing...' : 'Refresh Storage Classes'}
+              </button>
+            </div>
+            <div className="volume-section">
+              <div className="volume-toggle">
+                <h5>Deletion Protection</h5>
+                <label className="toggle">
+                  <input type="checkbox" checked={!!spec.deletion_protection} onChange={e => setSpec(s => ({ ...s, deletion_protection: e.target.checked }))} />
+                  <span>Add finalizer to PVCs to prevent accidental deletion</span>
+                </label>
+              </div>
+            </div>
             <div className="volume-section">
               <h5>Data Volume</h5>
               <div className="form-grid">
@@ -492,7 +557,7 @@ function ProfileForm({ state, setState, onSave, onCancel }) {
                 </div>
                 <div className="form-row">
                   <label>Storage Class</label>
-                  <input className="input" value={spec.storage.storage_class} onChange={e => setSpec(s => ({ ...s, storage: { ...s.storage, storage_class: e.target.value } }))} placeholder="Default" />
+                  <StorageClassSelect value={spec.storage.storage_class} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, storage: { ...s.storage, storage_class: v } }))} />
                 </div>
               </div>
             </div>
@@ -512,7 +577,7 @@ function ProfileForm({ state, setState, onSave, onCancel }) {
                   </div>
                   <div className="form-row">
                     <label>Storage Class</label>
-                    <input className="input" value={spec.wal_storage.storage_class} onChange={e => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, storage_class: e.target.value } }))} placeholder="Default" />
+                    <StorageClassSelect value={spec.wal_storage.storage_class} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, storage_class: v } }))} />
                   </div>
                 </div>
               )}
@@ -527,7 +592,7 @@ function ProfileForm({ state, setState, onSave, onCancel }) {
                   </div>
                   <div className="form-row">
                     <label>Storage Class</label>
-                    <input className="input" value={spec.archive?.archive_storage?.storage_class || ''} onChange={e => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), storage_class: e.target.value } } }))} placeholder="Default" />
+                    <StorageClassSelect value={spec.archive?.archive_storage?.storage_class || ''} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), storage_class: v } } }))} />
                   </div>
                 </div>
               </div>
@@ -781,7 +846,7 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel }) {
             <h5>Cluster</h5>
             <div className="report-grid">
               <ReportRow label="Replicas" value={spec.replicas} />
-              <ReportRow label="PostgreSQL" value={`${spec.postgres.version}${spec.postgres.image ? ` (${spec.postgres.image})` : ''}`} />
+              <ReportRow label="PostgreSQL" value={`${spec.postgres.version} ${spec.postgres.variant || 'alpine'}${spec.postgres.registry ? ` (registry: ${spec.postgres.registry})` : ''}`} />
               <ReportRow label="Failover" value={spec.failover?.enabled ? 'Enabled' : 'Disabled'} />
             </div>
           </div>
@@ -865,5 +930,21 @@ function ReportRow({ label, value }) {
       <span className="report-label">{label}</span>
       <span className="report-value">{value}</span>
     </div>
+  );
+}
+
+function StorageClassSelect({ value, storageClasses, onChange }) {
+  // If the current value isn't in the list (e.g. typed manually before), keep it as an option
+  const hasValue = !value || storageClasses.some(sc => sc.name === value);
+  return (
+    <select className="input" value={value} onChange={e => onChange(e.target.value)}>
+      <option value="">Default</option>
+      {!hasValue && <option value={value}>{value}</option>}
+      {storageClasses.map(sc => (
+        <option key={sc.name} value={sc.name}>
+          {sc.name}{sc.is_default ? ' (default)' : ''} — {sc.provisioner}
+        </option>
+      ))}
+    </select>
   );
 }

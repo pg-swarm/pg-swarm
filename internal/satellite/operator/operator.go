@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -18,27 +19,32 @@ import (
 
 // Operator materializes ClusterConfig messages as running PostgreSQL HA clusters.
 type Operator struct {
-	client           kubernetes.Interface
-	k8sClusterName   string // used in config-storage ConfigMap naming
-	defaultNamespace string // fallback when ClusterConfig.Namespace is empty
-	mu               sync.RWMutex
-	desired          map[string]*pgswarmv1.ClusterConfig // key: "ns/cluster"
-	applied          map[string]int64                    // key -> last applied config version
+	client               kubernetes.Interface
+	k8sClusterName       string // used in config-storage ConfigMap naming
+	defaultNamespace     string // fallback when ClusterConfig.Namespace is empty
+	defaultFailoverImage string // fallback failover sidecar image
+	mu                   sync.RWMutex
+	desired              map[string]*pgswarmv1.ClusterConfig // key: "ns/cluster"
+	applied              map[string]int64                    // key -> last applied config version
 }
 
 // New creates a new Operator backed by the given Kubernetes client.
 // k8sClusterName is used for config-storage ConfigMap naming (pg-swarm-<k8s>-<pg>).
 // defaultNamespace is used when a ClusterConfig has no namespace set.
-func New(client kubernetes.Interface, k8sClusterName, defaultNamespace string) *Operator {
+func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string) *Operator {
 	if defaultNamespace == "" {
 		defaultNamespace = "default"
 	}
+	if defaultFailoverImage == "" {
+		defaultFailoverImage = "ghcr.io/pg-swarm/pg-swarm-failover:latest"
+	}
 	return &Operator{
-		client:           client,
-		k8sClusterName:   k8sClusterName,
-		defaultNamespace: defaultNamespace,
-		desired:          make(map[string]*pgswarmv1.ClusterConfig),
-		applied:          make(map[string]int64),
+		client:               client,
+		k8sClusterName:       k8sClusterName,
+		defaultNamespace:     defaultNamespace,
+		defaultFailoverImage: defaultFailoverImage,
+		desired:              make(map[string]*pgswarmv1.ClusterConfig),
+		applied:              make(map[string]int64),
 	}
 }
 
@@ -168,6 +174,9 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 		log.Warn().Err(err).Str("resource", "configmap/"+cfgStoreName).Msg("delete failed")
 	}
 
+	// Remove finalizers from PVCs and delete them
+	removeFinalizedPVCs(ctx, o.client, ns, name)
+
 	o.mu.Lock()
 	delete(o.desired, key)
 	delete(o.applied, key)
@@ -175,6 +184,45 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 
 	log.Info().Str("cluster", key).Msg("cluster resources deleted")
 	return nil
+}
+
+// ManagedCluster is a snapshot of a cluster managed by this operator.
+type ManagedCluster struct {
+	ClusterName string
+	Namespace   string
+	Replicas    int32
+}
+
+// ManagedClusters returns a snapshot of all clusters the operator is managing.
+func (o *Operator) ManagedClusters() []ManagedCluster {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	out := make([]ManagedCluster, 0, len(o.desired))
+	for _, cfg := range o.desired {
+		out = append(out, ManagedCluster{
+			ClusterName: cfg.ClusterName,
+			Namespace:   cfg.Namespace,
+			Replicas:    cfg.Replicas,
+		})
+	}
+	return out
+}
+
+// ResolveNamespaceForCluster returns the namespace for a given cluster name,
+// falling back to defaultNamespace if the cluster is unknown.
+func (o *Operator) ResolveNamespaceForCluster(clusterName, namespace string) string {
+	if namespace != "" {
+		return namespace
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	for _, cfg := range o.desired {
+		if cfg.ClusterName == clusterName {
+			return cfg.Namespace
+		}
+	}
+	return o.defaultNamespace
 }
 
 // buildConfigStore creates a ConfigMap that stores the received ClusterConfig
@@ -232,13 +280,22 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	}
 
 	// 5. Services
-	for _, svc := range []*corev1.Service{
-		buildHeadlessService(cfg),
-		buildRWService(cfg),
-		buildROService(cfg),
-	} {
-		if err := createOrUpdateService(ctx, o.client, svc); err != nil {
-			return fmt.Errorf("service %s: %w", svc.Name, err)
+	if err := createOrUpdateService(ctx, o.client, buildHeadlessService(cfg)); err != nil {
+		return fmt.Errorf("service headless: %w", err)
+	}
+	if err := createOrUpdateService(ctx, o.client, buildROService(cfg)); err != nil {
+		return fmt.Errorf("service ro: %w", err)
+	}
+	rwSvcName := resourceName(cfg.ClusterName, "rw")
+	if cfg.Paused {
+		// Paused: remove the RW service to make the cluster read-only
+		if err := o.client.CoreV1().Services(cfg.Namespace).Delete(ctx, rwSvcName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete rw service: %w", err)
+		}
+		log.Info().Str("cluster", cfg.ClusterName).Msg("cluster paused — RW service removed")
+	} else {
+		if err := createOrUpdateService(ctx, o.client, buildRWService(cfg)); err != nil {
+			return fmt.Errorf("service rw: %w", err)
 		}
 	}
 
@@ -256,7 +313,7 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	}
 
 	// 7. StatefulSet
-	sts := buildStatefulSet(cfg, secret.Name)
+	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage)
 	if err := createOrUpdateStatefulSet(ctx, o.client, sts); err != nil {
 		return fmt.Errorf("statefulset: %w", err)
 	}

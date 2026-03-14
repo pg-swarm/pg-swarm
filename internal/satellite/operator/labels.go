@@ -14,6 +14,9 @@ const (
 
 	RolePrimary = "primary"
 	RoleReplica = "replica"
+
+	// FinalizerPGSwarm prevents accidental deletion of namespaces and PVCs.
+	FinalizerPGSwarm = "pg-swarm.io/protection"
 )
 
 // clusterLabels returns the standard labels applied to all resources for a cluster.

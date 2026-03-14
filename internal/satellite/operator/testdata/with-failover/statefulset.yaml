@@ -89,6 +89,7 @@ spec:
               key: superuser-password
               name: ha-pg-secret
         image: my-registry/failover:v1
+        imagePullPolicy: IfNotPresent
         name: failover
         resources: {}
       initContainers:
@@ -162,9 +163,9 @@ spec:
         - mountPath: /etc/pg-config
           name: config
       securityContext:
-        fsGroup: 999
-        runAsGroup: 999
-        runAsUser: 999
+        fsGroup: 70
+        runAsGroup: 70
+        runAsUser: 70
       serviceAccountName: ha-pg-failover
       volumes:
       - configMap:
@@ -176,6 +177,10 @@ spec:
   updateStrategy: {}
   volumeClaimTemplates:
   - metadata:
+      labels:
+        app.kubernetes.io/managed-by: pg-swarm
+        app.kubernetes.io/name: postgresql
+        pg-swarm.io/cluster: ha-pg
       name: data
     spec:
       accessModes:

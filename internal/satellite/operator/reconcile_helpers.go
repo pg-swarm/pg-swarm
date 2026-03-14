@@ -200,3 +200,37 @@ func createOrUpdateRoleBinding(ctx context.Context, client kubernetes.Interface,
 	}
 	return err // RoleBinding roleRef is immutable — no update needed
 }
+
+// removeFinalizedPVCs strips the pg-swarm finalizer from PVCs belonging to the
+// cluster's StatefulSet and deletes them. PVCs follow the naming convention
+// <vct-name>-<sts-name>-<ordinal>.
+func removeFinalizedPVCs(ctx context.Context, client kubernetes.Interface, namespace, clusterName string) {
+	pvcs, err := client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", LabelCluster, clusterName),
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("cluster", clusterName).Msg("failed to list PVCs for cleanup")
+		return
+	}
+
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		// Remove our finalizer
+		filtered := make([]string, 0, len(pvc.Finalizers))
+		for _, f := range pvc.Finalizers {
+			if f != FinalizerPGSwarm {
+				filtered = append(filtered, f)
+			}
+		}
+		if len(filtered) != len(pvc.Finalizers) {
+			pvc.Finalizers = filtered
+			if _, err := client.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
+				log.Warn().Err(err).Str("pvc", pvc.Name).Msg("failed to remove finalizer from PVC")
+				continue
+			}
+		}
+		if err := client.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil {
+			log.Warn().Err(err).Str("pvc", pvc.Name).Msg("failed to delete PVC")
+		}
+	}
+}
