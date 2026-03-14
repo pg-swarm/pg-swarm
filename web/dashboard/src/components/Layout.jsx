@@ -1,12 +1,19 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { useData } from '../context/DataContext';
 import { deriveSatState } from '../api';
+import {
+  LayoutDashboard, Satellite, Boxes, GitBranch, Database,
+  Activity, Settings, RefreshCw
+} from 'lucide-react';
 
 const NAV = [
-  { to: '/',           label: 'Overview' },
-  { to: '/satellites', label: 'Satellites' },
-  { to: '/clusters',   label: 'Clusters' },
-  { to: '/events',     label: 'Events' },
+  { to: '/',                  label: 'Overview',          icon: LayoutDashboard },
+  { to: '/satellites',        label: 'Satellites',        icon: Satellite },
+  { to: '/profiles',          label: 'Profiles',          icon: Boxes },
+  { to: '/deployment-rules',  label: 'Deployment Rules',  icon: GitBranch },
+  { to: '/clusters',          label: 'Clusters',          icon: Database },
+  { to: '/events',            label: 'Events',            icon: Activity },
+  { to: '/admin',             label: 'Admin',             icon: Settings },
 ];
 
 function StatusDot({ satellites }) {
@@ -19,7 +26,7 @@ function StatusDot({ satellites }) {
   else if (online > 0)      { color = 'dot-amber'; text = `${online}/${total} online`; }
   else                       { color = 'dot-red';   text = 'All offline'; }
 
-  return <span><span className={`online-dot ${color}`} />{text}</span>;
+  return <span className="status-pill"><span className={`online-dot ${color}`} />{text}</span>;
 }
 
 export default function Layout() {
@@ -42,20 +49,24 @@ export default function Layout() {
       </header>
 
       <nav className="nav">
-        {NAV.map(n => (
-          <NavLink
-            key={n.to}
-            to={n.to}
-            end={n.to === '/'}
-            className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
-          >
-            {n.label}
-          </NavLink>
-        ))}
+        {NAV.map(n => {
+          const Icon = n.icon;
+          return (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.to === '/'}
+              className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
+            >
+              <Icon size={15} />
+              {n.label}
+            </NavLink>
+          );
+        })}
         <div className="nav-spacer" />
         <div className="refresh">
           <span>{lastRefresh ? lastRefresh.toLocaleTimeString() : '-'}</span>
-          <button onClick={refresh}>Refresh</button>
+          <button onClick={refresh}><RefreshCw size={12} /> Refresh</button>
         </div>
       </nav>
 

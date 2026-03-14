@@ -30,6 +30,8 @@ type SatelliteMessage struct {
 	//	*SatelliteMessage_HealthReport
 	//	*SatelliteMessage_EventReport
 	//	*SatelliteMessage_ConfigAck
+	//	*SatelliteMessage_StorageClassReport
+	//	*SatelliteMessage_SwitchoverResult
 	Payload       isSatelliteMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -108,6 +110,24 @@ func (x *SatelliteMessage) GetConfigAck() *ConfigAck {
 	return nil
 }
 
+func (x *SatelliteMessage) GetStorageClassReport() *StorageClassReport {
+	if x != nil {
+		if x, ok := x.Payload.(*SatelliteMessage_StorageClassReport); ok {
+			return x.StorageClassReport
+		}
+	}
+	return nil
+}
+
+func (x *SatelliteMessage) GetSwitchoverResult() *SwitchoverResult {
+	if x != nil {
+		if x, ok := x.Payload.(*SatelliteMessage_SwitchoverResult); ok {
+			return x.SwitchoverResult
+		}
+	}
+	return nil
+}
+
 type isSatelliteMessage_Payload interface {
 	isSatelliteMessage_Payload()
 }
@@ -128,6 +148,14 @@ type SatelliteMessage_ConfigAck struct {
 	ConfigAck *ConfigAck `protobuf:"bytes,4,opt,name=config_ack,json=configAck,proto3,oneof"`
 }
 
+type SatelliteMessage_StorageClassReport struct {
+	StorageClassReport *StorageClassReport `protobuf:"bytes,5,opt,name=storage_class_report,json=storageClassReport,proto3,oneof"`
+}
+
+type SatelliteMessage_SwitchoverResult struct {
+	SwitchoverResult *SwitchoverResult `protobuf:"bytes,6,opt,name=switchover_result,json=switchoverResult,proto3,oneof"`
+}
+
 func (*SatelliteMessage_Heartbeat) isSatelliteMessage_Payload() {}
 
 func (*SatelliteMessage_HealthReport) isSatelliteMessage_Payload() {}
@@ -136,6 +164,10 @@ func (*SatelliteMessage_EventReport) isSatelliteMessage_Payload() {}
 
 func (*SatelliteMessage_ConfigAck) isSatelliteMessage_Payload() {}
 
+func (*SatelliteMessage_StorageClassReport) isSatelliteMessage_Payload() {}
+
+func (*SatelliteMessage_SwitchoverResult) isSatelliteMessage_Payload() {}
+
 type CentralMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -143,6 +175,8 @@ type CentralMessage struct {
 	//	*CentralMessage_ClusterConfig
 	//	*CentralMessage_DeleteCluster
 	//	*CentralMessage_HeartbeatAck
+	//	*CentralMessage_RequestStorageClasses
+	//	*CentralMessage_Switchover
 	Payload       isCentralMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -212,6 +246,24 @@ func (x *CentralMessage) GetHeartbeatAck() *HeartbeatAck {
 	return nil
 }
 
+func (x *CentralMessage) GetRequestStorageClasses() *RequestStorageClasses {
+	if x != nil {
+		if x, ok := x.Payload.(*CentralMessage_RequestStorageClasses); ok {
+			return x.RequestStorageClasses
+		}
+	}
+	return nil
+}
+
+func (x *CentralMessage) GetSwitchover() *SwitchoverRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*CentralMessage_Switchover); ok {
+			return x.Switchover
+		}
+	}
+	return nil
+}
+
 type isCentralMessage_Payload interface {
 	isCentralMessage_Payload()
 }
@@ -228,11 +280,301 @@ type CentralMessage_HeartbeatAck struct {
 	HeartbeatAck *HeartbeatAck `protobuf:"bytes,3,opt,name=heartbeat_ack,json=heartbeatAck,proto3,oneof"`
 }
 
+type CentralMessage_RequestStorageClasses struct {
+	RequestStorageClasses *RequestStorageClasses `protobuf:"bytes,4,opt,name=request_storage_classes,json=requestStorageClasses,proto3,oneof"`
+}
+
+type CentralMessage_Switchover struct {
+	Switchover *SwitchoverRequest `protobuf:"bytes,5,opt,name=switchover,proto3,oneof"`
+}
+
 func (*CentralMessage_ClusterConfig) isCentralMessage_Payload() {}
 
 func (*CentralMessage_DeleteCluster) isCentralMessage_Payload() {}
 
 func (*CentralMessage_HeartbeatAck) isCentralMessage_Payload() {}
+
+func (*CentralMessage_RequestStorageClasses) isCentralMessage_Payload() {}
+
+func (*CentralMessage_Switchover) isCentralMessage_Payload() {}
+
+// SwitchoverRequest tells the satellite to promote a specific replica to primary.
+type SwitchoverRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	TargetPod     string                 `protobuf:"bytes,3,opt,name=target_pod,json=targetPod,proto3" json:"target_pod,omitempty"` // pod to promote (must be a replica)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SwitchoverRequest) Reset() {
+	*x = SwitchoverRequest{}
+	mi := &file_config_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SwitchoverRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SwitchoverRequest) ProtoMessage() {}
+
+func (x *SwitchoverRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_config_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SwitchoverRequest.ProtoReflect.Descriptor instead.
+func (*SwitchoverRequest) Descriptor() ([]byte, []int) {
+	return file_config_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *SwitchoverRequest) GetClusterName() string {
+	if x != nil {
+		return x.ClusterName
+	}
+	return ""
+}
+
+func (x *SwitchoverRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *SwitchoverRequest) GetTargetPod() string {
+	if x != nil {
+		return x.TargetPod
+	}
+	return ""
+}
+
+// SwitchoverResult is sent back by the satellite after a switchover attempt.
+type SwitchoverResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage  string                 `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SwitchoverResult) Reset() {
+	*x = SwitchoverResult{}
+	mi := &file_config_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SwitchoverResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SwitchoverResult) ProtoMessage() {}
+
+func (x *SwitchoverResult) ProtoReflect() protoreflect.Message {
+	mi := &file_config_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SwitchoverResult.ProtoReflect.Descriptor instead.
+func (*SwitchoverResult) Descriptor() ([]byte, []int) {
+	return file_config_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SwitchoverResult) GetClusterName() string {
+	if x != nil {
+		return x.ClusterName
+	}
+	return ""
+}
+
+func (x *SwitchoverResult) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *SwitchoverResult) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+type StorageClassReport struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	StorageClasses []*StorageClassInfo    `protobuf:"bytes,1,rep,name=storage_classes,json=storageClasses,proto3" json:"storage_classes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *StorageClassReport) Reset() {
+	*x = StorageClassReport{}
+	mi := &file_config_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StorageClassReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StorageClassReport) ProtoMessage() {}
+
+func (x *StorageClassReport) ProtoReflect() protoreflect.Message {
+	mi := &file_config_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StorageClassReport.ProtoReflect.Descriptor instead.
+func (*StorageClassReport) Descriptor() ([]byte, []int) {
+	return file_config_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *StorageClassReport) GetStorageClasses() []*StorageClassInfo {
+	if x != nil {
+		return x.StorageClasses
+	}
+	return nil
+}
+
+type StorageClassInfo struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Name              string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Provisioner       string                 `protobuf:"bytes,2,opt,name=provisioner,proto3" json:"provisioner,omitempty"`
+	ReclaimPolicy     string                 `protobuf:"bytes,3,opt,name=reclaim_policy,json=reclaimPolicy,proto3" json:"reclaim_policy,omitempty"`
+	VolumeBindingMode string                 `protobuf:"bytes,4,opt,name=volume_binding_mode,json=volumeBindingMode,proto3" json:"volume_binding_mode,omitempty"`
+	IsDefault         bool                   `protobuf:"varint,5,opt,name=is_default,json=isDefault,proto3" json:"is_default,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *StorageClassInfo) Reset() {
+	*x = StorageClassInfo{}
+	mi := &file_config_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StorageClassInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StorageClassInfo) ProtoMessage() {}
+
+func (x *StorageClassInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_config_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StorageClassInfo.ProtoReflect.Descriptor instead.
+func (*StorageClassInfo) Descriptor() ([]byte, []int) {
+	return file_config_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *StorageClassInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *StorageClassInfo) GetProvisioner() string {
+	if x != nil {
+		return x.Provisioner
+	}
+	return ""
+}
+
+func (x *StorageClassInfo) GetReclaimPolicy() string {
+	if x != nil {
+		return x.ReclaimPolicy
+	}
+	return ""
+}
+
+func (x *StorageClassInfo) GetVolumeBindingMode() string {
+	if x != nil {
+		return x.VolumeBindingMode
+	}
+	return ""
+}
+
+func (x *StorageClassInfo) GetIsDefault() bool {
+	if x != nil {
+		return x.IsDefault
+	}
+	return false
+}
+
+type RequestStorageClasses struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestStorageClasses) Reset() {
+	*x = RequestStorageClasses{}
+	mi := &file_config_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestStorageClasses) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestStorageClasses) ProtoMessage() {}
+
+func (x *RequestStorageClasses) ProtoReflect() protoreflect.Message {
+	mi := &file_config_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestStorageClasses.ProtoReflect.Descriptor instead.
+func (*RequestStorageClasses) Descriptor() ([]byte, []int) {
+	return file_config_proto_rawDescGZIP(), []int{6}
+}
 
 type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -243,7 +585,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_config_proto_msgTypes[2]
+	mi := &file_config_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -255,7 +597,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[2]
+	mi := &file_config_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -268,7 +610,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{2}
+	return file_config_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Heartbeat) GetTimestamp() *timestamppb.Timestamp {
@@ -287,7 +629,7 @@ type HeartbeatAck struct {
 
 func (x *HeartbeatAck) Reset() {
 	*x = HeartbeatAck{}
-	mi := &file_config_proto_msgTypes[3]
+	mi := &file_config_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -299,7 +641,7 @@ func (x *HeartbeatAck) String() string {
 func (*HeartbeatAck) ProtoMessage() {}
 
 func (x *HeartbeatAck) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[3]
+	mi := &file_config_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -312,7 +654,7 @@ func (x *HeartbeatAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatAck.ProtoReflect.Descriptor instead.
 func (*HeartbeatAck) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{3}
+	return file_config_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *HeartbeatAck) GetTimestamp() *timestamppb.Timestamp {
@@ -334,7 +676,7 @@ type ConfigAck struct {
 
 func (x *ConfigAck) Reset() {
 	*x = ConfigAck{}
-	mi := &file_config_proto_msgTypes[4]
+	mi := &file_config_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -346,7 +688,7 @@ func (x *ConfigAck) String() string {
 func (*ConfigAck) ProtoMessage() {}
 
 func (x *ConfigAck) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[4]
+	mi := &file_config_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -359,7 +701,7 @@ func (x *ConfigAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigAck.ProtoReflect.Descriptor instead.
 func (*ConfigAck) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{4}
+	return file_config_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ConfigAck) GetClusterName() string {
@@ -391,26 +733,31 @@ func (x *ConfigAck) GetErrorMessage() string {
 }
 
 type ClusterConfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Replicas      int32                  `protobuf:"varint,3,opt,name=replicas,proto3" json:"replicas,omitempty"`
-	Postgres      *PostgresSpec          `protobuf:"bytes,4,opt,name=postgres,proto3" json:"postgres,omitempty"`
-	Storage       *StorageSpec           `protobuf:"bytes,5,opt,name=storage,proto3" json:"storage,omitempty"`
-	Resources     *ResourceSpec          `protobuf:"bytes,6,opt,name=resources,proto3" json:"resources,omitempty"`
-	PgParams      map[string]string      `protobuf:"bytes,7,rep,name=pg_params,json=pgParams,proto3" json:"pg_params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	HbaRules      []string               `protobuf:"bytes,8,rep,name=hba_rules,json=hbaRules,proto3" json:"hba_rules,omitempty"`
-	ConfigVersion int64                  `protobuf:"varint,9,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`
-	Archive       *ArchiveSpec           `protobuf:"bytes,10,opt,name=archive,proto3" json:"archive,omitempty"`     // optional WAL archiving config
-	Databases     []*DatabaseSpec        `protobuf:"bytes,11,rep,name=databases,proto3" json:"databases,omitempty"` // databases to create with their owner users
-	Failover      *FailoverSpec          `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`   // optional automatic failover sidecar
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName        string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	Namespace          string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Replicas           int32                  `protobuf:"varint,3,opt,name=replicas,proto3" json:"replicas,omitempty"`
+	Postgres           *PostgresSpec          `protobuf:"bytes,4,opt,name=postgres,proto3" json:"postgres,omitempty"`
+	Storage            *StorageSpec           `protobuf:"bytes,5,opt,name=storage,proto3" json:"storage,omitempty"`
+	Resources          *ResourceSpec          `protobuf:"bytes,6,opt,name=resources,proto3" json:"resources,omitempty"`
+	PgParams           map[string]string      `protobuf:"bytes,7,rep,name=pg_params,json=pgParams,proto3" json:"pg_params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	HbaRules           []string               `protobuf:"bytes,8,rep,name=hba_rules,json=hbaRules,proto3" json:"hba_rules,omitempty"`
+	ConfigVersion      int64                  `protobuf:"varint,9,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`
+	Archive            *ArchiveSpec           `protobuf:"bytes,10,opt,name=archive,proto3" json:"archive,omitempty"`                                                                                                            // optional WAL archiving config
+	Databases          []*DatabaseSpec        `protobuf:"bytes,11,rep,name=databases,proto3" json:"databases,omitempty"`                                                                                                        // databases to create with their owner users
+	Failover           *FailoverSpec          `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`                                                                                                          // optional automatic failover sidecar
+	WalStorage         *StorageSpec           `protobuf:"bytes,13,opt,name=wal_storage,json=walStorage,proto3" json:"wal_storage,omitempty"`                                                                                    // optional separate WAL volume
+	ProfileName        string                 `protobuf:"bytes,14,opt,name=profile_name,json=profileName,proto3" json:"profile_name,omitempty"`                                                                                 // name of the source profile (for K8s labels)
+	LabelSelector      map[string]string      `protobuf:"bytes,15,rep,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // deployment rule label selector (for K8s labels)
+	Paused             bool                   `protobuf:"varint,16,opt,name=paused,proto3" json:"paused,omitempty"`                                                                                                             // when true, RW service is removed (read-only mode)
+	DeletionProtection bool                   `protobuf:"varint,17,opt,name=deletion_protection,json=deletionProtection,proto3" json:"deletion_protection,omitempty"`                                                           // when true, PVCs get a finalizer to prevent accidental deletion
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ClusterConfig) Reset() {
 	*x = ClusterConfig{}
-	mi := &file_config_proto_msgTypes[5]
+	mi := &file_config_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -422,7 +769,7 @@ func (x *ClusterConfig) String() string {
 func (*ClusterConfig) ProtoMessage() {}
 
 func (x *ClusterConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[5]
+	mi := &file_config_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -435,7 +782,7 @@ func (x *ClusterConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterConfig.ProtoReflect.Descriptor instead.
 func (*ClusterConfig) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{5}
+	return file_config_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ClusterConfig) GetClusterName() string {
@@ -522,6 +869,41 @@ func (x *ClusterConfig) GetFailover() *FailoverSpec {
 	return nil
 }
 
+func (x *ClusterConfig) GetWalStorage() *StorageSpec {
+	if x != nil {
+		return x.WalStorage
+	}
+	return nil
+}
+
+func (x *ClusterConfig) GetProfileName() string {
+	if x != nil {
+		return x.ProfileName
+	}
+	return ""
+}
+
+func (x *ClusterConfig) GetLabelSelector() map[string]string {
+	if x != nil {
+		return x.LabelSelector
+	}
+	return nil
+}
+
+func (x *ClusterConfig) GetPaused() bool {
+	if x != nil {
+		return x.Paused
+	}
+	return false
+}
+
+func (x *ClusterConfig) GetDeletionProtection() bool {
+	if x != nil {
+		return x.DeletionProtection
+	}
+	return false
+}
+
 type PostgresSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
@@ -532,7 +914,7 @@ type PostgresSpec struct {
 
 func (x *PostgresSpec) Reset() {
 	*x = PostgresSpec{}
-	mi := &file_config_proto_msgTypes[6]
+	mi := &file_config_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -544,7 +926,7 @@ func (x *PostgresSpec) String() string {
 func (*PostgresSpec) ProtoMessage() {}
 
 func (x *PostgresSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[6]
+	mi := &file_config_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -557,7 +939,7 @@ func (x *PostgresSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PostgresSpec.ProtoReflect.Descriptor instead.
 func (*PostgresSpec) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{6}
+	return file_config_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PostgresSpec) GetVersion() string {
@@ -584,7 +966,7 @@ type StorageSpec struct {
 
 func (x *StorageSpec) Reset() {
 	*x = StorageSpec{}
-	mi := &file_config_proto_msgTypes[7]
+	mi := &file_config_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -596,7 +978,7 @@ func (x *StorageSpec) String() string {
 func (*StorageSpec) ProtoMessage() {}
 
 func (x *StorageSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[7]
+	mi := &file_config_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -609,7 +991,7 @@ func (x *StorageSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageSpec.ProtoReflect.Descriptor instead.
 func (*StorageSpec) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{7}
+	return file_config_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *StorageSpec) GetSize() string {
@@ -638,7 +1020,7 @@ type ResourceSpec struct {
 
 func (x *ResourceSpec) Reset() {
 	*x = ResourceSpec{}
-	mi := &file_config_proto_msgTypes[8]
+	mi := &file_config_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -650,7 +1032,7 @@ func (x *ResourceSpec) String() string {
 func (*ResourceSpec) ProtoMessage() {}
 
 func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[8]
+	mi := &file_config_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -663,7 +1045,7 @@ func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceSpec.ProtoReflect.Descriptor instead.
 func (*ResourceSpec) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{8}
+	return file_config_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ResourceSpec) GetCpuRequest() string {
@@ -705,7 +1087,7 @@ type DatabaseSpec struct {
 
 func (x *DatabaseSpec) Reset() {
 	*x = DatabaseSpec{}
-	mi := &file_config_proto_msgTypes[9]
+	mi := &file_config_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -717,7 +1099,7 @@ func (x *DatabaseSpec) String() string {
 func (*DatabaseSpec) ProtoMessage() {}
 
 func (x *DatabaseSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[9]
+	mi := &file_config_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -730,7 +1112,7 @@ func (x *DatabaseSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DatabaseSpec.ProtoReflect.Descriptor instead.
 func (*DatabaseSpec) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{9}
+	return file_config_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DatabaseSpec) GetName() string {
@@ -768,7 +1150,7 @@ type ArchiveSpec struct {
 
 func (x *ArchiveSpec) Reset() {
 	*x = ArchiveSpec{}
-	mi := &file_config_proto_msgTypes[10]
+	mi := &file_config_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -780,7 +1162,7 @@ func (x *ArchiveSpec) String() string {
 func (*ArchiveSpec) ProtoMessage() {}
 
 func (x *ArchiveSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[10]
+	mi := &file_config_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -793,7 +1175,7 @@ func (x *ArchiveSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveSpec.ProtoReflect.Descriptor instead.
 func (*ArchiveSpec) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{10}
+	return file_config_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ArchiveSpec) GetMode() string {
@@ -848,7 +1230,7 @@ type ArchiveStorageSpec struct {
 
 func (x *ArchiveStorageSpec) Reset() {
 	*x = ArchiveStorageSpec{}
-	mi := &file_config_proto_msgTypes[11]
+	mi := &file_config_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -860,7 +1242,7 @@ func (x *ArchiveStorageSpec) String() string {
 func (*ArchiveStorageSpec) ProtoMessage() {}
 
 func (x *ArchiveStorageSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[11]
+	mi := &file_config_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -873,7 +1255,7 @@ func (x *ArchiveStorageSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveStorageSpec.ProtoReflect.Descriptor instead.
 func (*ArchiveStorageSpec) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{11}
+	return file_config_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ArchiveStorageSpec) GetSize() string {
@@ -899,7 +1281,7 @@ type SecretRef struct {
 
 func (x *SecretRef) Reset() {
 	*x = SecretRef{}
-	mi := &file_config_proto_msgTypes[12]
+	mi := &file_config_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -911,7 +1293,7 @@ func (x *SecretRef) String() string {
 func (*SecretRef) ProtoMessage() {}
 
 func (x *SecretRef) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[12]
+	mi := &file_config_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -924,7 +1306,7 @@ func (x *SecretRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretRef.ProtoReflect.Descriptor instead.
 func (*SecretRef) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{12}
+	return file_config_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SecretRef) GetName() string {
@@ -945,7 +1327,7 @@ type FailoverSpec struct {
 
 func (x *FailoverSpec) Reset() {
 	*x = FailoverSpec{}
-	mi := &file_config_proto_msgTypes[13]
+	mi := &file_config_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -957,7 +1339,7 @@ func (x *FailoverSpec) String() string {
 func (*FailoverSpec) ProtoMessage() {}
 
 func (x *FailoverSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[13]
+	mi := &file_config_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -970,7 +1352,7 @@ func (x *FailoverSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FailoverSpec.ProtoReflect.Descriptor instead.
 func (*FailoverSpec) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{13}
+	return file_config_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *FailoverSpec) GetEnabled() bool {
@@ -1004,7 +1386,7 @@ type DeleteCluster struct {
 
 func (x *DeleteCluster) Reset() {
 	*x = DeleteCluster{}
-	mi := &file_config_proto_msgTypes[14]
+	mi := &file_config_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1016,7 +1398,7 @@ func (x *DeleteCluster) String() string {
 func (*DeleteCluster) ProtoMessage() {}
 
 func (x *DeleteCluster) ProtoReflect() protoreflect.Message {
-	mi := &file_config_proto_msgTypes[14]
+	mi := &file_config_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1029,7 +1411,7 @@ func (x *DeleteCluster) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteCluster.ProtoReflect.Descriptor instead.
 func (*DeleteCluster) Descriptor() ([]byte, []int) {
-	return file_config_proto_rawDescGZIP(), []int{14}
+	return file_config_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DeleteCluster) GetClusterName() string {
@@ -1051,19 +1433,44 @@ var File_config_proto protoreflect.FileDescriptor
 const file_config_proto_rawDesc = "" +
 	"\n" +
 	"\fconfig.proto\x12\n" +
-	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\fhealth.proto\"\x92\x02\n" +
+	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\fhealth.proto\"\xb3\x03\n" +
 	"\x10SatelliteMessage\x125\n" +
 	"\theartbeat\x18\x01 \x01(\v2\x15.pgswarm.v1.HeartbeatH\x00R\theartbeat\x12F\n" +
 	"\rhealth_report\x18\x02 \x01(\v2\x1f.pgswarm.v1.ClusterHealthReportH\x00R\fhealthReport\x12<\n" +
 	"\fevent_report\x18\x03 \x01(\v2\x17.pgswarm.v1.EventReportH\x00R\veventReport\x126\n" +
 	"\n" +
-	"config_ack\x18\x04 \x01(\v2\x15.pgswarm.v1.ConfigAckH\x00R\tconfigAckB\t\n" +
-	"\apayload\"\xe4\x01\n" +
+	"config_ack\x18\x04 \x01(\v2\x15.pgswarm.v1.ConfigAckH\x00R\tconfigAck\x12R\n" +
+	"\x14storage_class_report\x18\x05 \x01(\v2\x1e.pgswarm.v1.StorageClassReportH\x00R\x12storageClassReport\x12K\n" +
+	"\x11switchover_result\x18\x06 \x01(\v2\x1c.pgswarm.v1.SwitchoverResultH\x00R\x10switchoverResultB\t\n" +
+	"\apayload\"\x82\x03\n" +
 	"\x0eCentralMessage\x12B\n" +
 	"\x0ecluster_config\x18\x01 \x01(\v2\x19.pgswarm.v1.ClusterConfigH\x00R\rclusterConfig\x12B\n" +
 	"\x0edelete_cluster\x18\x02 \x01(\v2\x19.pgswarm.v1.DeleteClusterH\x00R\rdeleteCluster\x12?\n" +
-	"\rheartbeat_ack\x18\x03 \x01(\v2\x18.pgswarm.v1.HeartbeatAckH\x00R\fheartbeatAckB\t\n" +
-	"\apayload\"E\n" +
+	"\rheartbeat_ack\x18\x03 \x01(\v2\x18.pgswarm.v1.HeartbeatAckH\x00R\fheartbeatAck\x12[\n" +
+	"\x17request_storage_classes\x18\x04 \x01(\v2!.pgswarm.v1.RequestStorageClassesH\x00R\x15requestStorageClasses\x12?\n" +
+	"\n" +
+	"switchover\x18\x05 \x01(\v2\x1d.pgswarm.v1.SwitchoverRequestH\x00R\n" +
+	"switchoverB\t\n" +
+	"\apayload\"s\n" +
+	"\x11SwitchoverRequest\x12!\n" +
+	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1d\n" +
+	"\n" +
+	"target_pod\x18\x03 \x01(\tR\ttargetPod\"t\n" +
+	"\x10SwitchoverResult\x12!\n" +
+	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x18\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"[\n" +
+	"\x12StorageClassReport\x12E\n" +
+	"\x0fstorage_classes\x18\x01 \x03(\v2\x1c.pgswarm.v1.StorageClassInfoR\x0estorageClasses\"\xbe\x01\n" +
+	"\x10StorageClassInfo\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vprovisioner\x18\x02 \x01(\tR\vprovisioner\x12%\n" +
+	"\x0ereclaim_policy\x18\x03 \x01(\tR\rreclaimPolicy\x12.\n" +
+	"\x13volume_binding_mode\x18\x04 \x01(\tR\x11volumeBindingMode\x12\x1d\n" +
+	"\n" +
+	"is_default\x18\x05 \x01(\bR\tisDefault\"\x17\n" +
+	"\x15RequestStorageClasses\"E\n" +
 	"\tHeartbeat\x128\n" +
 	"\ttimestamp\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"H\n" +
 	"\fHeartbeatAck\x128\n" +
@@ -1072,7 +1479,7 @@ const file_config_proto_rawDesc = "" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12%\n" +
 	"\x0econfig_version\x18\x02 \x01(\x03R\rconfigVersion\x12\x18\n" +
 	"\asuccess\x18\x03 \x01(\bR\asuccess\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xf5\x04\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xb2\a\n" +
 	"\rClusterConfig\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1a\n" +
@@ -1086,8 +1493,17 @@ const file_config_proto_rawDesc = "" +
 	"\aarchive\x18\n" +
 	" \x01(\v2\x17.pgswarm.v1.ArchiveSpecR\aarchive\x126\n" +
 	"\tdatabases\x18\v \x03(\v2\x18.pgswarm.v1.DatabaseSpecR\tdatabases\x124\n" +
-	"\bfailover\x18\f \x01(\v2\x18.pgswarm.v1.FailoverSpecR\bfailover\x1a;\n" +
+	"\bfailover\x18\f \x01(\v2\x18.pgswarm.v1.FailoverSpecR\bfailover\x128\n" +
+	"\vwal_storage\x18\r \x01(\v2\x17.pgswarm.v1.StorageSpecR\n" +
+	"walStorage\x12!\n" +
+	"\fprofile_name\x18\x0e \x01(\tR\vprofileName\x12S\n" +
+	"\x0elabel_selector\x18\x0f \x03(\v2,.pgswarm.v1.ClusterConfig.LabelSelectorEntryR\rlabelSelector\x12\x16\n" +
+	"\x06paused\x18\x10 \x01(\bR\x06paused\x12/\n" +
+	"\x13deletion_protection\x18\x11 \x01(\bR\x12deletionProtection\x1a;\n" +
 	"\rPgParamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a@\n" +
+	"\x12LabelSelectorEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\">\n" +
 	"\fPostgresSpec\x12\x18\n" +
@@ -1140,54 +1556,67 @@ func file_config_proto_rawDescGZIP() []byte {
 	return file_config_proto_rawDescData
 }
 
-var file_config_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_config_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_config_proto_goTypes = []any{
 	(*SatelliteMessage)(nil),      // 0: pgswarm.v1.SatelliteMessage
 	(*CentralMessage)(nil),        // 1: pgswarm.v1.CentralMessage
-	(*Heartbeat)(nil),             // 2: pgswarm.v1.Heartbeat
-	(*HeartbeatAck)(nil),          // 3: pgswarm.v1.HeartbeatAck
-	(*ConfigAck)(nil),             // 4: pgswarm.v1.ConfigAck
-	(*ClusterConfig)(nil),         // 5: pgswarm.v1.ClusterConfig
-	(*PostgresSpec)(nil),          // 6: pgswarm.v1.PostgresSpec
-	(*StorageSpec)(nil),           // 7: pgswarm.v1.StorageSpec
-	(*ResourceSpec)(nil),          // 8: pgswarm.v1.ResourceSpec
-	(*DatabaseSpec)(nil),          // 9: pgswarm.v1.DatabaseSpec
-	(*ArchiveSpec)(nil),           // 10: pgswarm.v1.ArchiveSpec
-	(*ArchiveStorageSpec)(nil),    // 11: pgswarm.v1.ArchiveStorageSpec
-	(*SecretRef)(nil),             // 12: pgswarm.v1.SecretRef
-	(*FailoverSpec)(nil),          // 13: pgswarm.v1.FailoverSpec
-	(*DeleteCluster)(nil),         // 14: pgswarm.v1.DeleteCluster
-	nil,                           // 15: pgswarm.v1.ClusterConfig.PgParamsEntry
-	(*ClusterHealthReport)(nil),   // 16: pgswarm.v1.ClusterHealthReport
-	(*EventReport)(nil),           // 17: pgswarm.v1.EventReport
-	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
+	(*SwitchoverRequest)(nil),     // 2: pgswarm.v1.SwitchoverRequest
+	(*SwitchoverResult)(nil),      // 3: pgswarm.v1.SwitchoverResult
+	(*StorageClassReport)(nil),    // 4: pgswarm.v1.StorageClassReport
+	(*StorageClassInfo)(nil),      // 5: pgswarm.v1.StorageClassInfo
+	(*RequestStorageClasses)(nil), // 6: pgswarm.v1.RequestStorageClasses
+	(*Heartbeat)(nil),             // 7: pgswarm.v1.Heartbeat
+	(*HeartbeatAck)(nil),          // 8: pgswarm.v1.HeartbeatAck
+	(*ConfigAck)(nil),             // 9: pgswarm.v1.ConfigAck
+	(*ClusterConfig)(nil),         // 10: pgswarm.v1.ClusterConfig
+	(*PostgresSpec)(nil),          // 11: pgswarm.v1.PostgresSpec
+	(*StorageSpec)(nil),           // 12: pgswarm.v1.StorageSpec
+	(*ResourceSpec)(nil),          // 13: pgswarm.v1.ResourceSpec
+	(*DatabaseSpec)(nil),          // 14: pgswarm.v1.DatabaseSpec
+	(*ArchiveSpec)(nil),           // 15: pgswarm.v1.ArchiveSpec
+	(*ArchiveStorageSpec)(nil),    // 16: pgswarm.v1.ArchiveStorageSpec
+	(*SecretRef)(nil),             // 17: pgswarm.v1.SecretRef
+	(*FailoverSpec)(nil),          // 18: pgswarm.v1.FailoverSpec
+	(*DeleteCluster)(nil),         // 19: pgswarm.v1.DeleteCluster
+	nil,                           // 20: pgswarm.v1.ClusterConfig.PgParamsEntry
+	nil,                           // 21: pgswarm.v1.ClusterConfig.LabelSelectorEntry
+	(*ClusterHealthReport)(nil),   // 22: pgswarm.v1.ClusterHealthReport
+	(*EventReport)(nil),           // 23: pgswarm.v1.EventReport
+	(*timestamppb.Timestamp)(nil), // 24: google.protobuf.Timestamp
 }
 var file_config_proto_depIdxs = []int32{
-	2,  // 0: pgswarm.v1.SatelliteMessage.heartbeat:type_name -> pgswarm.v1.Heartbeat
-	16, // 1: pgswarm.v1.SatelliteMessage.health_report:type_name -> pgswarm.v1.ClusterHealthReport
-	17, // 2: pgswarm.v1.SatelliteMessage.event_report:type_name -> pgswarm.v1.EventReport
-	4,  // 3: pgswarm.v1.SatelliteMessage.config_ack:type_name -> pgswarm.v1.ConfigAck
-	5,  // 4: pgswarm.v1.CentralMessage.cluster_config:type_name -> pgswarm.v1.ClusterConfig
-	14, // 5: pgswarm.v1.CentralMessage.delete_cluster:type_name -> pgswarm.v1.DeleteCluster
-	3,  // 6: pgswarm.v1.CentralMessage.heartbeat_ack:type_name -> pgswarm.v1.HeartbeatAck
-	18, // 7: pgswarm.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	18, // 8: pgswarm.v1.HeartbeatAck.timestamp:type_name -> google.protobuf.Timestamp
-	6,  // 9: pgswarm.v1.ClusterConfig.postgres:type_name -> pgswarm.v1.PostgresSpec
-	7,  // 10: pgswarm.v1.ClusterConfig.storage:type_name -> pgswarm.v1.StorageSpec
-	8,  // 11: pgswarm.v1.ClusterConfig.resources:type_name -> pgswarm.v1.ResourceSpec
-	15, // 12: pgswarm.v1.ClusterConfig.pg_params:type_name -> pgswarm.v1.ClusterConfig.PgParamsEntry
-	10, // 13: pgswarm.v1.ClusterConfig.archive:type_name -> pgswarm.v1.ArchiveSpec
-	9,  // 14: pgswarm.v1.ClusterConfig.databases:type_name -> pgswarm.v1.DatabaseSpec
-	13, // 15: pgswarm.v1.ClusterConfig.failover:type_name -> pgswarm.v1.FailoverSpec
-	11, // 16: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
-	12, // 17: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
-	0,  // 18: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
-	1,  // 19: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
-	19, // [19:20] is the sub-list for method output_type
-	18, // [18:19] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	7,  // 0: pgswarm.v1.SatelliteMessage.heartbeat:type_name -> pgswarm.v1.Heartbeat
+	22, // 1: pgswarm.v1.SatelliteMessage.health_report:type_name -> pgswarm.v1.ClusterHealthReport
+	23, // 2: pgswarm.v1.SatelliteMessage.event_report:type_name -> pgswarm.v1.EventReport
+	9,  // 3: pgswarm.v1.SatelliteMessage.config_ack:type_name -> pgswarm.v1.ConfigAck
+	4,  // 4: pgswarm.v1.SatelliteMessage.storage_class_report:type_name -> pgswarm.v1.StorageClassReport
+	3,  // 5: pgswarm.v1.SatelliteMessage.switchover_result:type_name -> pgswarm.v1.SwitchoverResult
+	10, // 6: pgswarm.v1.CentralMessage.cluster_config:type_name -> pgswarm.v1.ClusterConfig
+	19, // 7: pgswarm.v1.CentralMessage.delete_cluster:type_name -> pgswarm.v1.DeleteCluster
+	8,  // 8: pgswarm.v1.CentralMessage.heartbeat_ack:type_name -> pgswarm.v1.HeartbeatAck
+	6,  // 9: pgswarm.v1.CentralMessage.request_storage_classes:type_name -> pgswarm.v1.RequestStorageClasses
+	2,  // 10: pgswarm.v1.CentralMessage.switchover:type_name -> pgswarm.v1.SwitchoverRequest
+	5,  // 11: pgswarm.v1.StorageClassReport.storage_classes:type_name -> pgswarm.v1.StorageClassInfo
+	24, // 12: pgswarm.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 13: pgswarm.v1.HeartbeatAck.timestamp:type_name -> google.protobuf.Timestamp
+	11, // 14: pgswarm.v1.ClusterConfig.postgres:type_name -> pgswarm.v1.PostgresSpec
+	12, // 15: pgswarm.v1.ClusterConfig.storage:type_name -> pgswarm.v1.StorageSpec
+	13, // 16: pgswarm.v1.ClusterConfig.resources:type_name -> pgswarm.v1.ResourceSpec
+	20, // 17: pgswarm.v1.ClusterConfig.pg_params:type_name -> pgswarm.v1.ClusterConfig.PgParamsEntry
+	15, // 18: pgswarm.v1.ClusterConfig.archive:type_name -> pgswarm.v1.ArchiveSpec
+	14, // 19: pgswarm.v1.ClusterConfig.databases:type_name -> pgswarm.v1.DatabaseSpec
+	18, // 20: pgswarm.v1.ClusterConfig.failover:type_name -> pgswarm.v1.FailoverSpec
+	12, // 21: pgswarm.v1.ClusterConfig.wal_storage:type_name -> pgswarm.v1.StorageSpec
+	21, // 22: pgswarm.v1.ClusterConfig.label_selector:type_name -> pgswarm.v1.ClusterConfig.LabelSelectorEntry
+	16, // 23: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
+	17, // 24: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
+	0,  // 25: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
+	1,  // 26: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
+	26, // [26:27] is the sub-list for method output_type
+	25, // [25:26] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_config_proto_init() }
@@ -1201,11 +1630,15 @@ func file_config_proto_init() {
 		(*SatelliteMessage_HealthReport)(nil),
 		(*SatelliteMessage_EventReport)(nil),
 		(*SatelliteMessage_ConfigAck)(nil),
+		(*SatelliteMessage_StorageClassReport)(nil),
+		(*SatelliteMessage_SwitchoverResult)(nil),
 	}
 	file_config_proto_msgTypes[1].OneofWrappers = []any{
 		(*CentralMessage_ClusterConfig)(nil),
 		(*CentralMessage_DeleteCluster)(nil),
 		(*CentralMessage_HeartbeatAck)(nil),
+		(*CentralMessage_RequestStorageClasses)(nil),
+		(*CentralMessage_Switchover)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1213,7 +1646,7 @@ func file_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_config_proto_rawDesc), len(file_config_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

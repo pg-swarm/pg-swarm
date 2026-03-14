@@ -25,6 +25,7 @@ func main() {
 		IdentitySecretName:      getEnv("IDENTITY_SECRET_NAME", "pg-swarm-satellite-identity"),
 		IdentitySecretNamespace: getEnv("IDENTITY_SECRET_NAMESPACE", "pgswarm-system"),
 		DeployNamespace:         getEnv("DEPLOY_NAMESPACE", "default"),
+		DefaultFailoverImage:    getEnv("DEFAULT_FAILOVER_IMAGE", "ghcr.io/pg-swarm/pg-swarm-failover:latest"),
 	}
 
 	if cfg.K8sClusterName == "" {

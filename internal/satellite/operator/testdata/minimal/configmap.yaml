@@ -1,3 +1,4 @@
+apiVersion: v1
 data:
   pg_hba.conf: |
     # TYPE  DATABASE  USER  ADDRESS  METHOD
@@ -9,9 +10,11 @@ data:
     hot_standby = on
     listen_addresses = '*'
     max_replication_slots = 10
+    max_slot_wal_keep_size = -1
     max_wal_senders = 10
     wal_level = replica
     wal_log_hints = on
+kind: ConfigMap
 metadata:
   labels:
     app.kubernetes.io/managed-by: pg-swarm

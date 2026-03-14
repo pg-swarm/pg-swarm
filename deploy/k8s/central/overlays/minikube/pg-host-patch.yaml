@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-swarm-central
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          env:
+            - name: PG_HOST
+              value: postgres.pgswarm-system-central.svc.cluster.local
+      containers:
+        - name: central
+          env:
+            - name: PG_HOST
+              value: postgres.pgswarm-system-central.svc.cluster.local

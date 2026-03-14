@@ -1,3 +1,5 @@
+apiVersion: apps/v1
+kind: StatefulSet
 metadata:
   labels:
     app.kubernetes.io/managed-by: pg-swarm
@@ -138,6 +140,10 @@ spec:
           name: data
         - mountPath: /etc/pg-config
           name: config
+      securityContext:
+        fsGroup: 70
+        runAsGroup: 70
+        runAsUser: 70
       volumes:
       - configMap:
           name: orphan-pg-config
@@ -148,6 +154,10 @@ spec:
   updateStrategy: {}
   volumeClaimTemplates:
   - metadata:
+      labels:
+        app.kubernetes.io/managed-by: pg-swarm
+        app.kubernetes.io/name: postgresql
+        pg-swarm.io/cluster: orphan-pg
       name: data
     spec:
       accessModes:

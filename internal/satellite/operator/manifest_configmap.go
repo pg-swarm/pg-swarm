@@ -19,7 +19,8 @@ var mandatoryPgParams = map[string]string{
 	"max_wal_senders":     "10",
 	"max_replication_slots": "10",
 	"hot_standby":         "on",
-	"wal_log_hints":       "on",
+	"wal_log_hints":            "on",
+	"max_slot_wal_keep_size":   "-1",
 }
 
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.
@@ -31,10 +32,11 @@ var mandatoryHbaRules = []string{
 
 func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(cfg.ClusterName, "config"),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Data: map[string]string{
 			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive),

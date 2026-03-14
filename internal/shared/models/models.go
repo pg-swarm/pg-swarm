@@ -24,44 +24,59 @@ const (
 	ClusterStateRunning  ClusterState = "running"
 	ClusterStateDegraded ClusterState = "degraded"
 	ClusterStateFailed   ClusterState = "failed"
+	ClusterStatePaused   ClusterState = "paused"
 	ClusterStateDeleting ClusterState = "deleting"
 )
 
-type Satellite struct {
-	ID             uuid.UUID         `json:"id" db:"id"`
-	Hostname       string            `json:"hostname" db:"hostname"`
-	K8sClusterName string            `json:"k8s_cluster_name" db:"k8s_cluster_name"`
-	Region         string            `json:"region" db:"region"`
-	Labels         map[string]string `json:"labels" db:"labels"`
-	State          SatelliteState    `json:"state" db:"state"`
-	AuthTokenHash  string            `json:"-" db:"auth_token_hash"`
-	TempTokenHash  string            `json:"-" db:"temp_token_hash"`
-	GroupID        *uuid.UUID        `json:"group_id,omitempty" db:"group_id"`
-	LastHeartbeat  *time.Time        `json:"last_heartbeat,omitempty" db:"last_heartbeat"`
-	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at" db:"updated_at"`
+type StorageClassInfo struct {
+	Name              string `json:"name"`
+	Provisioner       string `json:"provisioner"`
+	ReclaimPolicy     string `json:"reclaim_policy"`
+	VolumeBindingMode string `json:"volume_binding_mode"`
+	IsDefault         bool   `json:"is_default"`
 }
 
-type EdgeGroup struct {
-	ID          uuid.UUID         `json:"id" db:"id"`
-	Name        string            `json:"name" db:"name"`
-	Description string            `json:"description" db:"description"`
-	Labels      map[string]string `json:"labels" db:"labels"`
-	CreatedAt   time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at" db:"updated_at"`
+type Satellite struct {
+	ID             uuid.UUID          `json:"id" db:"id"`
+	Hostname       string             `json:"hostname" db:"hostname"`
+	K8sClusterName string             `json:"k8s_cluster_name" db:"k8s_cluster_name"`
+	Region         string             `json:"region" db:"region"`
+	Labels         map[string]string  `json:"labels" db:"labels"`
+	StorageClasses []StorageClassInfo `json:"storage_classes" db:"storage_classes"`
+	State          SatelliteState     `json:"state" db:"state"`
+	AuthTokenHash  string             `json:"-" db:"auth_token_hash"`
+	TempTokenHash  string             `json:"-" db:"temp_token_hash"`
+	LastHeartbeat  *time.Time         `json:"last_heartbeat,omitempty" db:"last_heartbeat"`
+	CreatedAt      time.Time          `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time          `json:"updated_at" db:"updated_at"`
 }
 
 type ClusterConfig struct {
-	ID            uuid.UUID       `json:"id" db:"id"`
-	Name          string          `json:"name" db:"name"`
-	Namespace     string          `json:"namespace" db:"namespace"`
-	SatelliteID   *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
-	GroupID       *uuid.UUID      `json:"group_id,omitempty" db:"group_id"`
-	Config        json.RawMessage `json:"config" db:"config"`
-	ConfigVersion int64           `json:"config_version" db:"config_version"`
-	State         ClusterState    `json:"state" db:"state"`
-	CreatedAt     time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at" db:"updated_at"`
+	ID                uuid.UUID       `json:"id" db:"id"`
+	Name              string          `json:"name" db:"name"`
+	Namespace         string          `json:"namespace" db:"namespace"`
+	SatelliteID       *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
+	ProfileID         *uuid.UUID      `json:"profile_id,omitempty" db:"profile_id"`
+	DeploymentRuleID  *uuid.UUID      `json:"deployment_rule_id,omitempty" db:"deployment_rule_id"`
+	Config            json.RawMessage `json:"config" db:"config"`
+	ConfigVersion     int64           `json:"config_version" db:"config_version"`
+	State             ClusterState    `json:"state" db:"state"`
+	Paused            bool            `json:"paused" db:"paused"`
+	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// DeploymentRule maps a profile to satellites matching a label selector.
+// Fan-out: one ClusterConfig is created per satellite whose labels contain the selector.
+type DeploymentRule struct {
+	ID            uuid.UUID         `json:"id" db:"id"`
+	Name          string            `json:"name" db:"name"`
+	ProfileID     uuid.UUID         `json:"profile_id" db:"profile_id"`
+	LabelSelector map[string]string `json:"label_selector" db:"label_selector"`
+	Namespace     string            `json:"namespace" db:"namespace"`
+	ClusterName   string            `json:"cluster_name" db:"cluster_name"`
+	CreatedAt     time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 // ClusterSpec represents the desired PostgreSQL cluster specification.
@@ -69,18 +84,22 @@ type ClusterConfig struct {
 type ClusterSpec struct {
 	Replicas  int32             `json:"replicas"`
 	Postgres  PostgresSpec      `json:"postgres"`
-	Storage   StorageSpec       `json:"storage"`
-	Resources ResourceSpec      `json:"resources"`
+	Storage    StorageSpec       `json:"storage"`
+	WalStorage *StorageSpec     `json:"wal_storage,omitempty"` // nil = WAL on data volume
+	Resources  ResourceSpec     `json:"resources"`
 	PgParams  map[string]string `json:"pg_params,omitempty"`
 	HbaRules  []string          `json:"hba_rules,omitempty"`
 	Archive   *ArchiveSpec      `json:"archive,omitempty"`   // nil = archiving disabled
 	Databases []DatabaseSpec    `json:"databases,omitempty"` // databases to create with owner users
-	Failover  *FailoverSpec     `json:"failover,omitempty"`  // nil = failover disabled
+	Failover           *FailoverSpec     `json:"failover,omitempty"`  // nil = failover disabled
+	DeletionProtection bool               `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
 }
 
 type PostgresSpec struct {
-	Version string `json:"version"`
-	Image   string `json:"image"`
+	Version  string `json:"version"`
+	Variant  string `json:"variant,omitempty"`  // "alpine" or "debian"
+	Registry string `json:"registry,omitempty"` // optional registry prefix
+	Image    string `json:"image"`              // resolved at deploy time
 }
 
 type StorageSpec struct {
@@ -179,6 +198,36 @@ func (c *ClusterConfig) ParseSpec() (*ClusterSpec, error) {
 		return nil, err
 	}
 	return &spec, nil
+}
+
+type ClusterProfile struct {
+	ID          uuid.UUID       `json:"id" db:"id"`
+	Name        string          `json:"name" db:"name"`
+	Description string          `json:"description" db:"description"`
+	Config      json.RawMessage `json:"config" db:"config"`
+	Locked      bool            `json:"locked" db:"locked"`
+	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// ParseSpec deserializes the Config JSON into a ClusterSpec.
+func (p *ClusterProfile) ParseSpec() (*ClusterSpec, error) {
+	var spec ClusterSpec
+	if err := json.Unmarshal(p.Config, &spec); err != nil {
+		return nil, err
+	}
+	return &spec, nil
+}
+
+// PostgresVersion maps a major version + variant to a Docker image tag.
+type PostgresVersion struct {
+	ID        uuid.UUID `json:"id" db:"id"`
+	Version   string    `json:"version" db:"version"`
+	Variant   string    `json:"variant" db:"variant"`
+	ImageTag  string    `json:"image_tag" db:"image_tag"`
+	IsDefault bool      `json:"is_default" db:"is_default"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 type ClusterHealth struct {

@@ -1,3 +1,5 @@
+apiVersion: apps/v1
+kind: StatefulSet
 metadata:
   labels:
     app.kubernetes.io/managed-by: pg-swarm
@@ -86,7 +88,13 @@ spec:
             secretKeyRef:
               key: superuser-password
               name: ha-pg-secret
+        - name: REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: replication-password
+              name: ha-pg-secret
         image: my-registry/failover:v1
+        imagePullPolicy: IfNotPresent
         name: failover
         resources: {}
       initContainers:
@@ -159,6 +167,10 @@ spec:
           name: data
         - mountPath: /etc/pg-config
           name: config
+      securityContext:
+        fsGroup: 70
+        runAsGroup: 70
+        runAsUser: 70
       serviceAccountName: ha-pg-failover
       volumes:
       - configMap:
@@ -170,6 +182,10 @@ spec:
   updateStrategy: {}
   volumeClaimTemplates:
   - metadata:
+      labels:
+        app.kubernetes.io/managed-by: pg-swarm
+        app.kubernetes.io/name: postgresql
+        pg-swarm.io/cluster: ha-pg
       name: data
     spec:
       accessModes:

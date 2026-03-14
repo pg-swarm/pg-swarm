@@ -24,6 +24,7 @@ func main() {
 	namespace := os.Getenv("POD_NAMESPACE")
 	clusterName := os.Getenv("CLUSTER_NAME")
 	pgPassword := os.Getenv("POSTGRES_PASSWORD")
+	replPassword := os.Getenv("REPLICATION_PASSWORD")
 
 	if podName == "" || namespace == "" || clusterName == "" {
 		log.Fatal().Msg("POD_NAME, POD_NAMESPACE, and CLUSTER_NAME env vars are required")
@@ -53,11 +54,13 @@ func main() {
 	}
 
 	mon := failover.NewMonitor(failover.Config{
-		PodName:      podName,
-		Namespace:    namespace,
-		ClusterName:  clusterName,
-		Interval:     interval,
-		PGConnString: connString,
+		PodName:             podName,
+		Namespace:            namespace,
+		ClusterName:          clusterName,
+		Interval:             interval,
+		PGConnString:         connString,
+		RestConfig:           k8sCfg,
+		ReplicationPassword: replPassword,
 	}, client)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

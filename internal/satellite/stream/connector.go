@@ -15,11 +15,13 @@ import (
 // Connector maintains a persistent bidirectional gRPC stream to central,
 // automatically reconnecting with exponential backoff on disconnection.
 type Connector struct {
-	centralAddr string
-	authToken   string
-	sendCh      chan *pgswarmv1.SatelliteMessage
-	OnConfig    func(*pgswarmv1.ClusterConfig) error
-	OnDelete    func(*pgswarmv1.DeleteCluster) error
+	centralAddr     string
+	authToken       string
+	sendCh          chan *pgswarmv1.SatelliteMessage
+	OnConfig        func(*pgswarmv1.ClusterConfig) error
+	OnDelete        func(*pgswarmv1.DeleteCluster) error
+	OnStorageClassRequest func() *pgswarmv1.StorageClassReport
+	OnSwitchover    func(*pgswarmv1.SwitchoverRequest) *pgswarmv1.SwitchoverResult
 }
 
 // NewConnector creates a new stream Connector targeting the given central
@@ -91,6 +93,9 @@ func (c *Connector) connect(ctx context.Context) error {
 	// Combined write loop (serializes all writes — gRPC streams are not concurrent-send-safe)
 	go c.writeLoop(ctx, stream)
 
+	// Send storage classes on connect
+	c.sendStorageClasses()
+
 	// Read loop
 	for {
 		msg, err := stream.Recv()
@@ -112,6 +117,15 @@ func (c *Connector) connect(ctx context.Context) error {
 			c.handleDelete(payload.DeleteCluster)
 		case *pgswarmv1.CentralMessage_HeartbeatAck:
 			log.Debug().Msg("heartbeat ack received")
+		case *pgswarmv1.CentralMessage_RequestStorageClasses:
+			log.Info().Msg("storage class refresh requested by central")
+			c.sendStorageClasses()
+		case *pgswarmv1.CentralMessage_Switchover:
+			log.Info().
+				Str("cluster", payload.Switchover.ClusterName).
+				Str("target", payload.Switchover.TargetPod).
+				Msg("switchover requested by central")
+			c.handleSwitchover(payload.Switchover)
 		}
 	}
 }
@@ -141,6 +155,42 @@ func (c *Connector) handleConfig(cfg *pgswarmv1.ClusterConfig) {
 			ConfigAck: ack,
 		},
 	})
+}
+
+func (c *Connector) sendStorageClasses() {
+	if c.OnStorageClassRequest == nil {
+		return
+	}
+	report := c.OnStorageClassRequest()
+	if report == nil {
+		return
+	}
+	c.SendMessage(&pgswarmv1.SatelliteMessage{
+		Payload: &pgswarmv1.SatelliteMessage_StorageClassReport{
+			StorageClassReport: report,
+		},
+	})
+	log.Info().Int("count", len(report.StorageClasses)).Msg("sent storage class report to central")
+}
+
+func (c *Connector) handleSwitchover(req *pgswarmv1.SwitchoverRequest) {
+	if c.OnSwitchover == nil {
+		return
+	}
+	result := c.OnSwitchover(req)
+	if result == nil {
+		return
+	}
+	c.SendMessage(&pgswarmv1.SatelliteMessage{
+		Payload: &pgswarmv1.SatelliteMessage_SwitchoverResult{
+			SwitchoverResult: result,
+		},
+	})
+	if result.Success {
+		log.Info().Str("cluster", req.ClusterName).Str("target", req.TargetPod).Msg("switchover completed")
+	} else {
+		log.Error().Str("cluster", req.ClusterName).Str("error", result.ErrorMessage).Msg("switchover failed")
+	}
 }
 
 func (c *Connector) handleDelete(del *pgswarmv1.DeleteCluster) {

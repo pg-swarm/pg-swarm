@@ -22,26 +22,33 @@ func failoverLeaseName(clusterName string) string {
 
 func buildFailoverServiceAccount(cfg *pgswarmv1.ClusterConfig) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      failoverServiceAccountName(cfg.ClusterName),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 	}
 }
 
 func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 	return &rbacv1.Role{
+		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      failoverServiceAccountName(cfg.ClusterName),
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{""},
 				Resources: []string{"pods"},
 				Verbs:     []string{"get", "patch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods/exec"},
+				Verbs:     []string{"create"},
 			},
 			{
 				APIGroups: []string{"coordination.k8s.io"},
@@ -55,10 +62,11 @@ func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 func buildFailoverRoleBinding(cfg *pgswarmv1.ClusterConfig) *rbacv1.RoleBinding {
 	saName := failoverServiceAccountName(cfg.ClusterName)
 	return &rbacv1.RoleBinding{
+		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      saName,
 			Namespace: cfg.Namespace,
-			Labels:    clusterLabels(cfg.ClusterName),
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",

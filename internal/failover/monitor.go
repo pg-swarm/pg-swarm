@@ -1,6 +1,7 @@
 package failover
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,11 +9,17 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
+	corev1 "k8s.io/api/core/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/pg-swarm/pg-swarm/internal/shared/pgfence"
 )
 
 const (
@@ -25,18 +32,22 @@ const (
 
 // Config holds the failover monitor configuration.
 type Config struct {
-	PodName      string
-	Namespace    string
-	ClusterName  string
-	Interval     time.Duration
-	PGConnString string // e.g. "host=localhost user=postgres password=xxx dbname=postgres"
+	PodName             string
+	Namespace           string
+	ClusterName         string
+	Interval            time.Duration
+	PGConnString        string // e.g. "host=localhost user=postgres password=xxx dbname=postgres"
+	RestConfig          *rest.Config
+	ReplicationPassword string // for primary_conninfo when demoting
 }
 
 // Monitor watches the local PostgreSQL instance and manages leader election.
 type Monitor struct {
-	cfg       Config
-	client    kubernetes.Interface
-	leaseName string
+	cfg        Config
+	client     kubernetes.Interface
+	leaseName  string
+	fenceFunc  func(ctx context.Context, db pgfence.PGExecer) error // nil = pgfence.FencePrimary
+	demoteFunc func(ctx context.Context) error                      // nil = real demotePrimary
 }
 
 // NewMonitor creates a new failover monitor.
@@ -84,30 +95,135 @@ func (m *Monitor) tick(ctx context.Context) {
 	}
 
 	if !isInRecovery {
-		m.handlePrimary(ctx)
+		m.handlePrimary(ctx, conn)
 	} else {
 		m.handleReplica(ctx)
 	}
 }
 
 // handlePrimary renews the leader lease and labels the pod.
-// If another pod holds the lease (split-brain), labels self as replica.
-func (m *Monitor) handlePrimary(ctx context.Context) {
+// If another pod holds the lease (split-brain) or the lease cannot be
+// verified, PG is fenced to prevent writes.
+func (m *Monitor) handlePrimary(ctx context.Context, conn *pgx.Conn) {
 	acquired, err := m.acquireOrRenew(ctx)
 	if err != nil {
-		log.Error().Err(err).Msg("lease operation failed")
+		// Cannot verify lease ownership — fence as a safety measure.
+		// A primary that can't reach the K8s API must not keep accepting writes
+		// because another pod may have already acquired the lease and promoted.
+		log.Error().Err(err).Msg("lease operation failed — fencing as precaution")
+		m.doFence(ctx, conn)
 		return
 	}
 
 	if acquired {
+		// We hold the lease. Check if PG is still fenced from a previous
+		// split-brain (the ALTER SYSTEM setting persists in postgresql.auto.conf
+		// across sidecar restarts). Unfence if so.
+		if pgfence.IsFenced(ctx, conn) {
+			log.Info().Msg("legitimate primary is fenced — unfencing")
+			if err := pgfence.UnfencePrimary(ctx, conn); err != nil {
+				log.Error().Err(err).Msg("failed to unfence primary")
+			}
+		}
 		m.labelPod(ctx, rolePrimary)
 	} else {
-		// Split-brain: PG thinks it's primary but lease says otherwise
+		// Split-brain: PG thinks it's primary but lease says otherwise.
+		// Fence first (blocks writes immediately), then demote (converts to standby).
 		log.Error().
 			Str("pod", m.cfg.PodName).
-			Msg("SPLIT-BRAIN: running as PG primary but another pod holds the leader lease — labeling as replica")
+			Msg("SPLIT-BRAIN: running as PG primary but another pod holds the leader lease — fencing, demoting, and labeling as replica")
+		m.doFence(ctx, conn)
+		m.doDemote(ctx)
 		m.labelPod(ctx, roleReplica)
 	}
+}
+
+// doFence calls the fence function (real or injected for tests).
+func (m *Monitor) doFence(ctx context.Context, conn *pgx.Conn) {
+	fence := m.fenceFunc
+	if fence == nil {
+		fence = pgfence.FencePrimary
+	}
+	if err := fence(ctx, conn); err != nil {
+		log.Error().Err(err).Msg("fencing failed")
+	}
+}
+
+// doDemote calls the demote function (real or injected for tests).
+func (m *Monitor) doDemote(ctx context.Context) {
+	demote := m.demoteFunc
+	if demote == nil {
+		demote = m.demotePrimary
+	}
+	if err := demote(ctx); err != nil {
+		log.Error().Err(err).Msg("demotion failed — PG is fenced but still running as primary; will retry next tick")
+	}
+}
+
+// demotePrimary uses K8s exec to convert the local PG instance to a standby.
+// It creates standby.signal, sets primary_conninfo, and stops PG.
+// K8s will restart the container and PG will come up as a streaming standby.
+func (m *Monitor) demotePrimary(ctx context.Context) error {
+	if m.cfg.RestConfig == nil {
+		return fmt.Errorf("rest.Config not set — cannot exec into container")
+	}
+
+	// Determine the new primary from the lease holder
+	lease, err := m.client.CoordinationV1().Leases(m.cfg.Namespace).Get(ctx, m.leaseName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get lease for demote: %w", err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
+		return fmt.Errorf("lease has no holder — cannot determine new primary")
+	}
+	newPrimary := *lease.Spec.HolderIdentity
+
+	// Build headless service hostname for the new primary
+	headlessSvc := fmt.Sprintf("%s-headless", m.cfg.ClusterName)
+	primaryHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local", newPrimary, headlessSvc, m.cfg.Namespace)
+
+	replPassword := m.cfg.ReplicationPassword
+
+	pgdata := "/var/lib/postgresql/data/pgdata"
+	script := fmt.Sprintf(`set -e
+PGDATA="%s"
+touch "$PGDATA/standby.signal"
+sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
+echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=%s application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
+pg_ctl -D "$PGDATA" stop -m fast`,
+		pgdata, primaryHost, replPassword, m.cfg.PodName)
+
+	req := m.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(m.cfg.PodName).
+		Namespace(m.cfg.Namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "postgres",
+			Command:   []string{"bash", "-c", script},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(m.cfg.RestConfig, "POST", req.URL())
+	if err != nil {
+		return fmt.Errorf("create SPDY executor: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}); err != nil {
+		return fmt.Errorf("exec demote script: %w (stderr: %s)", err, stderr.String())
+	}
+
+	log.Info().
+		Str("pod", m.cfg.PodName).
+		Str("new_primary", newPrimary).
+		Msg("demotion completed — PG will restart as standby")
+
+	return nil
 }
 
 // handleReplica labels the pod as replica and checks if failover is needed.
