@@ -46,6 +46,11 @@ func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 				Verbs:     []string{"get", "patch"},
 			},
 			{
+				APIGroups: []string{""},
+				Resources: []string{"pods/exec"},
+				Verbs:     []string{"create"},
+			},
+			{
 				APIGroups: []string{"coordination.k8s.io"},
 				Resources: []string{"leases"},
 				Verbs:     []string{"get", "create", "update"},

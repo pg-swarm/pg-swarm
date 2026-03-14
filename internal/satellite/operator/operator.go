@@ -191,6 +191,7 @@ type ManagedCluster struct {
 	ClusterName string
 	Namespace   string
 	Replicas    int32
+	Paused      bool
 }
 
 // ManagedClusters returns a snapshot of all clusters the operator is managing.
@@ -204,6 +205,7 @@ func (o *Operator) ManagedClusters() []ManagedCluster {
 			ClusterName: cfg.ClusterName,
 			Namespace:   cfg.Namespace,
 			Replicas:    cfg.Replicas,
+			Paused:      cfg.Paused,
 		})
 	}
 	return out
@@ -318,7 +320,12 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		return fmt.Errorf("statefulset: %w", err)
 	}
 
-	// 8. Label pods (best-effort, pods may not exist yet)
+	// 8. Reconcile PVC finalizers (VCTs are immutable, so we patch PVCs directly)
+	if err := reconcilePVCFinalizers(ctx, o.client, cfg.Namespace, cfg.ClusterName, cfg.DeletionProtection); err != nil {
+		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to reconcile PVC finalizers")
+	}
+
+	// 9. Label pods (best-effort, pods may not exist yet)
 	if err := labelPods(ctx, o.client, cfg.Namespace, cfg.ClusterName); err != nil {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to label pods (will retry on next reconcile)")
 	}

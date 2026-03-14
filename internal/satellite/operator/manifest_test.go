@@ -653,8 +653,8 @@ func TestManifests_WithFailover(t *testing.T) {
 	}
 
 	role := buildFailoverRole(cfg)
-	if len(role.Rules) != 2 {
-		t.Fatalf("expected 2 RBAC rules, got %d", len(role.Rules))
+	if len(role.Rules) != 3 {
+		t.Fatalf("expected 3 RBAC rules, got %d", len(role.Rules))
 	}
 
 	rb := buildFailoverRoleBinding(cfg)

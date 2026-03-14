@@ -3,6 +3,9 @@ import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, deriveSatState, timeAgo } from '../api';
 import { SatBadge } from '../components/Badge';
+import {
+  Check, X, Tag, Plus, Save, Satellite
+} from 'lucide-react';
 
 export default function Satellites() {
   const { satellites, refresh } = useData();
@@ -76,6 +79,13 @@ export default function Satellites() {
   return (
     <div className="card">
       <div className="card-head">Satellites</div>
+      {satellites.length === 0 ? (
+        <div className="empty-state" style={{ padding: '40px 20px' }}>
+          <Satellite size={48} strokeWidth={1.2} />
+          <h3>No satellites registered</h3>
+          <p>Deploy a satellite agent to your edge Kubernetes clusters to get started.</p>
+        </div>
+      ) : (
       <table>
         <thead>
           <tr>
@@ -89,9 +99,7 @@ export default function Satellites() {
           </tr>
         </thead>
         <tbody>
-          {satellites.length === 0 ? (
-            <tr><td colSpan={7} className="empty">No satellites registered</td></tr>
-          ) : satellites.map(s => {
+          {satellites.map(s => {
             const state = deriveSatState(s);
             const isEditingThis = editingLabels === s.id;
             return (
@@ -104,23 +112,20 @@ export default function Satellites() {
                     <div>
                       <div style={{ marginBottom: 4 }}>
                         {Object.entries(pendingLabels).map(([k, v]) => (
-                          <span key={k} className="tag" style={{ marginRight: 4 }}>
+                          <span key={k} className="tag tag-removable" style={{ marginRight: 4 }}>
                             {k}={v}
-                            <button
-                              style={{ marginLeft: 4, cursor: 'pointer', background: 'none', border: 'none', color: 'inherit', padding: 0, fontSize: '0.85em' }}
-                              onClick={() => removeLabel(k)}
-                            >x</button>
+                            <button className="tag-x" onClick={() => removeLabel(k)}><X size={10} /></button>
                           </span>
                         ))}
                       </div>
                       <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                         <input className="input" placeholder="key" value={labelKey} onChange={e => setLabelKey(e.target.value)} style={{ width: 80 }} />
                         <input className="input" placeholder="value" value={labelVal} onChange={e => setLabelVal(e.target.value)} style={{ width: 80 }} />
-                        <button className="btn btn-sm" onClick={addLabel}>+</button>
+                        <button className="btn btn-sm" onClick={addLabel}><Plus size={12} /></button>
                       </div>
                       <div className="actions" style={{ marginTop: 4 }}>
-                        <button className="btn btn-sm btn-approve" onClick={saveLabels}>Save</button>
-                        <button className="btn btn-sm btn-reject" onClick={() => setEditingLabels(null)}>Cancel</button>
+                        <button className="btn btn-sm btn-approve" onClick={saveLabels}><Save size={11} /> Save</button>
+                        <button className="btn btn-sm btn-reject" onClick={() => setEditingLabels(null)}><X size={11} /> Cancel</button>
                       </div>
                     </div>
                   ) : renderLabels(s.labels)}
@@ -131,12 +136,12 @@ export default function Satellites() {
                   <div className="actions">
                     {state === 'pending' && (
                       <>
-                        <button className="btn btn-approve" onClick={() => approve(s.id)}>Approve</button>
-                        <button className="btn btn-reject" onClick={() => reject(s.id)}>Reject</button>
+                        <button className="btn btn-approve" onClick={() => approve(s.id)}><Check size={13} /> Approve</button>
+                        <button className="btn btn-reject" onClick={() => reject(s.id)}><X size={13} /> Reject</button>
                       </>
                     )}
                     {state !== 'pending' && !isEditingThis && (
-                      <button className="btn btn-sm" onClick={() => startEditLabels(s)}>Labels</button>
+                      <button className="btn btn-sm" onClick={() => startEditLabels(s)}><Tag size={11} /> Labels</button>
                     )}
                   </div>
                 </td>
@@ -145,6 +150,7 @@ export default function Satellites() {
           })}
         </tbody>
       </table>
+      )}
     </div>
   );
 }

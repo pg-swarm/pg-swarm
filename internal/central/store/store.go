@@ -56,6 +56,7 @@ type Store interface {
 	SetDefaultPostgresVersion(ctx context.Context, id uuid.UUID) error
 
 	// Health
+	UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error
 	UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error
 	GetClusterHealth(ctx context.Context, satelliteID uuid.UUID, clusterName string) (*models.ClusterHealth, error)
 	ListClusterHealth(ctx context.Context) ([]*models.ClusterHealth, error)

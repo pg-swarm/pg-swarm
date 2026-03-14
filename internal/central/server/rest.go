@@ -454,6 +454,9 @@ func (s *RESTServer) createDeploymentRule(c *fiber.Ctx) error {
 	if rule.LabelSelector == nil {
 		rule.LabelSelector = map[string]string{}
 	}
+	if len(rule.LabelSelector) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "label_selector must have at least one key-value pair"})
+	}
 
 	// Verify profile exists and fetch its config
 	profile, err := s.store.GetProfile(c.Context(), rule.ProfileID)
@@ -513,9 +516,13 @@ func (s *RESTServer) updateDeploymentRule(c *fiber.Ctx) error {
 	if rule.LabelSelector == nil {
 		rule.LabelSelector = map[string]string{}
 	}
+	if len(rule.LabelSelector) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "label_selector must have at least one key-value pair"})
+	}
 
 	// Verify profile exists
-	if _, err := s.store.GetProfile(c.Context(), rule.ProfileID); err != nil {
+	profile, err := s.store.GetProfile(c.Context(), rule.ProfileID)
+	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile not found"})
 	}
 
@@ -523,6 +530,27 @@ func (s *RESTServer) updateDeploymentRule(c *fiber.Ctx) error {
 	if err := s.store.UpdateDeploymentRule(c.Context(), &rule); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	// Pause clusters whose satellites no longer match the updated selector
+	existing, _ := s.store.GetClusterConfigsByDeploymentRule(c.Context(), rule.ID)
+	for _, cfg := range existing {
+		if cfg.SatelliteID == nil {
+			continue
+		}
+		sat, err := s.store.GetSatellite(c.Context(), *cfg.SatelliteID)
+		if err != nil {
+			continue
+		}
+		if !labelsMatch(sat.Labels, rule.LabelSelector) && !cfg.Paused {
+			updated, err := s.store.SetClusterPaused(c.Context(), cfg.ID, true)
+			if err == nil {
+				s.pushConfigToSatellite(updated)
+			}
+		}
+	}
+
+	// Fan-out to newly matching satellites
+	s.fanOutDeploymentRule(c.Context(), &rule, profile)
 
 	log.Info().Str("rule_id", id.String()).Str("name", rule.Name).Msg("deployment rule updated")
 	return c.JSON(rule)
@@ -575,7 +603,19 @@ func (s *RESTServer) fanOutDeploymentRule(ctx context.Context, rule *models.Depl
 		return
 	}
 
+	// Build a set of satellite IDs that already have a config for this rule
+	existingConfigs, _ := s.store.GetClusterConfigsByDeploymentRule(ctx, rule.ID)
+	hasConfig := make(map[uuid.UUID]bool, len(existingConfigs))
+	for _, ec := range existingConfigs {
+		if ec.SatelliteID != nil {
+			hasConfig[*ec.SatelliteID] = true
+		}
+	}
+
 	for _, sat := range satellites {
+		if hasConfig[sat.ID] {
+			continue
+		}
 		satID := sat.ID
 		cfg := &models.ClusterConfig{
 			Name:             rule.ClusterName,
@@ -709,8 +749,15 @@ func (s *RESTServer) pauseUnmatchedClusters(ctx context.Context, satelliteID uui
 	}
 }
 
-// labelsMatch returns true if the satellite labels contain all key-value pairs in the selector.
+// labelsMatch returns true if the satellite labels exactly match the selector.
+// An empty selector matches nothing.
 func labelsMatch(labels, selector map[string]string) bool {
+	if len(selector) == 0 {
+		return false
+	}
+	if len(labels) != len(selector) {
+		return false
+	}
 	for k, v := range selector {
 		if labels[k] != v {
 			return false
