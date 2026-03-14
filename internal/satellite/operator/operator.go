@@ -54,6 +54,7 @@ func (o *Operator) configStoreName(pgClusterName string) string {
 	return fmt.Sprintf("pg-swarm-%s-%s", o.k8sClusterName, pgClusterName)
 }
 
+// clusterKey returns the map key for a cluster: "namespace/name".
 func clusterKey(namespace, name string) string {
 	return namespace + "/" + name
 }
@@ -254,6 +255,7 @@ func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.Config
 	}
 }
 
+// reconcile creates or updates all K8s resources for a cluster to match the desired config.
 func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
