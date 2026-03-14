@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pg-swarm - PostgreSQL HA at the Edge</title>
+  <meta name="description" content="Centralized management for PostgreSQL High Availability clusters across hundreds of edge Kubernetes clusters.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Navigation -->
+<nav class="nav">
+  <div class="container nav-inner">
+    <a href="#" class="nav-brand">
+      <span class="nav-logo">pg</span>swarm
+    </a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#how-it-works">How It Works</a>
+      <a href="#dashboard">Dashboard</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="https://github.com/pg-swarm/pg-swarm" class="btn btn-sm btn-outline">GitHub</a>
+    </div>
+    <button class="nav-toggle" aria-label="Menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-badge">Open Source / Apache 2.0</div>
+    <h1>PostgreSQL HA<br>at the Edge</h1>
+    <p class="hero-sub">
+      Centralized management for PostgreSQL High Availability clusters across
+      up to <strong>500 edge Kubernetes clusters</strong>. Automatic failover,
+      split-brain prevention, and deep observability from a single dashboard.
+    </p>
+    <div class="hero-actions">
+      <a href="#quickstart" class="btn btn-primary">Get Started</a>
+      <a href="#architecture" class="btn btn-ghost">How It Works</a>
+    </div>
+    <div class="hero-stats">
+      <div class="stat">
+        <span class="stat-num">500+</span>
+        <span class="stat-label">Edge Clusters</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">&lt;5s</span>
+        <span class="stat-label">Failover Time</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">0</span>
+        <span class="stat-label">Dependencies</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">3</span>
+        <span class="stat-label">Go Binaries</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Problem / Solution -->
+<section class="section section-alt" id="why">
+  <div class="container">
+    <div class="two-col">
+      <div class="col">
+        <h2 class="section-title">The Problem</h2>
+        <div class="problem-list">
+          <div class="problem-item">
+            <span class="problem-icon">!</span>
+            <div>
+              <strong>Edge clusters are behind NAT</strong>
+              <p>You can't reach them directly. Traditional push-based management doesn't work.</p>
+            </div>
+          </div>
+          <div class="problem-item">
+            <span class="problem-icon">!</span>
+            <div>
+              <strong>Failover must be local</strong>
+              <p>A round-trip to a central control plane during a primary failure adds unacceptable latency.</p>
+            </div>
+          </div>
+          <div class="problem-item">
+            <span class="problem-icon">!</span>
+            <div>
+              <strong>Split-brain is catastrophic</strong>
+              <p>Two primaries writing to the same cluster corrupts data permanently.</p>
+            </div>
+          </div>
+          <div class="problem-item">
+            <span class="problem-icon">!</span>
+            <div>
+              <strong>No visibility at scale</strong>
+              <p>Managing hundreds of PG clusters across edge sites with kubectl is impossible.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <h2 class="section-title">The Solution</h2>
+        <div class="solution-list">
+          <div class="solution-item">
+            <span class="solution-icon">&#10003;</span>
+            <div>
+              <strong>Satellite-initiated connections</strong>
+              <p>Satellites connect outward via persistent gRPC streams. No inbound access required.</p>
+            </div>
+          </div>
+          <div class="solution-item">
+            <span class="solution-icon">&#10003;</span>
+            <div>
+              <strong>Per-pod failover sidecar</strong>
+              <p>Leader election via K8s Leases. Promotion in seconds with no central dependency.</p>
+            </div>
+          </div>
+          <div class="solution-item">
+            <span class="solution-icon">&#10003;</span>
+            <div>
+              <strong>SQL fencing + timeline recovery</strong>
+              <p>Immediate write blocking, automatic pg_rewind, zero-restart container recovery.</p>
+            </div>
+          </div>
+          <div class="solution-item">
+            <span class="solution-icon">&#10003;</span>
+            <div>
+              <strong>Single pane of glass</strong>
+              <p>Web dashboard with real-time health, replication lag, slow queries, and one-click switchover.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="section" id="features">
+  <div class="container">
+    <h2 class="section-title center">Features</h2>
+    <p class="section-sub center">Everything you need to run PostgreSQL HA at the edge, built from scratch in Go.</p>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon">&#9889;</div>
+        <h3>Automatic Failover</h3>
+        <p>Per-pod sidecar with Kubernetes Lease-based leader election. Primary failure detected in 15 seconds, promotion in under 5.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128737;</div>
+        <h3>Split-Brain Prevention</h3>
+        <p>SQL fencing blocks writes and kills connections instantly. Old primary auto-demotes to standby via K8s exec. No data corruption.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128260;</div>
+        <h3>Timeline Recovery</h3>
+        <p>After failover, replicas auto-detect timeline divergence and recover via pg_rewind or re-basebackup. No manual intervention.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128200;</div>
+        <h3>Deep Observability</h3>
+        <p>Replication lag, connections, disk, WAL stats, per-database cache hit ratios, table stats, and slow queries from pg_stat_statements.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128736;</div>
+        <h3>Planned Switchover</h3>
+        <p>One-click primary promotion from the dashboard. CHECKPOINT, fence, lease transfer, promote - with step-by-step confirmation.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128230;</div>
+        <h3>Profiles & Rules</h3>
+        <p>Reusable cluster templates with deployment rules that auto-deploy to satellites matching label selectors. Fleet-scale management.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#127760;</div>
+        <h3>No CNPG Dependency</h3>
+        <p>Builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC from scratch. No CRDs, no operator frameworks, minimal footprint.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128274;</div>
+        <h3>Secure by Default</h3>
+        <p>Token-based auth with SHA-256 hashing. Constant-time comparison. Create-only secrets. Identity stored in K8s Secrets.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#9203;</div>
+        <h3>Zero-Restart Recovery</h3>
+        <p>Postgres container runs in a supervisor loop. Demotion, timeline recovery, and restart happen in-place without K8s restart counts.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Architecture -->
+<section class="section section-dark" id="architecture">
+  <div class="container">
+    <h2 class="section-title center">Architecture</h2>
+    <p class="section-sub center">Three Go binaries. Bidirectional gRPC streaming. No external dependencies beyond PostgreSQL.</p>
+    <div class="arch-diagram">
+<pre class="arch-ascii">
+                    +---------------------------------------------+
+                    |           Central Control Plane              |
+                    |                                              |
+                    |   gRPC Server    REST API     Web Dashboard  |
+                    |    :9090          :8080        (embedded)    |
+                    |              PostgreSQL (metadata)           |
+                    +------------------+---------------------------+
+                                       | gRPC bidirectional streams
+                 +---------------------+---------------------+
+                 |                     |                     |
+          +------+--------+    +------+--------+    +-------+-------+
+          |  Satellite A  |    |  Satellite B  |    |  Satellite N  |
+          |               |    |               |    |               |
+          | Operator      |    | Operator      |    | Operator      |
+          | Health Monitor|    | Health Monitor |    | Health Monitor|
+          |               |    |               |    |               |
+          | +--+ +--+ +--+|   |               |    |               |
+          | |FS| |FS| |FS||   |               |    |               |
+          | +--+ +--+ +--+|   |               |    |               |
+          |  K8s Edge      |   |  K8s Edge     |    |  K8s Edge     |
+          +----------------+   +---------------+    +---------------+
+                                  FS = Failover Sidecar (per pod)
+</pre>
+    </div>
+    <div class="arch-components">
+      <div class="arch-card">
+        <h3>Central</h3>
+        <code>cmd/central</code>
+        <p>gRPC server for satellite streams. REST API with 30+ endpoints. Embedded React dashboard. PostgreSQL metadata store with auto-migrations.</p>
+      </div>
+      <div class="arch-card">
+        <h3>Satellite</h3>
+        <code>cmd/satellite</code>
+        <p>Lightweight agent per edge cluster. Persistent gRPC stream with auto-reconnection. Kubernetes operator that builds PG clusters from JSON configs.</p>
+      </div>
+      <div class="arch-card">
+        <h3>Failover Sidecar</h3>
+        <code>cmd/failover-sidecar</code>
+        <p>Per-pod sidecar for leader election via K8s Leases. Detects split-brain, fences writes, demotes old primary, recovers timeline divergence.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- How It Works -->
+<section class="section" id="how-it-works">
+  <div class="container">
+    <h2 class="section-title center">How Failover Works</h2>
+    <p class="section-sub center">From primary failure to full recovery in under 20 seconds, with zero manual intervention.</p>
+    <div class="timeline">
+      <div class="timeline-item">
+        <div class="timeline-marker">1</div>
+        <div class="timeline-content">
+          <h4>Primary Dies</h4>
+          <p>The primary pod crashes or becomes unreachable. The failover sidecar's lease renewal stops.</p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-marker">2</div>
+        <div class="timeline-content">
+          <h4>Lease Expires (15s)</h4>
+          <p>After 15 seconds without renewal, the leader lease expires. All replica sidecars detect this on their next tick.</p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-marker">3</div>
+        <div class="timeline-content">
+          <h4>Replica Acquires Lease</h4>
+          <p>One replica wins the lease via optimistic locking (resourceVersion). The others see the conflict and back off.</p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-marker">4</div>
+        <div class="timeline-content">
+          <h4>pg_promote()</h4>
+          <p>The winning replica calls <code>pg_promote()</code>, transitions to primary, and labels its pod <code>pg-swarm.io/role=primary</code>.</p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-marker">5</div>
+        <div class="timeline-content">
+          <h4>RW Service Routes</h4>
+          <p>The Kubernetes RW Service selector picks up the new primary label. Applications reconnect transparently.</p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-marker">6</div>
+        <div class="timeline-content">
+          <h4>Timeline Recovery</h4>
+          <p>Other replicas detect the timeline divergence, run pg_rewind (or re-basebackup), and start streaming from the new primary. No container restarts.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Dashboard Preview -->
+<section class="section section-alt" id="dashboard">
+  <div class="container">
+    <h2 class="section-title center">Web Dashboard</h2>
+    <p class="section-sub center">Real-time visibility into every PostgreSQL instance across your fleet.</p>
+    <div class="dashboard-features">
+      <div class="dash-feature">
+        <h4>Cluster Overview</h4>
+        <p>Instance table with role badges, ready/WAL status dots, connection bars, disk usage, and timeline IDs. Expand to see per-pod details.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Instance Detail</h4>
+        <p>Drill down to see disk vs WAL breakdown, WAL statistics, per-database sizes with cache hit ratios, table stats, and slow queries.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Profile Editor</h4>
+        <p>6-tab configuration editor: General, Volumes, Resources, PostgreSQL params (full catalog with 50+ parameters), HBA Rules, and Databases.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Deployment Rules</h4>
+        <p>Map profiles to satellites via label selectors. When a rule matches, clusters are auto-created and pushed. Fleet-scale management.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>One-Click Switchover</h4>
+        <p>Promote any replica to primary with a detailed confirmation modal showing each step and a downtime warning.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Event Log</h4>
+        <p>State transitions, failovers, switchovers, and errors with severity icons. Per-cluster event filtering.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Tech Stack -->
+<section class="section" id="stack">
+  <div class="container">
+    <h2 class="section-title center">Tech Stack</h2>
+    <div class="stack-grid">
+      <div class="stack-item"><strong>Language</strong><span>Go 1.26</span></div>
+      <div class="stack-item"><strong>Communication</strong><span>gRPC + Protobuf v3</span></div>
+      <div class="stack-item"><strong>Database</strong><span>PostgreSQL (pgx/v5)</span></div>
+      <div class="stack-item"><strong>REST API</strong><span>GoFiber v2</span></div>
+      <div class="stack-item"><strong>Logging</strong><span>zerolog</span></div>
+      <div class="stack-item"><strong>Dashboard</strong><span>React 19 + Vite + JSX</span></div>
+      <div class="stack-item"><strong>K8s Client</strong><span>client-go v0.35</span></div>
+      <div class="stack-item"><strong>Deployment</strong><span>Docker + Kustomize</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- Quick Start -->
+<section class="section section-dark" id="quickstart">
+  <div class="container">
+    <h2 class="section-title center">Quick Start</h2>
+    <p class="section-sub center">Get pg-swarm running locally in under a minute.</p>
+    <div class="code-blocks">
+      <div class="code-block">
+        <div class="code-header">Docker Compose (local dev)</div>
+        <pre><code>cd deploy/docker
+docker-compose up -d
+
+# Dashboard at http://localhost:8080
+# gRPC at localhost:9090</code></pre>
+      </div>
+      <div class="code-block">
+        <div class="code-header">Build from source</div>
+        <pre><code>make build        # Compile all binaries
+make test         # Run unit tests
+make lint         # golangci-lint</code></pre>
+      </div>
+      <div class="code-block">
+        <div class="code-header">Kubernetes (minikube)</div>
+        <pre><code>make minikube-build-all    # Build images
+make k8s-deploy-all       # Deploy via Kustomize
+make k8s-status           # Check resources</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="footer-brand">
+      <span class="nav-logo">pg</span>swarm
+      <p>PostgreSQL HA at the Edge</p>
+    </div>
+    <div class="footer-links">
+      <div>
+        <h4>Project</h4>
+        <a href="https://github.com/pg-swarm/pg-swarm">GitHub</a>
+        <a href="https://github.com/pg-swarm/pg-swarm/blob/main/DESIGN.md">Design Doc</a>
+        <a href="https://github.com/pg-swarm/pg-swarm/blob/main/CHANGELOG.md">Changelog</a>
+      </div>
+      <div>
+        <h4>Resources</h4>
+        <a href="https://github.com/pg-swarm/pg-swarm/blob/main/README.md">Documentation</a>
+        <a href="https://github.com/pg-swarm/pg-swarm/blob/main/TODO.md">Roadmap</a>
+        <a href="https://github.com/pg-swarm/pg-swarm/blob/main/LICENSE">License (Apache 2.0)</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <p>Licensed under the Apache License, Version 2.0</p>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Mobile nav toggle
+document.querySelector('.nav-toggle').addEventListener('click', function() {
+  document.querySelector('.nav-links').classList.toggle('open');
+});
+// Smooth scroll
+document.querySelectorAll('a[href^="#"]').forEach(a => {
+  a.addEventListener('click', e => {
+    const target = document.querySelector(a.getAttribute('href'));
+    if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    document.querySelector('.nav-links').classList.remove('open');
+  });
+});
+// Nav background on scroll
+window.addEventListener('scroll', () => {
+  document.querySelector('.nav').classList.toggle('nav-scrolled', window.scrollY > 40);
+});
+</script>
+</body>
+</html>
