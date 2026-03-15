@@ -786,7 +786,7 @@ func (s *PostgresStore) GetPostgresVersion(ctx context.Context, id uuid.UUID) (*
 
 // GetPostgresVersionBySpec returns a PostgreSQL version matching the given version and variant.
 func (s *PostgresStore) GetPostgresVersionBySpec(ctx context.Context, version, variant string) (*models.PostgresVersion, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+pvCols+` FROM postgres_versions WHERE version = $1 AND variant = $2`, version, variant)
+	row := s.pool.QueryRow(ctx, `SELECT `+pvCols+` FROM postgres_versions WHERE LOWER(version) = LOWER($1) AND LOWER(variant) = LOWER($2)`, version, variant)
 	pv, err := scanPostgresVersion(row)
 	if err != nil {
 		return nil, fmt.Errorf("get postgres version %s/%s: %w", version, variant, err)
@@ -862,6 +862,54 @@ func (s *PostgresStore) SetDefaultPostgresVersion(ctx context.Context, id uuid.U
 		return fmt.Errorf("postgres version %s not found", id)
 	}
 	return tx.Commit(ctx)
+}
+
+// ---------- Postgres Variants ----------
+
+// ListPostgresVariants returns all registered variant names.
+func (s *PostgresStore) ListPostgresVariants(ctx context.Context) ([]*models.PostgresVariant, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, name, description, created_at FROM postgres_variants ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list postgres variants: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.PostgresVariant
+	for rows.Next() {
+		var v models.PostgresVariant
+		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan postgres variant: %w", err)
+		}
+		result = append(result, &v)
+	}
+	return result, rows.Err()
+}
+
+// CreatePostgresVariant inserts a new variant.
+func (s *PostgresStore) CreatePostgresVariant(ctx context.Context, v *models.PostgresVariant) error {
+	if v.ID == uuid.Nil {
+		v.ID = uuid.New()
+	}
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO postgres_variants (id, name, description) VALUES ($1, $2, $3) RETURNING created_at`,
+		v.ID, v.Name, v.Description,
+	).Scan(&v.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("create postgres variant: %w", err)
+	}
+	return nil
+}
+
+// DeletePostgresVariant removes a variant by its ID.
+func (s *PostgresStore) DeletePostgresVariant(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM postgres_variants WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete postgres variant: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("postgres variant %s not found", id)
+	}
+	return nil
 }
 
 // ---------- Health ----------

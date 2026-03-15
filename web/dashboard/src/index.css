@@ -1,4 +1,4 @@
-:root {
+:root, [data-theme="light"] {
   --green: #046D39;
   --green-dark: #035a2f;
   --green-light: #eaf5ef;
@@ -22,6 +22,30 @@
   --blue-bg: #dbeafe;
 }
 
+[data-theme="dark"] {
+  --green: #22c55e;
+  --green-dark: #16a34a;
+  --green-light: #14332a;
+  --green-bg: #052e16;
+  --white: #1e1e1e;
+  --bg: #121212;
+  --text: #e5e7eb;
+  --text-secondary: #9ca3af;
+  --border: #2e2e2e;
+  --shadow: 0 1px 3px rgba(0,0,0,.3);
+  --shadow-md: 0 4px 12px rgba(0,0,0,.4);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,.5);
+  --radius: 10px;
+  --amber: #fbbf24;
+  --amber-bg: #422006;
+  --red: #f87171;
+  --red-bg: #450a0a;
+  --gray: #9ca3af;
+  --gray-bg: #262626;
+  --blue: #60a5fa;
+  --blue-bg: #172554;
+}
+
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
@@ -35,7 +59,7 @@ a { text-decoration: none; color: inherit; }
 /* ── Topbar ─────────────────────────────────────────── */
 .topbar {
   background: linear-gradient(135deg, var(--green) 0%, #058a48 100%);
-  color: var(--white);
+  color: #ffffff;
   height: 54px; padding: 0 24px;
   display: flex; align-items: center; justify-content: space-between;
   position: sticky; top: 0; z-index: 100;
@@ -704,6 +728,42 @@ tbody tr:hover { background: var(--green-light); }
   padding: 12px 20px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
+}
+
+/* ── Theme overrides ─────────────────────────────── */
+[data-theme="dark"] .input {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--border);
+}
+[data-theme="dark"] select.input {
+  background: var(--bg);
+  color: var(--text);
+}
+[data-theme="dark"] .topbar {
+  background: linear-gradient(135deg, #065f46 0%, #047857 100%);
+}
+[data-theme="dark"] .confirm-overlay {
+  background: rgba(0,0,0,.7);
+}
+
+/* Theme toggle button in topbar */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255,255,255,.15);
+  border: none;
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  backdrop-filter: blur(4px);
+  transition: background .15s;
+}
+.theme-toggle:hover {
+  background: rgba(255,255,255,.25);
 }
 
 @media (max-width: 768px) {

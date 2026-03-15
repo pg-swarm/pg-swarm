@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { Info, AlertTriangle, AlertCircle, Flame } from 'lucide-react';
 
@@ -10,6 +11,8 @@ const SEV_ICONS = {
 
 export default function Events() {
   const { events, satellites } = useData();
+
+  useEffect(() => { document.title = 'Events - pg-swarm'; }, []);
 
   return (
     <div className="card">

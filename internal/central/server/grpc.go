@@ -27,10 +27,11 @@ type GRPCServer struct {
 	pgswarmv1.UnimplementedRegistrationServiceServer
 	pgswarmv1.UnimplementedSatelliteStreamServiceServer
 
-	registry *registry.Registry
-	store    store.Store
-	streams  *StreamManager
-	server   *grpc.Server
+	registry  *registry.Registry
+	store     store.Store
+	streams   *StreamManager
+	logBuffer *LogBuffer
+	server    *grpc.Server
 }
 
 type StreamManager struct {
@@ -48,9 +49,10 @@ type SatelliteStream struct {
 // with authentication interceptors for both unary and streaming RPCs.
 func NewGRPCServer(reg *registry.Registry, s store.Store) *GRPCServer {
 	srv := &GRPCServer{
-		registry: reg,
-		store:    s,
-		streams:  NewStreamManager(),
+		registry:  reg,
+		store:     s,
+		streams:   NewStreamManager(),
+		logBuffer: NewLogBuffer(),
 	}
 
 	srv.server = grpc.NewServer(
@@ -258,6 +260,20 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					})
 				}
 
+			case *pgswarmv1.SatelliteMessage_LogEntry:
+				entry := payload.LogEntry
+				ts := ""
+				if entry.Timestamp != nil {
+					ts = entry.Timestamp.AsTime().Format(time.RFC3339Nano)
+				}
+				s.logBuffer.Push(satID, &LogEntryJSON{
+					Level:     entry.Level,
+					Message:   entry.Message,
+					Fields:    entry.Fields,
+					Timestamp: ts,
+					Logger:    entry.Logger,
+				})
+
 			case *pgswarmv1.SatelliteMessage_StorageClassReport:
 				report := payload.StorageClassReport
 				classes := make([]models.StorageClassInfo, 0, len(report.StorageClasses))
@@ -442,9 +458,40 @@ func (sm *StreamManager) PushSwitchover(satelliteID uuid.UUID, req *pgswarmv1.Sw
 	}
 }
 
+// PushSetLogLevel sends a log level change command to the specified satellite.
+func (sm *StreamManager) PushSetLogLevel(satelliteID uuid.UUID, level string) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	stream, ok := sm.streams[satelliteID]
+	if !ok {
+		return fmt.Errorf("satellite %s not connected", satelliteID)
+	}
+
+	msg := &pgswarmv1.CentralMessage{
+		Payload: &pgswarmv1.CentralMessage_SetLogLevel{
+			SetLogLevel: &pgswarmv1.SetLogLevel{
+				Level: level,
+			},
+		},
+	}
+
+	select {
+	case stream.SendCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("satellite %s send channel full", satelliteID)
+	}
+}
+
 // GetStreams returns the StreamManager (needed by REST API for config push).
 func (s *GRPCServer) GetStreams() *StreamManager {
 	return s.streams
+}
+
+// GetLogBuffer returns the LogBuffer (needed by REST API for log endpoints).
+func (s *GRPCServer) GetLogBuffer() *LogBuffer {
+	return s.logBuffer
 }
 
 // Auth interceptors

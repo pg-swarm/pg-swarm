@@ -1,15 +1,17 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, deriveSatState, timeAgo } from '../api';
 import { SatBadge } from '../components/Badge';
 import {
-  Check, X, Tag, Plus, Save, Satellite
+  Check, X, Tag, Plus, Save, Satellite, Terminal
 } from 'lucide-react';
 
 export default function Satellites() {
   const { satellites, refresh } = useData();
   const toast = useToast();
+
+  useEffect(() => { document.title = 'Satellites - pg-swarm'; }, []);
   const [editingLabels, setEditingLabels] = useState(null);
   const [labelKey, setLabelKey] = useState('');
   const [labelVal, setLabelVal] = useState('');
@@ -141,7 +143,12 @@ export default function Satellites() {
                       </>
                     )}
                     {state !== 'pending' && !isEditingThis && (
-                      <button className="btn btn-sm" onClick={() => startEditLabels(s)}><Tag size={11} /> Labels</button>
+                      <>
+                        <button className="btn btn-sm" onClick={() => window.open('/satellites/' + s.id + '/logs', '_blank')}>
+                          <Terminal size={11} /> Logs
+                        </button>
+                        <button className="btn btn-sm" onClick={() => startEditLabels(s)}><Tag size={11} /> Labels</button>
+                      </>
                     )}
                   </div>
                 </td>
