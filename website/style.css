@@ -168,9 +168,8 @@ a:hover { text-decoration: underline; }
   background: var(--bg-dark-card); border-radius: var(--radius);
   padding: 32px; margin-bottom: 40px; overflow-x: auto;
 }
-.arch-ascii {
-  font-family: var(--mono); font-size: 13px; color: var(--green);
-  line-height: 1.4; white-space: pre; margin: 0;
+.arch-svg {
+  width: 100%; max-width: 800px; height: auto; display: block; margin: 0 auto;
 }
 .arch-components { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
 .arch-card {
