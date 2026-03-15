@@ -356,6 +356,9 @@ export default function Profiles() {
                   <KV label="Databases" value={spec.databases?.length || 0} />
                 </dl>
                 <div className="cl-tags">
+                  {spec.replicas > 1
+                    ? <span className="tag">{spec.replicas} replicas</span>
+                    : <span className="tag">standalone</span>}
                   {spec.failover?.enabled && <span className="tag">failover</span>}
                   {spec.archive?.mode && <span className="tag">archive:{spec.archive.mode}</span>}
                   {Object.keys(spec.pg_params || {}).length > 0 && <span className="tag">{Object.keys(spec.pg_params).length} pg params</span>}
