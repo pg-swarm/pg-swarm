@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
@@ -11,6 +11,8 @@ import {
 export default function DeploymentRules() {
   const { deploymentRules, profiles, clusters, refresh } = useData();
   const toast = useToast();
+
+  useEffect(() => { document.title = 'Deployment Rules - pg-swarm'; }, []);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null);
   const [expanded, setExpanded] = useState(null);

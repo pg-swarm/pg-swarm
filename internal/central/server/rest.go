@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -15,23 +17,26 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
 	"github.com/pg-swarm/pg-swarm/web"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // RESTServer handles the REST API endpoints for the central server.
 type RESTServer struct {
-	store    store.Store
-	registry *registry.Registry
-	streams  *StreamManager
-	app      *fiber.App
+	store     store.Store
+	registry  *registry.Registry
+	streams   *StreamManager
+	logBuffer *LogBuffer
+	app       *fiber.App
 }
 
 // NewRESTServer creates a new RESTServer.
-func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager) *RESTServer {
+func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager, lb *LogBuffer) *RESTServer {
 	srv := &RESTServer{
-		store:    s,
-		registry: reg,
-		streams:  sm,
-		app:      fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
+		store:     s,
+		registry:  reg,
+		streams:   sm,
+		logBuffer: lb,
+		app:       fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
 	}
 	srv.setupRoutes()
 	return srv
@@ -76,6 +81,9 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/satellites/:id/reject", s.rejectSatellite)
 	api.Put("/satellites/:id/labels", s.updateSatelliteLabels)
 	api.Post("/satellites/:id/refresh-storage-classes", s.refreshStorageClasses)
+	api.Get("/satellites/:id/logs", s.getSatelliteLogs)
+	api.Get("/satellites/:id/logs/stream", s.streamSatelliteLogs)
+	api.Post("/satellites/:id/log-level", s.setSatelliteLogLevel)
 
 	// Cluster configs
 	api.Get("/clusters", s.listClusterConfigs)
@@ -102,6 +110,26 @@ func (s *RESTServer) setupRoutes() {
 	api.Put("/profiles/:id", s.updateProfile)
 	api.Delete("/profiles/:id", s.deleteProfile)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
+
+	// Backup Rules
+	api.Get("/backup-rules", s.listBackupRules)
+	api.Post("/backup-rules", s.createBackupRule)
+	api.Get("/backup-rules/:id", s.getBackupRule)
+	api.Put("/backup-rules/:id", s.updateBackupRule)
+	api.Delete("/backup-rules/:id", s.deleteBackupRule)
+	api.Post("/profiles/:id/attach-backup-rule", s.attachBackupRule)
+	api.Post("/profiles/:id/detach-backup-rule", s.detachBackupRule)
+
+	// Backup Inventory & Restore
+	api.Get("/clusters/:id/backups", s.listClusterBackups)
+	api.Get("/backups/:id", s.getBackup)
+	api.Post("/clusters/:id/restore", s.initiateRestore)
+	api.Get("/clusters/:id/restores", s.listClusterRestores)
+
+	// Postgres Variants (admin)
+	api.Get("/postgres-variants", s.listPostgresVariants)
+	api.Post("/postgres-variants", s.createPostgresVariant)
+	api.Delete("/postgres-variants/:id", s.deletePostgresVariant)
 
 	// Postgres Versions (admin)
 	api.Get("/postgres-versions", s.listPostgresVersions)
@@ -185,6 +213,9 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
 	cfg.ID = uuid.New()
 	cfg.State = models.ClusterStateCreating
@@ -245,6 +276,9 @@ func (s *RESTServer) updateClusterConfig(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
 	cfg.ID = id
 
@@ -292,6 +326,88 @@ func (s *RESTServer) refreshStorageClasses(c *fiber.Ctx) error {
 
 	log.Info().Str("satellite_id", id.String()).Msg("storage class refresh requested")
 	return c.JSON(fiber.Map{"status": "refresh requested"})
+}
+
+func (s *RESTServer) getSatelliteLogs(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	limit := 200
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	level := c.Query("level", "trace")
+
+	entries := s.logBuffer.Recent(id, limit, level)
+	if entries == nil {
+		entries = make([]*LogEntryJSON, 0)
+	}
+	return c.JSON(entries)
+}
+
+func (s *RESTServer) streamSatelliteLogs(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+
+	ch, unsub := s.logBuffer.Subscribe(id)
+
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer unsub()
+		for {
+			select {
+			case entry, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, err := json.Marshal(entry)
+				if err != nil {
+					continue
+				}
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+					return
+				}
+				if err := w.Flush(); err != nil {
+					return
+				}
+			}
+		}
+	})
+	return nil
+}
+
+func (s *RESTServer) setSatelliteLogLevel(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.Level == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "level is required"})
+	}
+
+	if s.streams == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "stream manager not available"})
+	}
+
+	if err := s.streams.PushSetLogLevel(id, body.Level); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("satellite_id", id.String()).Str("level", body.Level).Msg("log level change sent")
+	return c.JSON(fiber.Map{"status": "level change sent", "level": body.Level})
 }
 
 func (s *RESTServer) pauseCluster(c *fiber.Ctx) error {
@@ -793,6 +909,9 @@ func (s *RESTServer) createProfile(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
 	profile.ID = uuid.New()
 	profile.Locked = false
@@ -837,6 +956,9 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
@@ -894,6 +1016,49 @@ func (s *RESTServer) cloneProfile(c *fiber.Ctx) error {
 
 	log.Info().Str("source", id.String()).Str("clone", clone.ID.String()).Str("name", clone.Name).Msg("profile cloned")
 	return c.Status(fiber.StatusCreated).JSON(clone)
+}
+
+// --- Postgres Variants (admin) ---
+
+func (s *RESTServer) listPostgresVariants(c *fiber.Ctx) error {
+	variants, err := s.store.ListPostgresVariants(c.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list postgres variants")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list postgres variants"})
+	}
+	return c.JSON(variants)
+}
+
+func (s *RESTServer) createPostgresVariant(c *fiber.Ctx) error {
+	var v models.PostgresVariant
+	if err := c.BodyParser(&v); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if v.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+
+	if err := s.store.CreatePostgresVariant(c.Context(), &v); err != nil {
+		log.Error().Err(err).Msg("failed to create postgres variant")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create postgres variant"})
+	}
+
+	log.Info().Str("name", v.Name).Msg("postgres variant created")
+	return c.Status(fiber.StatusCreated).JSON(v)
+}
+
+func (s *RESTServer) deletePostgresVariant(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid variant id"})
+	}
+
+	if err := s.store.DeletePostgresVariant(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("id", id.String()).Msg("postgres variant deleted")
+	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
 // --- Postgres Versions (admin) ---
@@ -976,15 +1141,33 @@ func (s *RESTServer) setDefaultPostgresVersion(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "default set"})
 }
 
+// validatePostgresImage checks that a postgres image can be resolved for the
+// given spec — either via the postgres_versions table or an explicit image field.
+// Returns an error suitable for returning to the API caller.
+func validatePostgresImage(st store.Store, spec *models.ClusterSpec) error {
+	if spec.Postgres.Version == "" {
+		return fmt.Errorf("postgres version is required")
+	}
+	image := resolvePostgresImage(st, spec)
+	if image == "" {
+		variant := spec.Postgres.Variant
+		if variant == "" {
+			variant = "alpine"
+		}
+		return fmt.Errorf("cannot resolve postgres image: version %q variant %q is not in the postgres versions registry and no explicit image was provided — add it via Admin > Postgres Versions or set the image field", spec.Postgres.Version, variant)
+	}
+	return nil
+}
+
 // resolvePostgresImage looks up the image tag for a version+variant and prepends the registry.
-func (s *RESTServer) resolvePostgresImage(spec *models.ClusterSpec) string {
+func resolvePostgresImage(st store.Store, spec *models.ClusterSpec) string {
 	version := spec.Postgres.Version
 	variant := spec.Postgres.Variant
 	if variant == "" {
 		variant = "alpine"
 	}
 
-	pv, err := s.store.GetPostgresVersionBySpec(context.Background(), version, variant)
+	pv, err := st.GetPostgresVersionBySpec(context.Background(), version, variant)
 	if err != nil {
 		log.Warn().Str("version", version).Str("variant", variant).Msg("postgres version not found in DB, using image field as-is")
 		return spec.Postgres.Image
@@ -1004,31 +1187,48 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		return
 	}
 
-	spec, err := cfg.ParseSpec()
+	protoConfig, err := buildProtoClusterConfig(s.store, cfg)
 	if err != nil {
 		log.Error().Err(err).
 			Str("config_id", cfg.ID.String()).
 			Str("name", cfg.Name).
-			Msg("failed to parse cluster spec for config push")
+			Msg("failed to build proto config for push")
 		return
+	}
+
+	if err := s.streams.PushConfig(*cfg.SatelliteID, protoConfig); err != nil {
+		log.Error().Err(err).
+			Str("satellite_id", cfg.SatelliteID.String()).
+			Str("config_id", cfg.ID.String()).
+			Msg("failed to push config to satellite")
+	}
+}
+
+// buildProtoClusterConfig converts a models.ClusterConfig into the protobuf
+// ClusterConfig that satellites expect. It resolves profile names, label
+// selectors, and postgres images from the store.
+func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswarmv1.ClusterConfig, error) {
+	spec, err := cfg.ParseSpec()
+	if err != nil {
+		return nil, fmt.Errorf("parse cluster spec: %w", err)
 	}
 
 	// Resolve profile name and label selector for K8s labels
 	var profileName string
 	var labelSelector map[string]string
 	if cfg.ProfileID != nil {
-		if p, err := s.store.GetProfile(context.Background(), *cfg.ProfileID); err == nil {
+		if p, err := st.GetProfile(context.Background(), *cfg.ProfileID); err == nil {
 			profileName = p.Name
 		}
 	}
 	if cfg.DeploymentRuleID != nil {
-		if r, err := s.store.GetDeploymentRule(context.Background(), *cfg.DeploymentRuleID); err == nil {
+		if r, err := st.GetDeploymentRule(context.Background(), *cfg.DeploymentRuleID); err == nil {
 			labelSelector = r.LabelSelector
 		}
 	}
 
 	// Resolve the image from the postgres_versions table
-	resolvedImage := s.resolvePostgresImage(spec)
+	resolvedImage := resolvePostgresImage(st, spec)
 
 	protoConfig := &pgswarmv1.ClusterConfig{
 		ClusterName:   cfg.Name,
@@ -1100,12 +1300,388 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		}
 	}
 
-	if err := s.streams.PushConfig(*cfg.SatelliteID, protoConfig); err != nil {
-		log.Error().Err(err).
-			Str("satellite_id", cfg.SatelliteID.String()).
-			Str("config_id", cfg.ID.String()).
-			Msg("failed to push config to satellite")
+	// Resolve backup rules from profile
+	if cfg.ProfileID != nil {
+		if rules, err := st.ListBackupRulesForProfile(context.Background(), *cfg.ProfileID); err == nil {
+			for _, rule := range rules {
+				ruleSpec, err := rule.ParseBackupRuleSpec()
+				if err != nil {
+					continue
+				}
+				bc := buildProtoBackupConfig(ruleSpec)
+				bc.BackupRuleId = rule.ID.String()
+				protoConfig.Backups = append(protoConfig.Backups, bc)
+			}
+		}
 	}
+
+	return protoConfig, nil
+}
+
+// buildProtoBackupConfig converts a BackupRuleSpec into a proto BackupConfig.
+func buildProtoBackupConfig(spec *models.BackupRuleSpec) *pgswarmv1.BackupConfig {
+	bc := &pgswarmv1.BackupConfig{
+		BackupImage: spec.BackupImage,
+	}
+
+	if spec.Physical != nil {
+		bc.Physical = &pgswarmv1.PhysicalBackupConfig{
+			BaseSchedule:          spec.Physical.BaseSchedule,
+			WalArchiveEnabled:     spec.Physical.WalArchiveEnabled,
+			ArchiveTimeoutSeconds: spec.Physical.ArchiveTimeoutSecs,
+		}
+	}
+
+	if spec.Logical != nil {
+		bc.Logical = &pgswarmv1.LogicalBackupConfig{
+			Schedule:  spec.Logical.Schedule,
+			Databases: spec.Logical.Databases,
+			Format:    spec.Logical.Format,
+		}
+	}
+
+	bc.Destination = &pgswarmv1.BackupDestination{
+		Type: spec.Destination.Type,
+	}
+	switch spec.Destination.Type {
+	case "s3":
+		if spec.Destination.S3 != nil {
+			bc.Destination.S3 = &pgswarmv1.S3Destination{
+				Bucket:         spec.Destination.S3.Bucket,
+				Region:         spec.Destination.S3.Region,
+				Endpoint:       spec.Destination.S3.Endpoint,
+				PathPrefix:     spec.Destination.S3.PathPrefix,
+				ForcePathStyle: spec.Destination.S3.ForcePathStyle,
+			}
+		}
+	case "gcs":
+		if spec.Destination.GCS != nil {
+			bc.Destination.Gcs = &pgswarmv1.GCSDestination{
+				Bucket:     spec.Destination.GCS.Bucket,
+				PathPrefix: spec.Destination.GCS.PathPrefix,
+			}
+		}
+	case "sftp":
+		if spec.Destination.SFTP != nil {
+			bc.Destination.Sftp = &pgswarmv1.SFTPDestination{
+				Host:     spec.Destination.SFTP.Host,
+				Port:     int32(spec.Destination.SFTP.Port),
+				User:     spec.Destination.SFTP.User,
+				BasePath: spec.Destination.SFTP.BasePath,
+			}
+		}
+	case "local":
+		if spec.Destination.Local != nil {
+			bc.Destination.Local = &pgswarmv1.LocalDestination{
+				Size:         spec.Destination.Local.Size,
+				StorageClass: spec.Destination.Local.StorageClass,
+			}
+		}
+	}
+
+	bc.Retention = &pgswarmv1.BackupRetention{
+		BaseBackupCount:    int32(spec.Retention.BaseBackupCount),
+		WalRetentionDays:   int32(spec.Retention.WalRetentionDays),
+		LogicalBackupCount: int32(spec.Retention.LogicalBackupCount),
+	}
+
+	return bc
+}
+
+// --- Backup Rules ---
+
+func (s *RESTServer) listBackupRules(c *fiber.Ctx) error {
+	rules, err := s.store.ListBackupRules(c.Context())
+	if err != nil {
+		return fmt.Errorf("list backup rules: %w", err)
+	}
+	if rules == nil {
+		rules = []*models.BackupRule{}
+	}
+	return c.JSON(rules)
+}
+
+func (s *RESTServer) createBackupRule(c *fiber.Ctx) error {
+	var rule models.BackupRule
+	if err := c.BodyParser(&rule); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if rule.Name == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+	}
+
+	// Validate the backup rule spec
+	spec, err := rule.ParseBackupRuleSpec()
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid config: "+err.Error())
+	}
+	if err := models.ValidateBackupRuleSpec(spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+
+	if err := s.store.CreateBackupRule(c.Context(), &rule); err != nil {
+		return fmt.Errorf("create backup rule: %w", err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(rule)
+}
+
+func (s *RESTServer) getBackupRule(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	rule, err := s.store.GetBackupRule(c.Context(), id)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "backup rule not found")
+	}
+	return c.JSON(rule)
+}
+
+func (s *RESTServer) updateBackupRule(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+
+	var rule models.BackupRule
+	if err := c.BodyParser(&rule); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	rule.ID = id
+
+	if rule.Name == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+	}
+
+	spec, err := rule.ParseBackupRuleSpec()
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid config: "+err.Error())
+	}
+	if err := models.ValidateBackupRuleSpec(spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+
+	if err := s.store.UpdateBackupRule(c.Context(), &rule); err != nil {
+		return fmt.Errorf("update backup rule: %w", err)
+	}
+	return c.JSON(rule)
+}
+
+func (s *RESTServer) deleteBackupRule(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	if err := s.store.DeleteBackupRule(c.Context(), id); err != nil {
+		return fmt.Errorf("delete backup rule: %w", err)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func (s *RESTServer) attachBackupRule(c *fiber.Ctx) error {
+	profileID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid profile id")
+	}
+
+	var body struct {
+		BackupRuleID string `json:"backup_rule_id"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	backupRuleID, err := uuid.Parse(body.BackupRuleID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_rule_id")
+	}
+
+	// Verify backup rule exists
+	if _, err := s.store.GetBackupRule(c.Context(), backupRuleID); err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "backup rule not found")
+	}
+
+	if err := s.store.AttachBackupRuleToProfile(c.Context(), profileID, backupRuleID); err != nil {
+		return fmt.Errorf("attach backup rule: %w", err)
+	}
+
+	// Bump config_version and re-push all clusters using this profile
+	s.rePushClustersForProfile(c.Context(), profileID)
+
+	return c.JSON(fiber.Map{"status": "attached"})
+}
+
+func (s *RESTServer) detachBackupRule(c *fiber.Ctx) error {
+	profileID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid profile id")
+	}
+
+	var body struct {
+		BackupRuleID string `json:"backup_rule_id"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	backupRuleID, err := uuid.Parse(body.BackupRuleID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_rule_id")
+	}
+
+	if err := s.store.DetachBackupRuleFromProfile(c.Context(), profileID, backupRuleID); err != nil {
+		return fmt.Errorf("detach backup rule: %w", err)
+	}
+
+	// Bump config_version and re-push all clusters using this profile
+	s.rePushClustersForProfile(c.Context(), profileID)
+
+	return c.JSON(fiber.Map{"status": "detached"})
+}
+
+// rePushClustersForProfile bumps config_version and re-pushes configs for all
+// clusters linked to the given profile via deployment rules.
+func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uuid.UUID) {
+	rules, err := s.store.GetDeploymentRulesByProfile(ctx, profileID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get deployment rules for profile")
+		return
+	}
+	for _, rule := range rules {
+		clusters, err := s.store.GetClusterConfigsByDeploymentRule(ctx, rule.ID)
+		if err != nil {
+			log.Error().Err(err).Str("rule_id", rule.ID.String()).Msg("failed to get clusters for rule")
+			continue
+		}
+		for _, cfg := range clusters {
+			if err := s.store.UpdateClusterConfig(ctx, cfg); err != nil {
+				log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to bump config version")
+				continue
+			}
+			s.pushConfigToSatellite(cfg)
+		}
+	}
+}
+
+// --- Backup Inventory & Restore ---
+
+func (s *RESTServer) listClusterBackups(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	cfg, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "cluster not found")
+	}
+	if cfg.SatelliteID == nil {
+		return c.JSON([]*models.BackupInventory{})
+	}
+	backups, err := s.store.ListBackupInventory(c.Context(), *cfg.SatelliteID, cfg.Name)
+	if err != nil {
+		return fmt.Errorf("list backups: %w", err)
+	}
+	if backups == nil {
+		backups = []*models.BackupInventory{}
+	}
+	return c.JSON(backups)
+}
+
+func (s *RESTServer) getBackup(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	backup, err := s.store.GetBackupInventory(c.Context(), id)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "backup not found")
+	}
+	return c.JSON(backup)
+}
+
+func (s *RESTServer) initiateRestore(c *fiber.Ctx) error {
+	clusterID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid cluster id")
+	}
+	cfg, err := s.store.GetClusterConfig(c.Context(), clusterID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "cluster not found")
+	}
+	if cfg.SatelliteID == nil {
+		return fiber.NewError(fiber.StatusBadRequest, "cluster has no satellite")
+	}
+
+	var body models.RestoreOperation
+	if err := c.BodyParser(&body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	// Validate backup exists
+	backup, err := s.store.GetBackupInventory(c.Context(), body.BackupID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "backup not found")
+	}
+
+	body.SatelliteID = *cfg.SatelliteID
+	body.ClusterName = cfg.Name
+	body.Status = "pending"
+
+	if err := s.store.CreateRestoreOperation(c.Context(), &body); err != nil {
+		return fmt.Errorf("create restore operation: %w", err)
+	}
+
+	// Send restore command to satellite via gRPC
+	if s.streams != nil {
+		// Resolve the backup rule to get destination config
+		var dest *pgswarmv1.BackupDestination
+		if rule, err := s.store.GetBackupRule(c.Context(), backup.BackupRuleID); err == nil {
+			if ruleSpec, err := rule.ParseBackupRuleSpec(); err == nil {
+				protoBackup := buildProtoBackupConfig(ruleSpec)
+				dest = protoBackup.Destination
+			}
+		}
+
+		restoreCmd := &pgswarmv1.RestoreCommand{
+			ClusterName:    cfg.Name,
+			Namespace:      cfg.Namespace,
+			RestoreId:      body.ID.String(),
+			BackupId:       body.BackupID.String(),
+			RestoreType:    body.RestoreType,
+			TargetDatabase: body.TargetDatabase,
+			Destination:    dest,
+			BackupPath:     backup.BackupPath,
+		}
+		if body.TargetTime != nil {
+			restoreCmd.TargetTime = timestamppb.New(*body.TargetTime)
+		}
+
+		if err := s.streams.PushRestoreCommand(*cfg.SatelliteID, restoreCmd); err != nil {
+			log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to send restore command")
+		}
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(body)
+}
+
+func (s *RESTServer) listClusterRestores(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	cfg, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "cluster not found")
+	}
+	if cfg.SatelliteID == nil {
+		return c.JSON([]*models.RestoreOperation{})
+	}
+	ops, err := s.store.ListRestoreOperations(c.Context(), *cfg.SatelliteID, cfg.Name)
+	if err != nil {
+		return fmt.Errorf("list restore operations: %w", err)
+	}
+	if ops == nil {
+		ops = []*models.RestoreOperation{}
+	}
+	return c.JSON(ops)
 }
 
 // --- Error handler ---

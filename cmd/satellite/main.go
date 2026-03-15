@@ -10,10 +10,21 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/pg-swarm/pg-swarm/internal/satellite/agent"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/logcapture"
 )
 
 func main() {
 	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Logger()
+
+	// Set initial log level from env (default: info)
+	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
+		if _, err := logcapture.SetGlobalLevel(lvl); err != nil {
+			log.Warn().Str("level", lvl).Msg("invalid LOG_LEVEL, defaulting to info")
+		} else {
+			log.Info().Str("level", lvl).Msg("log level set from LOG_LEVEL env var")
+		}
+	}
+	log.Trace().Msg("satellite process starting")
 
 	hostname, _ := os.Hostname()
 
@@ -32,8 +43,12 @@ func main() {
 		log.Fatal().Msg("K8S_CLUSTER_NAME is required")
 	}
 
+	log.Trace().Msg("config loaded, creating agent")
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	log.Trace().Msg("signal context created")
 
 	a := agent.New(cfg)
 	if err := a.Run(ctx); err != nil {

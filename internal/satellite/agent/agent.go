@@ -8,8 +8,10 @@ import (
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/health"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/logcapture"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/operator"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/stream"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -74,35 +76,86 @@ func New(cfg Config) *Agent {
 // (loading from disk or registering and waiting for approval), then
 // connects a persistent bidirectional stream to central.
 func (a *Agent) Run(ctx context.Context) error {
+	log.Trace().Msg("ensuring identity")
+
 	// 1. Load or register identity
 	if err := a.ensureIdentity(ctx); err != nil {
 		return fmt.Errorf("ensure identity: %w", err)
 	}
 
+	log.Trace().Str("satellite_id", a.identity.SatelliteID).Msg("identity loaded")
+
 	// 2. Create operator (requires K8s client)
 	if a.k8sClient != nil {
 		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage)
+		log.Trace().Msg("operator created")
 	} else {
 		log.Warn().Msg("K8s client unavailable — operator disabled, configs will be logged only")
 	}
 
 	// 3. Connect persistent stream
 	a.connector = stream.NewConnector(a.config.CentralAddr, a.identity.AuthToken)
+	log.Trace().Str("central_addr", a.config.CentralAddr).Msg("connector created")
+
+	// 3b. Attach log capture hook → streams log entries to central
+	hook := logcapture.NewStreamHook("agent", zerolog.InfoLevel)
+	go hook.Drain(ctx, func(entry *pgswarmv1.LogEntry) {
+		a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
+			Payload: &pgswarmv1.SatelliteMessage_LogEntry{
+				LogEntry: entry,
+			},
+		})
+	})
+	log.Logger = log.Logger.Hook(hook)
+	log.Trace().Msg("log capture hook attached")
+
+	// 3c. Wire OnSetLogLevel callback
+	a.connector.OnSetLogLevel = func(level string) {
+		newLevel, err := logcapture.SetGlobalLevel(level)
+		if err != nil {
+			log.Warn().Str("level", level).Err(err).Msg("failed to set log level")
+			return
+		}
+		hook.SetStreamLevel(newLevel)
+		log.Info().Str("level", level).Msg("log level changed by central")
+	}
+	log.Trace().Msg("OnSetLogLevel callback wired")
 
 	// 4. Wire operator callbacks
 	if a.operator != nil {
 		a.connector.OnConfig = a.operator.HandleConfig
 		a.connector.OnDelete = a.operator.HandleDelete
+		log.Trace().Msg("operator callbacks wired")
 	}
 
 	// 5. Wire storage class callback
 	if a.k8sClient != nil {
 		a.connector.OnStorageClassRequest = a.gatherStorageClasses
+		log.Trace().Msg("storage class callback wired")
 	}
 
 	// 6. Wire switchover callback
 	if a.operator != nil && a.k8sClient != nil {
 		a.connector.OnSwitchover = a.handleSwitchover
+		log.Trace().Msg("switchover callback wired")
+	}
+
+	// 6b. Wire restore command callback
+	if a.k8sClient != nil {
+		a.connector.OnRestoreCommand = func(cmd *pgswarmv1.RestoreCommand) {
+			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
+				Payload: &pgswarmv1.SatelliteMessage_RestoreStatus{
+					RestoreStatus: &pgswarmv1.RestoreStatusReport{
+						ClusterName: cmd.ClusterName,
+						Namespace:   cmd.Namespace,
+						RestoreId:   cmd.RestoreId,
+						Status:      "running",
+					},
+				},
+			})
+			log.Info().Str("cluster", cmd.ClusterName).Str("restore_id", cmd.RestoreId).Msg("restore command acknowledged")
+		}
+		log.Trace().Msg("restore command callback wired")
 	}
 
 	// 7. Start health monitor
@@ -122,7 +175,15 @@ func (a *Agent) Run(ctx context.Context) error {
 				},
 			})
 		})
+		mon.SetOnBackup(func(report *pgswarmv1.BackupStatusReport) {
+			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
+				Payload: &pgswarmv1.SatelliteMessage_BackupStatus{
+					BackupStatus: report,
+				},
+			})
+		})
 		go mon.Run(ctx)
+		log.Trace().Msg("health monitor started")
 	}
 
 	log.Info().Str("satellite_id", a.identity.SatelliteID).Msg("satellite agent started")
@@ -132,6 +193,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // handleSwitchover handles a switchover request from central.
 func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.SwitchoverResult {
+	log.Trace().Str("cluster", req.ClusterName).Str("target", req.TargetPod).Msg("handleSwitchover entry")
 	if a.k8sClient == nil || a.operator == nil {
 		return &pgswarmv1.SwitchoverResult{
 			ClusterName:  req.ClusterName,
@@ -142,6 +204,7 @@ func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.Sw
 	// Resolve namespace from operator if not provided
 	ns := a.operator.ResolveNamespaceForCluster(req.ClusterName, req.Namespace)
 	req.Namespace = ns
+	log.Trace().Str("namespace", ns).Msg("handleSwitchover resolved namespace")
 
 	// Read the superuser password
 	secretName := req.ClusterName + "-secret"
@@ -153,12 +216,16 @@ func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.Sw
 		}
 	}
 	password := string(secret.Data["superuser-password"])
+	log.Trace().Str("secret", secretName).Msg("handleSwitchover secret read")
 
-	return health.Switchover(context.Background(), a.k8sClient, req, password)
+	result := health.Switchover(context.Background(), a.k8sClient, req, password)
+	log.Trace().Bool("success", result.Success).Msg("handleSwitchover result")
+	return result
 }
 
 // gatherStorageClasses queries K8s for all StorageClasses and returns a proto report.
 func (a *Agent) gatherStorageClasses() *pgswarmv1.StorageClassReport {
+	log.Trace().Msg("gatherStorageClasses entry")
 	if a.k8sClient == nil {
 		return nil
 	}
@@ -169,6 +236,7 @@ func (a *Agent) gatherStorageClasses() *pgswarmv1.StorageClassReport {
 		return nil
 	}
 
+	log.Trace().Int("count", len(list.Items)).Msg("gatherStorageClasses found classes")
 	report := &pgswarmv1.StorageClassReport{}
 	for _, sc := range list.Items {
 		info := &pgswarmv1.StorageClassInfo{

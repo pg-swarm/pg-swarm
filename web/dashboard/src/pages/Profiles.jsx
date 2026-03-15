@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
@@ -148,8 +148,10 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, satellites, clusters, refresh } = useData();
+  const { profiles, postgresVersions, postgresVariants, satellites, clusters, refresh } = useData();
   const toast = useToast();
+
+  useEffect(() => { document.title = 'Profiles - pg-swarm'; }, []);
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
   const [cloneName, setCloneName] = useState('');
@@ -258,7 +260,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} />;
   }
 
   if (viewing) {
@@ -361,7 +363,7 @@ const TABS = [
 
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, storageClasses, scRefreshing, onRefreshStorageClasses }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageClasses, scRefreshing, onRefreshStorageClasses }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);

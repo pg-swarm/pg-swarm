@@ -71,6 +71,7 @@ func (o *Operator) resolveNamespace(cfg *pgswarmv1.ClusterConfig) {
 // HandleConfig is called when a ClusterConfig is received from central.
 // It is idempotent: duplicate versions are skipped.
 func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
+	log.Trace().Str("cluster", cfg.ClusterName).Int64("version", cfg.ConfigVersion).Msg("HandleConfig entry")
 	o.resolveNamespace(cfg)
 	key := clusterKey(cfg.Namespace, cfg.ClusterName)
 
@@ -78,6 +79,7 @@ func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
 	appliedVersion := o.applied[key]
 	o.mu.RUnlock()
 
+	log.Trace().Str("cluster", key).Int64("applied", appliedVersion).Int64("incoming", cfg.ConfigVersion).Msg("HandleConfig version check")
 	if appliedVersion >= cfg.ConfigVersion {
 		log.Info().
 			Str("cluster", key).
@@ -92,9 +94,11 @@ func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
 		Int64("version", cfg.ConfigVersion).
 		Msg("reconciling cluster config")
 
+	log.Trace().Str("cluster", key).Msg("HandleConfig starting reconcile")
 	if err := o.reconcile(cfg); err != nil {
 		return fmt.Errorf("reconcile %s: %w", key, err)
 	}
+	log.Trace().Str("cluster", key).Msg("HandleConfig reconcile completed")
 
 	o.mu.Lock()
 	o.desired[key] = cfg
@@ -111,6 +115,7 @@ func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
 
 // HandleDelete removes all K8s resources for the given cluster.
 func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
+	log.Trace().Str("cluster", del.ClusterName).Msg("HandleDelete entry")
 	if del.Namespace == "" {
 		del.Namespace = o.defaultNamespace
 	}
@@ -125,6 +130,7 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 	propagation := metav1.DeletePropagationForeground
 
 	// Delete StatefulSet (cascades to pods)
+	log.Trace().Str("resource", "statefulset/"+name).Msg("HandleDelete deleting statefulset")
 	err := o.client.AppsV1().StatefulSets(ns).Delete(ctx, name, metav1.DeleteOptions{
 		PropagationPolicy: &propagation,
 	})
@@ -133,6 +139,7 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 	}
 
 	// Delete services
+	log.Trace().Msg("HandleDelete deleting services")
 	for _, suffix := range []string{"headless", "rw", "ro"} {
 		svcName := resourceName(name, suffix)
 		if err := o.client.CoreV1().Services(ns).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
@@ -141,18 +148,21 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 	}
 
 	// Delete ConfigMap
+	log.Trace().Msg("HandleDelete deleting configmap")
 	cmName := resourceName(name, "config")
 	if err := o.client.CoreV1().ConfigMaps(ns).Delete(ctx, cmName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "configmap/"+cmName).Msg("delete failed")
 	}
 
 	// Delete Secret
+	log.Trace().Msg("HandleDelete deleting secret")
 	secretName := resourceName(name, "secret")
 	if err := o.client.CoreV1().Secrets(ns).Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "secret/"+secretName).Msg("delete failed")
 	}
 
 	// Delete failover RBAC resources
+	log.Trace().Msg("HandleDelete deleting failover RBAC")
 	foName := failoverServiceAccountName(name)
 	if err := o.client.RbacV1().RoleBindings(ns).Delete(ctx, foName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "rolebinding/"+foName).Msg("delete failed")
@@ -174,6 +184,10 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 	if err := o.client.CoreV1().ConfigMaps(ns).Delete(ctx, cfgStoreName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "configmap/"+cfgStoreName).Msg("delete failed")
 	}
+
+	// Delete backup CronJobs and credential Secret
+	log.Trace().Msg("HandleDelete cleaning up backup resources")
+	cleanupBackupCronJobs(ctx, o.client, ns, name)
 
 	// Remove finalizers from PVCs and delete them
 	removeFinalizedPVCs(ctx, o.client, ns, name)
@@ -257,33 +271,39 @@ func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.Config
 
 // reconcile creates or updates all K8s resources for a cluster to match the desired config.
 func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
+	log.Trace().Str("cluster", cfg.ClusterName).Str("namespace", cfg.Namespace).Msg("reconcile entry")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// 1. Ensure namespace
+	log.Trace().Str("namespace", cfg.Namespace).Msg("reconcile: ensuring namespace")
 	if err := ensureNamespace(ctx, o.client, cfg.Namespace); err != nil {
 		return fmt.Errorf("ensure namespace %s: %w", cfg.Namespace, err)
 	}
 
 	// 2. Store received config as a ConfigMap for inspection
+	log.Trace().Msg("reconcile: storing config-store configmap")
 	cfgStore := o.buildConfigStore(cfg)
 	if err := createOrUpdateConfigMap(ctx, o.client, cfgStore); err != nil {
 		return fmt.Errorf("config-store configmap: %w", err)
 	}
 
 	// 3. Secret (create if absent, never update to preserve passwords)
+	log.Trace().Msg("reconcile: ensuring secret")
 	secret := buildSecret(cfg)
 	if err := createOrPreserveSecret(ctx, o.client, secret); err != nil {
 		return fmt.Errorf("secret: %w", err)
 	}
 
 	// 4. ConfigMap (postgresql.conf + pg_hba.conf)
+	log.Trace().Msg("reconcile: ensuring configmap")
 	cm := buildConfigMap(cfg)
 	if err := createOrUpdateConfigMap(ctx, o.client, cm); err != nil {
 		return fmt.Errorf("configmap: %w", err)
 	}
 
 	// 5. Services
+	log.Trace().Msg("reconcile: ensuring services")
 	if err := createOrUpdateService(ctx, o.client, buildHeadlessService(cfg)); err != nil {
 		return fmt.Errorf("service headless: %w", err)
 	}
@@ -304,6 +324,7 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	}
 
 	// 6. Failover RBAC (ServiceAccount, Role, RoleBinding)
+	log.Trace().Bool("failover_enabled", failoverEnabled(cfg)).Msg("reconcile: checking failover RBAC")
 	if failoverEnabled(cfg) {
 		if err := createOrUpdateServiceAccount(ctx, o.client, buildFailoverServiceAccount(cfg)); err != nil {
 			return fmt.Errorf("failover serviceaccount: %w", err)
@@ -317,19 +338,44 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	}
 
 	// 7. StatefulSet
+	log.Trace().Msg("reconcile: ensuring statefulset")
 	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage)
 	if err := createOrUpdateStatefulSet(ctx, o.client, sts); err != nil {
 		return fmt.Errorf("statefulset: %w", err)
 	}
 
 	// 8. Reconcile PVC finalizers (VCTs are immutable, so we patch PVCs directly)
+	log.Trace().Bool("deletion_protection", cfg.DeletionProtection).Msg("reconcile: reconciling PVC finalizers")
 	if err := reconcilePVCFinalizers(ctx, o.client, cfg.Namespace, cfg.ClusterName, cfg.DeletionProtection); err != nil {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to reconcile PVC finalizers")
 	}
 
 	// 9. Label pods (best-effort, pods may not exist yet)
+	log.Trace().Msg("reconcile: labeling pods")
 	if err := labelPods(ctx, o.client, cfg.Namespace, cfg.ClusterName); err != nil {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to label pods (will retry on next reconcile)")
+	}
+
+	// 10. Backup CronJobs
+	if backupEnabled(cfg) {
+		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup credential secrets")
+		for _, backup := range cfg.Backups {
+			backupSecret := buildBackupCredentialSecret(cfg, backup)
+			if backupSecret != nil {
+				if err := createOrPreserveSecret(ctx, o.client, backupSecret); err != nil {
+					return fmt.Errorf("backup credential secret: %w", err)
+				}
+			}
+		}
+
+		log.Trace().Msg("reconcile: reconciling backup cronjobs")
+		if err := reconcileBackupCronJobs(ctx, o.client, cfg); err != nil {
+			return fmt.Errorf("backup cronjobs: %w", err)
+		}
+	} else {
+		// Cleanup backup resources if backup was detached
+		log.Trace().Msg("reconcile: cleaning up backup cronjobs (backup disabled)")
+		cleanupBackupCronJobs(ctx, o.client, cfg.Namespace, cfg.ClusterName)
 	}
 
 	return nil
