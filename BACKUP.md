@@ -2,22 +2,22 @@
 
 ## Overview
 
-pg-swarm provides managed backup and restore through **backup rules** — independent entities that attach/detach from cluster profiles. When attached, the satellite operator automatically creates CronJobs for scheduled backups and configures WAL archiving. When detached, everything is cleaned up with zero impact on running postgres pods.
+pg-swarm provides managed backup and restore through **backup rules** — independent entities that attach/detach from cluster profiles. Multiple backup rules can be attached to a single profile (e.g., S3 for offsite + local PVC for fast restore). When attached, the satellite operator automatically creates CronJobs for each rule and configures WAL archiving. When detached, CronJobs are cleaned up with zero impact on running postgres pods.
 
 ## Data Flow
 
 ```
-BackupRule ──attach──> ClusterProfile ──DeploymentRule──> ClusterConfig
-                                                              │
-                                                    gRPC push (includes BackupConfig)
-                                                              │
-                                                       Satellite Operator
-                                                      ┌───────┼───────┐
-                                                      ▼       ▼       ▼
-                                               CronJob:   CronJob:  postgresql.conf:
-                                               pg_base-   pg_dump   archive_command
-                                               backup               + restore_command
-                                                      └───────┼───────┘
+BackupRule ──┐
+BackupRule ──┼─attach──> ClusterProfile ──DeploymentRule──> ClusterConfig
+BackupRule ──┘                                                    │
+                                                    gRPC push (repeated BackupConfig)
+                                                                  │
+                                                           Satellite Operator
+                                                   ┌──────────┬──┴──┬──────────┐
+                                                   ▼          ▼     ▼          ▼
+                                            CronJob:    CronJob:  CronJob:  postgresql.conf:
+                                            base-S3     base-GCS  logical   archive_command
+                                                   └──────────┬─────┘
                                                               ▼
                                                    BackupStatusReport (gRPC)
                                                               │
@@ -96,16 +96,16 @@ This reuses the existing custom archive mode infrastructure in `manifest_configm
 ## Attach / Detach Flow
 
 **Attach** (`POST /api/v1/profiles/:id/attach-backup-rule`):
-1. Set `backup_rule_id` on the profile
+1. Insert row into `profile_backup_rules` join table
 2. Bump `config_version` on all ClusterConfigs linked via deployment rules
-3. Re-push configs to satellites (now includes `BackupConfig` proto message)
-4. Operator creates: backup credential Secret, base backup CronJob, logical backup CronJob, configures `archive_command`
+3. Re-push configs to satellites (now includes this rule in `repeated BackupConfig`)
+4. Operator creates: per-rule credential Secret, per-rule CronJobs, configures `archive_command` from first WAL-enabled rule
 
 **Detach** (`POST /api/v1/profiles/:id/detach-backup-rule`):
-1. Set `backup_rule_id = NULL` on the profile
+1. Delete row from `profile_backup_rules` join table
 2. Bump `config_version` on all linked ClusterConfigs
-3. Re-push configs (no `BackupConfig`)
-4. Operator removes: CronJobs, credential Secret, resets `archive_command`
+3. Re-push configs (rule removed from `repeated BackupConfig`)
+4. Operator removes: that rule's CronJobs and credential Secret. If no rules remain, resets `archive_command`
 
 ## CronJob Design
 
@@ -153,7 +153,7 @@ CronJob completion → ConfigMap (<cluster>-backup-status)
 
 **`backup_rules`** — Rule definitions (name, config JSONB). Independent of profiles.
 
-**`cluster_profiles.backup_rule_id`** — FK linking a profile to a rule. `ON DELETE SET NULL`.
+**`profile_backup_rules`** — Join table (profile_id, backup_rule_id). Many-to-many. `ON DELETE CASCADE` both sides.
 
 **`backup_inventory`** — One row per completed (or failed) backup. Tracked per satellite + cluster. Contains backup type, status, size, WAL LSN range, path.
 
@@ -183,7 +183,7 @@ GET    /api/v1/clusters/:id/restores             List cluster restore operations
 | 2 | Proto + codegen | `backup.proto`, `config.proto`, `make proto` |
 | 3 | REST API + config push | `rest.go` |
 | 4 | Operator CronJobs + WAL auto-config | `manifest_backup.go`, `operator.go` |
-| 5 | Backup sidecar image | `Dockerfile.backup` |
+| 5 | Backup CronJob image | `Dockerfile.backup` |
 | 6 | Status reporting (gRPC) | `grpc.go`, `connector.go`, `monitor.go` |
 | 7 | Restore flow | `manifest_backup.go`, `operator.go`, `rest.go` |
 | 8 | Dashboard UI | `BackupRules.jsx`, `Profiles.jsx`, `ClusterDetail.jsx`, `api.js` |
