@@ -977,14 +977,14 @@ func (s *RESTServer) setDefaultPostgresVersion(c *fiber.Ctx) error {
 }
 
 // resolvePostgresImage looks up the image tag for a version+variant and prepends the registry.
-func (s *RESTServer) resolvePostgresImage(spec *models.ClusterSpec) string {
+func resolvePostgresImage(st store.Store, spec *models.ClusterSpec) string {
 	version := spec.Postgres.Version
 	variant := spec.Postgres.Variant
 	if variant == "" {
 		variant = "alpine"
 	}
 
-	pv, err := s.store.GetPostgresVersionBySpec(context.Background(), version, variant)
+	pv, err := st.GetPostgresVersionBySpec(context.Background(), version, variant)
 	if err != nil {
 		log.Warn().Str("version", version).Str("variant", variant).Msg("postgres version not found in DB, using image field as-is")
 		return spec.Postgres.Image
@@ -1004,31 +1004,48 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		return
 	}
 
-	spec, err := cfg.ParseSpec()
+	protoConfig, err := buildProtoClusterConfig(s.store, cfg)
 	if err != nil {
 		log.Error().Err(err).
 			Str("config_id", cfg.ID.String()).
 			Str("name", cfg.Name).
-			Msg("failed to parse cluster spec for config push")
+			Msg("failed to build proto config for push")
 		return
+	}
+
+	if err := s.streams.PushConfig(*cfg.SatelliteID, protoConfig); err != nil {
+		log.Error().Err(err).
+			Str("satellite_id", cfg.SatelliteID.String()).
+			Str("config_id", cfg.ID.String()).
+			Msg("failed to push config to satellite")
+	}
+}
+
+// buildProtoClusterConfig converts a models.ClusterConfig into the protobuf
+// ClusterConfig that satellites expect. It resolves profile names, label
+// selectors, and postgres images from the store.
+func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswarmv1.ClusterConfig, error) {
+	spec, err := cfg.ParseSpec()
+	if err != nil {
+		return nil, fmt.Errorf("parse cluster spec: %w", err)
 	}
 
 	// Resolve profile name and label selector for K8s labels
 	var profileName string
 	var labelSelector map[string]string
 	if cfg.ProfileID != nil {
-		if p, err := s.store.GetProfile(context.Background(), *cfg.ProfileID); err == nil {
+		if p, err := st.GetProfile(context.Background(), *cfg.ProfileID); err == nil {
 			profileName = p.Name
 		}
 	}
 	if cfg.DeploymentRuleID != nil {
-		if r, err := s.store.GetDeploymentRule(context.Background(), *cfg.DeploymentRuleID); err == nil {
+		if r, err := st.GetDeploymentRule(context.Background(), *cfg.DeploymentRuleID); err == nil {
 			labelSelector = r.LabelSelector
 		}
 	}
 
 	// Resolve the image from the postgres_versions table
-	resolvedImage := s.resolvePostgresImage(spec)
+	resolvedImage := resolvePostgresImage(st, spec)
 
 	protoConfig := &pgswarmv1.ClusterConfig{
 		ClusterName:   cfg.Name,
@@ -1100,12 +1117,7 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		}
 	}
 
-	if err := s.streams.PushConfig(*cfg.SatelliteID, protoConfig); err != nil {
-		log.Error().Err(err).
-			Str("satellite_id", cfg.SatelliteID.String()).
-			Str("config_id", cfg.ID.String()).
-			Msg("failed to push config to satellite")
-	}
+	return protoConfig, nil
 }
 
 // --- Error handler ---

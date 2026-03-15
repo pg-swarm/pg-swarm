@@ -153,6 +153,9 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 
 	log.Info().Str("satellite_id", satID.String()).Msg("satellite connected")
 
+	// Push existing configs for this satellite on connect
+	s.syncConfigs(ctx, satID, satStream)
+
 	// Read loop (in goroutine)
 	errCh := make(chan error, 1)
 	go func() {
@@ -290,6 +293,51 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 			return err
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+	}
+}
+
+// syncConfigs pushes all existing non-paused configs for a satellite when it
+// (re)connects, ensuring it receives any configs that were created while it
+// was offline.
+func (s *GRPCServer) syncConfigs(ctx context.Context, satID uuid.UUID, satStream *SatelliteStream) {
+	configs, err := s.store.GetClusterConfigsBySatellite(ctx, satID)
+	if err != nil {
+		log.Error().Err(err).Str("satellite_id", satID.String()).Msg("sync-configs: failed to list configs")
+		return
+	}
+
+	for _, cfg := range configs {
+		if cfg.Paused {
+			continue
+		}
+
+		protoConfig, err := buildProtoClusterConfig(s.store, cfg)
+		if err != nil {
+			log.Error().Err(err).
+				Str("satellite_id", satID.String()).
+				Str("config_id", cfg.ID.String()).
+				Msg("sync-configs: failed to build proto config")
+			continue
+		}
+
+		msg := &pgswarmv1.CentralMessage{
+			Payload: &pgswarmv1.CentralMessage_ClusterConfig{
+				ClusterConfig: protoConfig,
+			},
+		}
+
+		select {
+		case satStream.SendCh <- msg:
+			log.Info().
+				Str("satellite_id", satID.String()).
+				Str("cluster", cfg.Name).
+				Msg("sync-configs: pushed config on connect")
+		default:
+			log.Warn().
+				Str("satellite_id", satID.String()).
+				Str("cluster", cfg.Name).
+				Msg("sync-configs: send channel full, skipping config")
 		}
 	}
 }
