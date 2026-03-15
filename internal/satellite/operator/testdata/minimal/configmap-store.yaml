@@ -2,17 +2,17 @@ apiVersion: v1
 data:
   config.json: |-
     {
-      "clusterName": "minimal",
-      "namespace": "default",
-      "replicas": 1,
-      "postgres": {
-        "version": "16",
-        "image": "postgres:16"
+      "clusterName":  "minimal",
+      "namespace":  "default",
+      "replicas":  1,
+      "postgres":  {
+        "version":  "16",
+        "image":  "postgres:16"
       },
-      "storage": {
-        "size": "1Gi"
+      "storage":  {
+        "size":  "1Gi"
       },
-      "configVersion": "1"
+      "configVersion":  "1"
     }
 kind: ConfigMap
 metadata:

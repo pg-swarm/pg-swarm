@@ -44,14 +44,14 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Data: map[string]string{
-			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive),
+			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive, cfg.Backups),
 			"pg_hba.conf":    buildHbaConf(cfg.HbaRules),
 		},
 	}
 }
 
 // buildPostgresConf generates the postgresql.conf content by merging mandatory HA params with user overrides.
-func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec) string {
+func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec, backups []*pgswarmv1.BackupConfig) string {
 	merged := make(map[string]string, len(mandatoryPgParams)+len(userParams)+4)
 	for k, v := range mandatoryPgParams {
 		merged[k] = v
@@ -72,6 +72,15 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		case "custom":
 			merged["archive_command"] = fmt.Sprintf("'%s'", archive.ArchiveCommand)
 		}
+	} else if walBackup := firstWalArchiveBackup(backups); walBackup != nil {
+		// Auto-configure WAL archiving from the first backup rule with WAL archiving enabled
+		merged["archive_mode"] = "on"
+		timeout := walBackup.Physical.ArchiveTimeoutSeconds
+		if timeout <= 0 {
+			timeout = 60
+		}
+		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
+		merged["archive_command"] = fmt.Sprintf("'%s'", backupWalArchiveCommand(walBackup.Destination))
 	} else {
 		merged["archive_mode"] = "off"
 	}
@@ -92,6 +101,16 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		fmt.Fprintf(&sb, "%s = %s\n", k, merged[k])
 	}
 	return sb.String()
+}
+
+// firstWalArchiveBackup returns the first backup config with WAL archiving enabled, or nil.
+func firstWalArchiveBackup(backups []*pgswarmv1.BackupConfig) *pgswarmv1.BackupConfig {
+	for _, b := range backups {
+		if b.Physical != nil && b.Physical.WalArchiveEnabled {
+			return b
+		}
+	}
+	return nil
 }
 
 // buildHbaConf generates the pg_hba.conf content with mandatory HA rules followed by user rules.

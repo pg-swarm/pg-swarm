@@ -255,3 +255,161 @@ type Event struct {
 	Source      string    `json:"source" db:"source"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
+
+// ---------- Backup ----------
+
+type BackupRule struct {
+	ID          uuid.UUID       `json:"id" db:"id"`
+	Name        string          `json:"name" db:"name"`
+	Description string          `json:"description" db:"description"`
+	Config      json.RawMessage `json:"config" db:"config"` // BackupRuleSpec JSON
+	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// ParseBackupRuleSpec deserializes the Config JSON into a BackupRuleSpec.
+func (r *BackupRule) ParseBackupRuleSpec() (*BackupRuleSpec, error) {
+	var spec BackupRuleSpec
+	if err := json.Unmarshal(r.Config, &spec); err != nil {
+		return nil, err
+	}
+	return &spec, nil
+}
+
+type BackupRuleSpec struct {
+	Physical    *PhysicalBackupSpec `json:"physical,omitempty"`
+	Logical     *LogicalBackupSpec  `json:"logical,omitempty"`
+	Destination DestinationSpec     `json:"destination"`
+	Retention   RetentionSpec       `json:"retention"`
+	BackupImage string              `json:"backup_image,omitempty"` // default: ghcr.io/pg-swarm/pg-swarm-backup:latest
+}
+
+type PhysicalBackupSpec struct {
+	BaseSchedule       string `json:"base_schedule"`                      // cron: "0 2 * * 0"
+	WalArchiveEnabled  bool   `json:"wal_archive_enabled"`                // enable continuous WAL archiving
+	ArchiveTimeoutSecs int32  `json:"archive_timeout_seconds,omitempty"`  // default 60
+}
+
+type LogicalBackupSpec struct {
+	Schedule  string   `json:"schedule"`            // cron: "0 2 * * *"
+	Databases []string `json:"databases,omitempty"` // empty = pg_dumpall
+	Format    string   `json:"format,omitempty"`    // "custom" (default), "plain", "directory"
+}
+
+type DestinationSpec struct {
+	Type  string       `json:"type"` // "gcs", "s3", "sftp", "local"
+	GCS   *GCSConfig   `json:"gcs,omitempty"`
+	S3    *S3Config    `json:"s3,omitempty"`
+	SFTP  *SFTPConfig  `json:"sftp,omitempty"`
+	Local *LocalConfig `json:"local,omitempty"`
+}
+
+type GCSConfig struct {
+	Bucket             string `json:"bucket"`
+	PathPrefix         string `json:"path_prefix,omitempty"`
+	ServiceAccountJSON string `json:"service_account_json,omitempty"`
+}
+
+type S3Config struct {
+	Bucket         string `json:"bucket"`
+	Region         string `json:"region"`
+	Endpoint       string `json:"endpoint,omitempty"`      // for S3-compatible (MinIO)
+	PathPrefix     string `json:"path_prefix,omitempty"`
+	AccessKeyID    string `json:"access_key_id,omitempty"`
+	SecretAccessKey string `json:"secret_access_key,omitempty"`
+	ForcePathStyle bool   `json:"force_path_style,omitempty"`
+}
+
+type SFTPConfig struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port,omitempty"` // default 22
+	User       string `json:"user"`
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"private_key,omitempty"`
+	BasePath   string `json:"base_path"`
+}
+
+type LocalConfig struct {
+	Size         string `json:"size"`
+	StorageClass string `json:"storage_class,omitempty"`
+}
+
+type RetentionSpec struct {
+	BaseBackupCount    int `json:"base_backup_count,omitempty"`    // default 7
+	WalRetentionDays   int `json:"wal_retention_days,omitempty"`   // default 14
+	LogicalBackupCount int `json:"logical_backup_count,omitempty"` // default 30
+}
+
+// ValidateBackupRuleSpec validates the backup rule configuration.
+func ValidateBackupRuleSpec(spec *BackupRuleSpec) error {
+	if spec.Physical == nil && spec.Logical == nil {
+		return fmt.Errorf("backup rule must define at least one of physical or logical backup")
+	}
+	if spec.Physical != nil && spec.Physical.BaseSchedule == "" {
+		return fmt.Errorf("physical backup requires base_schedule")
+	}
+	if spec.Logical != nil && spec.Logical.Schedule == "" {
+		return fmt.Errorf("logical backup requires schedule")
+	}
+	if spec.Logical != nil && spec.Logical.Format != "" {
+		switch spec.Logical.Format {
+		case "custom", "plain", "directory":
+		default:
+			return fmt.Errorf("logical backup format must be \"custom\", \"plain\", or \"directory\"")
+		}
+	}
+	switch spec.Destination.Type {
+	case "s3":
+		if spec.Destination.S3 == nil || spec.Destination.S3.Bucket == "" {
+			return fmt.Errorf("s3 destination requires bucket")
+		}
+	case "gcs":
+		if spec.Destination.GCS == nil || spec.Destination.GCS.Bucket == "" {
+			return fmt.Errorf("gcs destination requires bucket")
+		}
+	case "sftp":
+		if spec.Destination.SFTP == nil || spec.Destination.SFTP.Host == "" || spec.Destination.SFTP.BasePath == "" {
+			return fmt.Errorf("sftp destination requires host and base_path")
+		}
+	case "local":
+		if spec.Destination.Local == nil || spec.Destination.Local.Size == "" {
+			return fmt.Errorf("local destination requires size")
+		}
+	default:
+		return fmt.Errorf("destination type must be \"s3\", \"gcs\", \"sftp\", or \"local\"")
+	}
+	return nil
+}
+
+type BackupInventory struct {
+	ID           uuid.UUID  `json:"id" db:"id"`
+	SatelliteID  uuid.UUID  `json:"satellite_id" db:"satellite_id"`
+	ClusterName  string     `json:"cluster_name" db:"cluster_name"`
+	BackupRuleID uuid.UUID  `json:"backup_rule_id" db:"backup_rule_id"`
+	BackupType   string     `json:"backup_type" db:"backup_type"`   // "base", "wal", "logical"
+	Status       string     `json:"status" db:"status"`             // "running", "completed", "failed"
+	StartedAt    time.Time  `json:"started_at" db:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	SizeBytes    int64      `json:"size_bytes" db:"size_bytes"`
+	BackupPath   string     `json:"backup_path" db:"backup_path"`
+	PgVersion    string     `json:"pg_version" db:"pg_version"`
+	WalStartLSN  string     `json:"wal_start_lsn,omitempty" db:"wal_start_lsn"`
+	WalEndLSN    string     `json:"wal_end_lsn,omitempty" db:"wal_end_lsn"`
+	ErrorMessage string     `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+}
+
+type RestoreOperation struct {
+	ID             uuid.UUID  `json:"id" db:"id"`
+	SatelliteID    uuid.UUID  `json:"satellite_id" db:"satellite_id"`
+	ClusterName    string     `json:"cluster_name" db:"cluster_name"`
+	BackupID       uuid.UUID  `json:"backup_id" db:"backup_id"`
+	RestoreType    string     `json:"restore_type" db:"restore_type"` // "pitr", "logical"
+	TargetTime     *time.Time `json:"target_time,omitempty" db:"target_time"`
+	TargetDatabase string     `json:"target_database,omitempty" db:"target_database"`
+	Status         string     `json:"status" db:"status"` // "pending", "running", "completed", "failed"
+	ErrorMessage   string     `json:"error_message,omitempty" db:"error_message"`
+	StartedAt      *time.Time `json:"started_at,omitempty" db:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
+}

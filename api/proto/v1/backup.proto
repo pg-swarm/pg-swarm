@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package pgswarm.v1;
+
+option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
+
+import "google/protobuf/timestamp.proto";
+
+// BackupConfig is embedded in ClusterConfig when a backup rule is attached.
+message BackupConfig {
+  PhysicalBackupConfig physical = 1;
+  LogicalBackupConfig logical = 2;
+  BackupDestination destination = 3;
+  BackupRetention retention = 4;
+  string backup_image = 5;
+  string backup_rule_id = 6;  // UUID of the source backup rule (for unique CronJob naming)
+}
+
+message PhysicalBackupConfig {
+  string base_schedule = 1;           // cron expression
+  bool wal_archive_enabled = 2;
+  int32 archive_timeout_seconds = 3;
+}
+
+message LogicalBackupConfig {
+  string schedule = 1;                // cron expression
+  repeated string databases = 2;     // empty = pg_dumpall
+  string format = 3;                 // "custom", "plain", "directory"
+}
+
+message BackupDestination {
+  string type = 1; // "s3", "gcs", "sftp", "local"
+  S3Destination s3 = 2;
+  GCSDestination gcs = 3;
+  SFTPDestination sftp = 4;
+  LocalDestination local = 5;
+}
+
+message S3Destination {
+  string bucket = 1;
+  string region = 2;
+  string endpoint = 3;
+  string path_prefix = 4;
+  bool force_path_style = 5;
+  // Credentials are passed via K8s Secret, not in proto.
+}
+
+message GCSDestination {
+  string bucket = 1;
+  string path_prefix = 2;
+  // Service account JSON is passed via K8s Secret.
+}
+
+message SFTPDestination {
+  string host = 1;
+  int32 port = 2;
+  string user = 3;
+  string base_path = 4;
+  // Password/key passed via K8s Secret.
+}
+
+message LocalDestination {
+  string size = 1;
+  string storage_class = 2;
+}
+
+message BackupRetention {
+  int32 base_backup_count = 1;
+  int32 wal_retention_days = 2;
+  int32 logical_backup_count = 3;
+}
+
+// BackupStatusReport is sent from satellite to central after a backup completes or fails.
+message BackupStatusReport {
+  string cluster_name = 1;
+  string namespace = 2;
+  string backup_rule_id = 3;
+  string backup_type = 4;         // "base", "wal", "logical"
+  string status = 5;              // "completed", "failed"
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp completed_at = 7;
+  int64 size_bytes = 8;
+  string backup_path = 9;
+  string pg_version = 10;
+  string wal_start_lsn = 11;
+  string wal_end_lsn = 12;
+  string error_message = 13;
+}
+
+// RestoreCommand is sent from central to satellite to initiate a restore.
+message RestoreCommand {
+  string cluster_name = 1;
+  string namespace = 2;
+  string restore_id = 3;          // UUID of the RestoreOperation
+  string backup_id = 4;           // UUID of the source backup
+  string restore_type = 5;        // "pitr", "logical"
+  google.protobuf.Timestamp target_time = 6;   // for PITR
+  string target_database = 7;     // for logical restore
+  BackupDestination destination = 8;
+  string backup_path = 9;
+}
+
+// RestoreStatusReport is sent from satellite to central after a restore completes or fails.
+message RestoreStatusReport {
+  string cluster_name = 1;
+  string namespace = 2;
+  string restore_id = 3;
+  string status = 4;              // "running", "completed", "failed"
+  string error_message = 5;
+}
