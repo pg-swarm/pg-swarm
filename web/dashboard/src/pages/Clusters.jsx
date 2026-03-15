@@ -5,7 +5,7 @@ import { api, parseSpec, timeAgo } from '../api';
 import {
   Server, Crown, Copy, Shield,
   Pause, Play, Database, AlertCircle,
-  ExternalLink, Search
+  ExternalLink, Search, Archive, ArchiveX
 } from 'lucide-react';
 
 /* ── Format helpers (shared with ClusterDetail) ──────── */
@@ -163,10 +163,71 @@ export function ReportRow({ label, value }) {
   );
 }
 
+/* ── Node table for cluster card ──────────────────────── */
+
+function pctColor(pct) {
+  return pct > 75 ? 'var(--red)' : pct > 50 ? 'var(--amber)' : 'var(--green)';
+}
+function pctBg(pct) {
+  return pct > 75 ? 'var(--red-bg)' : pct > 50 ? 'var(--amber-bg)' : null;
+}
+
+function NodeTable({ instances, storageBytes }) {
+  return (
+    <table className="node-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Instance</th>
+          <th>Lag</th>
+          <th>Disk</th>
+          <th>Conn</th>
+        </tr>
+      </thead>
+      <tbody>
+        {instances.map(inst => {
+          const lagSec = inst.replication_lag_seconds || 0;
+          const connPct = inst.connections_max > 0 ? Math.round((inst.connections_used / inst.connections_max) * 100) : 0;
+          const diskPct = storageBytes > 0 ? Math.round((inst.disk_used_bytes / storageBytes) * 100) : 0;
+
+          const lagDot = lagSec > 180 ? 'var(--red)' : lagSec > 60 ? 'var(--amber)' : 'var(--green)';
+          const RoleIcon = inst.role === 'primary' ? Crown : inst.role === 'replica' ? Copy : AlertCircle;
+          const roleColor = inst.role === 'primary' ? 'var(--amber)' : inst.role === 'failed_primary' ? 'var(--red)' : 'var(--blue)';
+
+          // Highlight row if any metric is amber or red
+          const worstBg = pctBg(Math.max(diskPct, connPct));
+
+          return (
+            <tr key={inst.pod_name} style={worstBg ? { background: worstBg } : undefined}>
+              <td title={inst.role === 'primary' ? 'Primary' : inst.role === 'replica' ? 'Replica' : 'Failed Primary'}><RoleIcon size={11} style={{ color: roleColor }} /></td>
+              <td className="mono">{inst.pod_name}</td>
+              <td>
+                {inst.role === 'replica'
+                  ? <span className={`online-dot${lagSec > 180 ? ' dot-blink' : ''}`} style={{ background: lagDot }} title={formatLagTime(lagSec)} />
+                  : <span className="muted">-</span>}
+              </td>
+              <td>
+                <span className="node-bar" title={`${diskPct}%`}>
+                  <span className="node-bar-fill" style={{ width: Math.min(diskPct, 100) + '%', background: pctColor(diskPct) }} />
+                </span>
+              </td>
+              <td>
+                <span className="node-bar" title={`${connPct}%`}>
+                  <span className="node-bar-fill" style={{ width: Math.min(connPct, 100) + '%', background: pctColor(connPct) }} />
+                </span>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 /* ── Clusters page ───────────────────────────────────── */
 
 export default function Clusters() {
-  const { clusters, satellites, health, deploymentRules, refresh } = useData();
+  const { clusters, satellites, health, deploymentRules, backupProfiles, profiles, refresh } = useData();
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState('');
 
@@ -204,6 +265,14 @@ export default function Clusters() {
     return rule?.label_selector || {};
   }
 
+  function hasBackup(c) {
+    if (!c.deployment_rule_id) return false;
+    const rule = deploymentRules.find(r => r.id === c.deployment_rule_id);
+    if (!rule) return false;
+    // If there are backup profiles and the profile matches, assume backup is configured
+    return backupProfiles && backupProfiles.length > 0;
+  }
+
   const term = search.toLowerCase().trim();
 
   const filtered = term
@@ -223,7 +292,7 @@ export default function Clusters() {
 
   return (
     <>
-      <div style={{ marginBottom: 16, position: 'relative' }}>
+      <div className="search-bar-sticky">
         <Search size={15} style={{
           position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
           color: 'var(--text-secondary)', pointerEvents: 'none',
@@ -256,62 +325,50 @@ export default function Clusters() {
                 <div className="cl-head-left">
                   <Database size={16} className="cl-head-icon" />
                   <h3>{c.name}</h3>
+                  <span className="mono muted" style={{ fontSize: 11, fontWeight: 400 }}>{c.namespace || 'default'}</span>
+                  <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>@ {sat ? sat.hostname : (c.satellite_id ? c.satellite_id.substring(0, 8) : 'unassigned')}</span>
                 </div>
-                <div className="badges">
+                <div style={{ width: '100%', display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center', marginTop: 2 }}>
+                  {labelEntries.map(([k, v]) => (
+                    <span key={k} style={{
+                      background: 'var(--blue-bg)', color: 'var(--blue)',
+                      padding: '1px 7px', borderRadius: 4, fontSize: 10.5,
+                      fontWeight: 500, whiteSpace: 'nowrap',
+                    }}>
+                      {k}={v}
+                    </span>
+                  ))}
+                  <span style={{ marginLeft: 'auto' }} />
                   {h && <ClusterBadge state={h.state} />}
                   {(!h || h.state !== c.state) && <ClusterBadge state={c.state} />}
                 </div>
-                {labelEntries.length > 0 && (
-                  <div style={{ width: '100%', display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
-                    {labelEntries.map(([k, v]) => (
-                      <span key={k} style={{
-                        background: 'var(--blue-bg)', color: 'var(--blue)',
-                        padding: '1px 7px', borderRadius: 4, fontSize: 10.5,
-                        fontWeight: 500, whiteSpace: 'nowrap',
-                      }}>
-                        {k}={v}
-                      </span>
-                    ))}
-                  </div>
-                )}
               </div>
 
               {/* Body */}
               <div className="cl-body">
-                <dl className="cl-grid">
-                  <KV label="Namespace" value={c.namespace || 'default'} />
-                  <KV label="Satellite" value={sat ? sat.hostname : (c.satellite_id ? c.satellite_id.substring(0, 8) : 'unassigned')} />
+                <dl className="cl-grid cl-grid-3">
                   <KV label="Replicas" value={s.replicas || '-'} />
                   <KV label="PostgreSQL" value={s.postgres?.version || '-'} />
                   <KV label="Storage" value={s.storage?.size || '-'} />
                 </dl>
 
                 {instances.length > 0 && (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
-                      <Server size={13} />
-                      <span>{instances.length} member{instances.length !== 1 ? 's' : ''}</span>
-                      <InstanceSummary instances={instances} />
-                    </div>
+                  <div className="node-list">
+                    <NodeTable instances={instances} storageBytes={parseStorageSize(s.storage?.size)} />
                   </div>
                 )}
 
-                {errorInstances.length > 0 && (
-                  <div style={{ marginTop: 8 }}>
-                    {errorInstances.map(i => (
-                      <div key={i.pod_name} style={{
-                        fontSize: 11, color: 'var(--red)', background: 'var(--red-bg)',
-                        padding: '4px 8px', borderRadius: 4, marginTop: 4,
-                      }}>
-                        <span className="mono">{i.pod_name}</span>: {i.error_message}
-                      </div>
-                    ))}
-                  </div>
+                {instances.length === 0 && c.state === 'creating' && (
+                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 10 }}>Waiting for pods...</div>
                 )}
               </div>
 
               {/* Footer */}
               <div className="cl-foot">
+                {hasBackup(c)
+                  ? <span title="Backup configured"><Archive size={13} style={{ color: 'var(--green)' }} /></span>
+                  : <span title="No backup configured"><ArchiveX size={13} style={{ color: 'var(--text-secondary)', opacity: 0.4 }} /></span>}
+                <span style={{ marginRight: 'auto' }} />
                 <button
                   className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-pause'}`}
                   onClick={() => togglePause(c)}
@@ -323,7 +380,7 @@ export default function Clusters() {
                 <button
                   className="btn-sm"
                   onClick={() => window.open('/clusters/' + c.id, '_blank')}
-                  style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
                 >
                   <ExternalLink size={11} />
                   Details
