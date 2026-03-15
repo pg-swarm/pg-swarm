@@ -291,6 +291,14 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 				} else {
 					log.Info().Str("satellite_id", satID.String()).Int("count", len(classes)).Msg("storage classes updated")
 				}
+
+			case *pgswarmv1.SatelliteMessage_BackupStatus:
+				report := payload.BackupStatus
+				s.handleBackupStatusReport(ctx, satID, report)
+
+			case *pgswarmv1.SatelliteMessage_RestoreStatus:
+				report := payload.RestoreStatus
+				s.handleRestoreStatusReport(ctx, satID, report)
 			}
 		}
 	}()
@@ -473,6 +481,30 @@ func (sm *StreamManager) PushSetLogLevel(satelliteID uuid.UUID, level string) er
 			SetLogLevel: &pgswarmv1.SetLogLevel{
 				Level: level,
 			},
+		},
+	}
+
+	select {
+	case stream.SendCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("satellite %s send channel full", satelliteID)
+	}
+}
+
+// PushRestoreCommand sends a restore command to the specified satellite.
+func (sm *StreamManager) PushRestoreCommand(satelliteID uuid.UUID, cmd *pgswarmv1.RestoreCommand) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	stream, ok := sm.streams[satelliteID]
+	if !ok {
+		return fmt.Errorf("satellite %s not connected", satelliteID)
+	}
+
+	msg := &pgswarmv1.CentralMessage{
+		Payload: &pgswarmv1.CentralMessage_RestoreCommand{
+			RestoreCommand: cmd,
 		},
 	}
 
@@ -725,4 +757,116 @@ func protoInstancesToJSON(instances []*pgswarmv1.InstanceHealth) (json.RawMessag
 		out = append(out, ij)
 	}
 	return json.Marshal(out)
+}
+
+// handleBackupStatusReport processes a backup status report from a satellite.
+func (s *GRPCServer) handleBackupStatusReport(ctx context.Context, satID uuid.UUID, report *pgswarmv1.BackupStatusReport) {
+	ruleID, err := uuid.Parse(report.BackupRuleId)
+	if err != nil {
+		log.Error().Err(err).Str("backup_rule_id", report.BackupRuleId).Msg("invalid backup rule id in status report")
+		return
+	}
+
+	inv := &models.BackupInventory{
+		SatelliteID:  satID,
+		ClusterName:  report.ClusterName,
+		BackupRuleID: ruleID,
+		BackupType:   report.BackupType,
+		Status:       report.Status,
+		SizeBytes:    report.SizeBytes,
+		BackupPath:   report.BackupPath,
+		PgVersion:    report.PgVersion,
+		WalStartLSN:  report.WalStartLsn,
+		WalEndLSN:    report.WalEndLsn,
+		ErrorMessage: report.ErrorMessage,
+	}
+
+	if report.StartedAt != nil {
+		inv.StartedAt = report.StartedAt.AsTime()
+	}
+	if report.CompletedAt != nil {
+		t := report.CompletedAt.AsTime()
+		inv.CompletedAt = &t
+	}
+
+	if err := s.store.CreateBackupInventory(ctx, inv); err != nil {
+		log.Error().Err(err).
+			Str("cluster", report.ClusterName).
+			Str("type", report.BackupType).
+			Msg("failed to store backup inventory")
+		return
+	}
+
+	// Create event
+	severity := "info"
+	message := fmt.Sprintf("Backup %s %s", report.BackupType, report.Status)
+	if report.Status == "failed" {
+		severity = "error"
+		message += ": " + report.ErrorMessage
+	}
+	_ = s.store.CreateEvent(ctx, &models.Event{
+		SatelliteID: satID,
+		ClusterName: report.ClusterName,
+		Severity:    severity,
+		Message:     message,
+		Source:      "backup",
+	})
+
+	log.Info().
+		Str("cluster", report.ClusterName).
+		Str("type", report.BackupType).
+		Str("status", report.Status).
+		Msg("backup status recorded")
+}
+
+// handleRestoreStatusReport processes a restore status report from a satellite.
+func (s *GRPCServer) handleRestoreStatusReport(ctx context.Context, satID uuid.UUID, report *pgswarmv1.RestoreStatusReport) {
+	restoreID, err := uuid.Parse(report.RestoreId)
+	if err != nil {
+		log.Error().Err(err).Str("restore_id", report.RestoreId).Msg("invalid restore id in status report")
+		return
+	}
+
+	op, err := s.store.GetRestoreOperation(ctx, restoreID)
+	if err != nil {
+		log.Error().Err(err).Str("restore_id", report.RestoreId).Msg("restore operation not found")
+		return
+	}
+
+	op.Status = report.Status
+	op.ErrorMessage = report.ErrorMessage
+	if report.Status == "running" && op.StartedAt == nil {
+		now := time.Now()
+		op.StartedAt = &now
+	}
+	if report.Status == "completed" || report.Status == "failed" {
+		now := time.Now()
+		op.CompletedAt = &now
+	}
+
+	if err := s.store.UpdateRestoreOperation(ctx, op); err != nil {
+		log.Error().Err(err).Str("restore_id", report.RestoreId).Msg("failed to update restore operation")
+		return
+	}
+
+	// Create event
+	severity := "info"
+	message := fmt.Sprintf("Restore %s", report.Status)
+	if report.Status == "failed" {
+		severity = "error"
+		message += ": " + report.ErrorMessage
+	}
+	_ = s.store.CreateEvent(ctx, &models.Event{
+		SatelliteID: satID,
+		ClusterName: report.ClusterName,
+		Severity:    severity,
+		Message:     message,
+		Source:      "restore",
+	})
+
+	log.Info().
+		Str("cluster", report.ClusterName).
+		Str("restore_id", report.RestoreId).
+		Str("status", report.Status).
+		Msg("restore status updated")
 }

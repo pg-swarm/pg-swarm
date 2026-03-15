@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     -o /out/failover-sidecar ./cmd/failover-sidecar
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM alpine:3.21
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S pgswarm \
