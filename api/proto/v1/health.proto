@@ -44,6 +44,15 @@ message InstanceHealth {
 
   // Slow queries (from pg_stat_statements, top by mean_exec_time)
   repeated SlowQuery slow_queries = 19;
+
+  // Index hit ratio (0.0–1.0) from pg_statio_user_indexes
+  double index_hit_ratio = 20;
+
+  // Transaction commit ratio (0.0–1.0) from pg_stat_database
+  double txn_commit_ratio = 21;
+
+  // Active connection count (state = 'active' in pg_stat_activity)
+  int32 connections_active = 22;
 }
 
 message DatabaseStat {
