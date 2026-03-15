@@ -22,17 +22,17 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// BackupConfig is embedded in ClusterConfig when a backup rule is attached.
+// BackupConfig is embedded in ClusterConfig when a backup profile is attached.
 type BackupConfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Physical      *PhysicalBackupConfig  `protobuf:"bytes,1,opt,name=physical,proto3" json:"physical,omitempty"`
-	Logical       *LogicalBackupConfig   `protobuf:"bytes,2,opt,name=logical,proto3" json:"logical,omitempty"`
-	Destination   *BackupDestination     `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`
-	Retention     *BackupRetention       `protobuf:"bytes,4,opt,name=retention,proto3" json:"retention,omitempty"`
-	BackupImage   string                 `protobuf:"bytes,5,opt,name=backup_image,json=backupImage,proto3" json:"backup_image,omitempty"`
-	BackupRuleId  string                 `protobuf:"bytes,6,opt,name=backup_rule_id,json=backupRuleId,proto3" json:"backup_rule_id,omitempty"` // UUID of the source backup rule (for unique CronJob naming)
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Physical        *PhysicalBackupConfig  `protobuf:"bytes,1,opt,name=physical,proto3" json:"physical,omitempty"`
+	Logical         *LogicalBackupConfig   `protobuf:"bytes,2,opt,name=logical,proto3" json:"logical,omitempty"`
+	Destination     *BackupDestination     `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`
+	Retention       *BackupRetention       `protobuf:"bytes,4,opt,name=retention,proto3" json:"retention,omitempty"`
+	BackupImage     string                 `protobuf:"bytes,5,opt,name=backup_image,json=backupImage,proto3" json:"backup_image,omitempty"`
+	BackupProfileId string                 `protobuf:"bytes,6,opt,name=backup_profile_id,json=backupProfileId,proto3" json:"backup_profile_id,omitempty"` // UUID of the source backup profile (for unique CronJob naming)
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *BackupConfig) Reset() {
@@ -100,18 +100,19 @@ func (x *BackupConfig) GetBackupImage() string {
 	return ""
 }
 
-func (x *BackupConfig) GetBackupRuleId() string {
+func (x *BackupConfig) GetBackupProfileId() string {
 	if x != nil {
-		return x.BackupRuleId
+		return x.BackupProfileId
 	}
 	return ""
 }
 
 type PhysicalBackupConfig struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
-	BaseSchedule          string                 `protobuf:"bytes,1,opt,name=base_schedule,json=baseSchedule,proto3" json:"base_schedule,omitempty"` // cron expression
+	BaseSchedule          string                 `protobuf:"bytes,1,opt,name=base_schedule,json=baseSchedule,proto3" json:"base_schedule,omitempty"` // cron for full base backups
 	WalArchiveEnabled     bool                   `protobuf:"varint,2,opt,name=wal_archive_enabled,json=walArchiveEnabled,proto3" json:"wal_archive_enabled,omitempty"`
 	ArchiveTimeoutSeconds int32                  `protobuf:"varint,3,opt,name=archive_timeout_seconds,json=archiveTimeoutSeconds,proto3" json:"archive_timeout_seconds,omitempty"`
+	IncrementalSchedule   string                 `protobuf:"bytes,4,opt,name=incremental_schedule,json=incrementalSchedule,proto3" json:"incremental_schedule,omitempty"` // cron for incremental backups (PG 17+)
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -165,6 +166,13 @@ func (x *PhysicalBackupConfig) GetArchiveTimeoutSeconds() int32 {
 		return x.ArchiveTimeoutSeconds
 	}
 	return 0
+}
+
+func (x *PhysicalBackupConfig) GetIncrementalSchedule() string {
+	if x != nil {
+		return x.IncrementalSchedule
+	}
+	return ""
 }
 
 type LogicalBackupConfig struct {
@@ -304,14 +312,16 @@ func (x *BackupDestination) GetLocal() *LocalDestination {
 }
 
 type S3Destination struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Bucket         string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
-	Region         string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
-	Endpoint       string                 `protobuf:"bytes,3,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
-	PathPrefix     string                 `protobuf:"bytes,4,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"`
-	ForcePathStyle bool                   `protobuf:"varint,5,opt,name=force_path_style,json=forcePathStyle,proto3" json:"force_path_style,omitempty"` // Credentials are passed via K8s Secret, not in proto.
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Bucket          string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	Region          string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
+	Endpoint        string                 `protobuf:"bytes,3,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	PathPrefix      string                 `protobuf:"bytes,4,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"`
+	ForcePathStyle  bool                   `protobuf:"varint,5,opt,name=force_path_style,json=forcePathStyle,proto3" json:"force_path_style,omitempty"`
+	AccessKeyId     string                 `protobuf:"bytes,6,opt,name=access_key_id,json=accessKeyId,proto3" json:"access_key_id,omitempty"`             // written to K8s Secret on satellite
+	SecretAccessKey string                 `protobuf:"bytes,7,opt,name=secret_access_key,json=secretAccessKey,proto3" json:"secret_access_key,omitempty"` // written to K8s Secret on satellite
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *S3Destination) Reset() {
@@ -379,12 +389,27 @@ func (x *S3Destination) GetForcePathStyle() bool {
 	return false
 }
 
+func (x *S3Destination) GetAccessKeyId() string {
+	if x != nil {
+		return x.AccessKeyId
+	}
+	return ""
+}
+
+func (x *S3Destination) GetSecretAccessKey() string {
+	if x != nil {
+		return x.SecretAccessKey
+	}
+	return ""
+}
+
 type GCSDestination struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Bucket        string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
-	PathPrefix    string                 `protobuf:"bytes,2,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"` // Service account JSON is passed via K8s Secret.
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Bucket             string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	PathPrefix         string                 `protobuf:"bytes,2,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"`
+	ServiceAccountJson string                 `protobuf:"bytes,3,opt,name=service_account_json,json=serviceAccountJson,proto3" json:"service_account_json,omitempty"` // written to K8s Secret on satellite
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *GCSDestination) Reset() {
@@ -431,12 +456,20 @@ func (x *GCSDestination) GetPathPrefix() string {
 	return ""
 }
 
+func (x *GCSDestination) GetServiceAccountJson() string {
+	if x != nil {
+		return x.ServiceAccountJson
+	}
+	return ""
+}
+
 type SFTPDestination struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Host          string                 `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
 	Port          int32                  `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
 	User          string                 `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`
-	BasePath      string                 `protobuf:"bytes,4,opt,name=base_path,json=basePath,proto3" json:"base_path,omitempty"` // Password/key passed via K8s Secret.
+	BasePath      string                 `protobuf:"bytes,4,opt,name=base_path,json=basePath,proto3" json:"base_path,omitempty"`
+	Password      string                 `protobuf:"bytes,5,opt,name=password,proto3" json:"password,omitempty"` // written to K8s Secret on satellite
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -499,6 +532,13 @@ func (x *SFTPDestination) GetBasePath() string {
 	return ""
 }
 
+func (x *SFTPDestination) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
 type LocalDestination struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Size          string                 `protobuf:"bytes,1,opt,name=size,proto3" json:"size,omitempty"`
@@ -552,12 +592,13 @@ func (x *LocalDestination) GetStorageClass() string {
 }
 
 type BackupRetention struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	BaseBackupCount    int32                  `protobuf:"varint,1,opt,name=base_backup_count,json=baseBackupCount,proto3" json:"base_backup_count,omitempty"`
-	WalRetentionDays   int32                  `protobuf:"varint,2,opt,name=wal_retention_days,json=walRetentionDays,proto3" json:"wal_retention_days,omitempty"`
-	LogicalBackupCount int32                  `protobuf:"varint,3,opt,name=logical_backup_count,json=logicalBackupCount,proto3" json:"logical_backup_count,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	BaseBackupCount        int32                  `protobuf:"varint,1,opt,name=base_backup_count,json=baseBackupCount,proto3" json:"base_backup_count,omitempty"`
+	WalRetentionDays       int32                  `protobuf:"varint,2,opt,name=wal_retention_days,json=walRetentionDays,proto3" json:"wal_retention_days,omitempty"`
+	LogicalBackupCount     int32                  `protobuf:"varint,3,opt,name=logical_backup_count,json=logicalBackupCount,proto3" json:"logical_backup_count,omitempty"`
+	IncrementalBackupCount int32                  `protobuf:"varint,4,opt,name=incremental_backup_count,json=incrementalBackupCount,proto3" json:"incremental_backup_count,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *BackupRetention) Reset() {
@@ -611,24 +652,31 @@ func (x *BackupRetention) GetLogicalBackupCount() int32 {
 	return 0
 }
 
+func (x *BackupRetention) GetIncrementalBackupCount() int32 {
+	if x != nil {
+		return x.IncrementalBackupCount
+	}
+	return 0
+}
+
 // BackupStatusReport is sent from satellite to central after a backup completes or fails.
 type BackupStatusReport struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	BackupRuleId  string                 `protobuf:"bytes,3,opt,name=backup_rule_id,json=backupRuleId,proto3" json:"backup_rule_id,omitempty"`
-	BackupType    string                 `protobuf:"bytes,4,opt,name=backup_type,json=backupType,proto3" json:"backup_type,omitempty"` // "base", "wal", "logical"
-	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                           // "completed", "failed"
-	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	CompletedAt   *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
-	SizeBytes     int64                  `protobuf:"varint,8,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	BackupPath    string                 `protobuf:"bytes,9,opt,name=backup_path,json=backupPath,proto3" json:"backup_path,omitempty"`
-	PgVersion     string                 `protobuf:"bytes,10,opt,name=pg_version,json=pgVersion,proto3" json:"pg_version,omitempty"`
-	WalStartLsn   string                 `protobuf:"bytes,11,opt,name=wal_start_lsn,json=walStartLsn,proto3" json:"wal_start_lsn,omitempty"`
-	WalEndLsn     string                 `protobuf:"bytes,12,opt,name=wal_end_lsn,json=walEndLsn,proto3" json:"wal_end_lsn,omitempty"`
-	ErrorMessage  string                 `protobuf:"bytes,13,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName     string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	Namespace       string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	BackupProfileId string                 `protobuf:"bytes,3,opt,name=backup_profile_id,json=backupProfileId,proto3" json:"backup_profile_id,omitempty"`
+	BackupType      string                 `protobuf:"bytes,4,opt,name=backup_type,json=backupType,proto3" json:"backup_type,omitempty"` // "base", "wal", "logical"
+	Status          string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                           // "completed", "failed"
+	StartedAt       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	CompletedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	SizeBytes       int64                  `protobuf:"varint,8,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	BackupPath      string                 `protobuf:"bytes,9,opt,name=backup_path,json=backupPath,proto3" json:"backup_path,omitempty"`
+	PgVersion       string                 `protobuf:"bytes,10,opt,name=pg_version,json=pgVersion,proto3" json:"pg_version,omitempty"`
+	WalStartLsn     string                 `protobuf:"bytes,11,opt,name=wal_start_lsn,json=walStartLsn,proto3" json:"wal_start_lsn,omitempty"`
+	WalEndLsn       string                 `protobuf:"bytes,12,opt,name=wal_end_lsn,json=walEndLsn,proto3" json:"wal_end_lsn,omitempty"`
+	ErrorMessage    string                 `protobuf:"bytes,13,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *BackupStatusReport) Reset() {
@@ -675,9 +723,9 @@ func (x *BackupStatusReport) GetNamespace() string {
 	return ""
 }
 
-func (x *BackupStatusReport) GetBackupRuleId() string {
+func (x *BackupStatusReport) GetBackupProfileId() string {
 	if x != nil {
-		return x.BackupRuleId
+		return x.BackupProfileId
 	}
 	return ""
 }
@@ -943,18 +991,19 @@ var File_backup_proto protoreflect.FileDescriptor
 const file_backup_proto_rawDesc = "" +
 	"\n" +
 	"\fbackup.proto\x12\n" +
-	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcc\x02\n" +
+	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd2\x02\n" +
 	"\fBackupConfig\x12<\n" +
 	"\bphysical\x18\x01 \x01(\v2 .pgswarm.v1.PhysicalBackupConfigR\bphysical\x129\n" +
 	"\alogical\x18\x02 \x01(\v2\x1f.pgswarm.v1.LogicalBackupConfigR\alogical\x12?\n" +
 	"\vdestination\x18\x03 \x01(\v2\x1d.pgswarm.v1.BackupDestinationR\vdestination\x129\n" +
 	"\tretention\x18\x04 \x01(\v2\x1b.pgswarm.v1.BackupRetentionR\tretention\x12!\n" +
-	"\fbackup_image\x18\x05 \x01(\tR\vbackupImage\x12$\n" +
-	"\x0ebackup_rule_id\x18\x06 \x01(\tR\fbackupRuleId\"\xa3\x01\n" +
+	"\fbackup_image\x18\x05 \x01(\tR\vbackupImage\x12*\n" +
+	"\x11backup_profile_id\x18\x06 \x01(\tR\x0fbackupProfileId\"\xd6\x01\n" +
 	"\x14PhysicalBackupConfig\x12#\n" +
 	"\rbase_schedule\x18\x01 \x01(\tR\fbaseSchedule\x12.\n" +
 	"\x13wal_archive_enabled\x18\x02 \x01(\bR\x11walArchiveEnabled\x126\n" +
-	"\x17archive_timeout_seconds\x18\x03 \x01(\x05R\x15archiveTimeoutSeconds\"g\n" +
+	"\x17archive_timeout_seconds\x18\x03 \x01(\x05R\x15archiveTimeoutSeconds\x121\n" +
+	"\x14incremental_schedule\x18\x04 \x01(\tR\x13incrementalSchedule\"g\n" +
 	"\x13LogicalBackupConfig\x12\x1a\n" +
 	"\bschedule\x18\x01 \x01(\tR\bschedule\x12\x1c\n" +
 	"\tdatabases\x18\x02 \x03(\tR\tdatabases\x12\x16\n" +
@@ -964,34 +1013,39 @@ const file_backup_proto_rawDesc = "" +
 	"\x02s3\x18\x02 \x01(\v2\x19.pgswarm.v1.S3DestinationR\x02s3\x12,\n" +
 	"\x03gcs\x18\x03 \x01(\v2\x1a.pgswarm.v1.GCSDestinationR\x03gcs\x12/\n" +
 	"\x04sftp\x18\x04 \x01(\v2\x1b.pgswarm.v1.SFTPDestinationR\x04sftp\x122\n" +
-	"\x05local\x18\x05 \x01(\v2\x1c.pgswarm.v1.LocalDestinationR\x05local\"\xa6\x01\n" +
+	"\x05local\x18\x05 \x01(\v2\x1c.pgswarm.v1.LocalDestinationR\x05local\"\xf6\x01\n" +
 	"\rS3Destination\x12\x16\n" +
 	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1a\n" +
 	"\bendpoint\x18\x03 \x01(\tR\bendpoint\x12\x1f\n" +
 	"\vpath_prefix\x18\x04 \x01(\tR\n" +
 	"pathPrefix\x12(\n" +
-	"\x10force_path_style\x18\x05 \x01(\bR\x0eforcePathStyle\"I\n" +
+	"\x10force_path_style\x18\x05 \x01(\bR\x0eforcePathStyle\x12\"\n" +
+	"\raccess_key_id\x18\x06 \x01(\tR\vaccessKeyId\x12*\n" +
+	"\x11secret_access_key\x18\a \x01(\tR\x0fsecretAccessKey\"{\n" +
 	"\x0eGCSDestination\x12\x16\n" +
 	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x1f\n" +
 	"\vpath_prefix\x18\x02 \x01(\tR\n" +
-	"pathPrefix\"j\n" +
+	"pathPrefix\x120\n" +
+	"\x14service_account_json\x18\x03 \x01(\tR\x12serviceAccountJson\"\x86\x01\n" +
 	"\x0fSFTPDestination\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\x05R\x04port\x12\x12\n" +
 	"\x04user\x18\x03 \x01(\tR\x04user\x12\x1b\n" +
-	"\tbase_path\x18\x04 \x01(\tR\bbasePath\"K\n" +
+	"\tbase_path\x18\x04 \x01(\tR\bbasePath\x12\x1a\n" +
+	"\bpassword\x18\x05 \x01(\tR\bpassword\"K\n" +
 	"\x10LocalDestination\x12\x12\n" +
 	"\x04size\x18\x01 \x01(\tR\x04size\x12#\n" +
-	"\rstorage_class\x18\x02 \x01(\tR\fstorageClass\"\x9d\x01\n" +
+	"\rstorage_class\x18\x02 \x01(\tR\fstorageClass\"\xd7\x01\n" +
 	"\x0fBackupRetention\x12*\n" +
 	"\x11base_backup_count\x18\x01 \x01(\x05R\x0fbaseBackupCount\x12,\n" +
 	"\x12wal_retention_days\x18\x02 \x01(\x05R\x10walRetentionDays\x120\n" +
-	"\x14logical_backup_count\x18\x03 \x01(\x05R\x12logicalBackupCount\"\xf6\x03\n" +
+	"\x14logical_backup_count\x18\x03 \x01(\x05R\x12logicalBackupCount\x128\n" +
+	"\x18incremental_backup_count\x18\x04 \x01(\x05R\x16incrementalBackupCount\"\xfc\x03\n" +
 	"\x12BackupStatusReport\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
-	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12$\n" +
-	"\x0ebackup_rule_id\x18\x03 \x01(\tR\fbackupRuleId\x12\x1f\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12*\n" +
+	"\x11backup_profile_id\x18\x03 \x01(\tR\x0fbackupProfileId\x12\x1f\n" +
 	"\vbackup_type\x18\x04 \x01(\tR\n" +
 	"backupType\x12\x16\n" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x129\n" +

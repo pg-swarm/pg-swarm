@@ -12,7 +12,7 @@ const NAV = [
   { to: '/satellites',        label: 'Satellites',        icon: Satellite },
   { to: '/profiles',          label: 'Profiles',          icon: Boxes },
   { to: '/deployment-rules',  label: 'Deployment Rules',  icon: GitBranch },
-  { to: '/backup-rules',     label: 'Backup Rules',      icon: Archive },
+  { to: '/backup-profiles',     label: 'Backup Profiles',      icon: Archive },
   { to: '/clusters',          label: 'Clusters',          icon: Database },
   { to: '/events',            label: 'Events',            icon: Activity },
   { to: '/admin',             label: 'Admin',             icon: Settings },
@@ -44,12 +44,8 @@ export default function Layout() {
     <>
       <header className="topbar">
         <div className="brand">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <ellipse cx="12" cy="5" rx="9" ry="3"/>
-            <path d="M3 5V19C3 20.5 7 22 12 22S21 20.5 21 19V5"/>
-            <path d="M3 12C3 13.5 7 15 12 15S21 13.5 21 12"/>
-          </svg>
-          pg-swarm
+          <img src="/favicon.svg" alt="pg-swarm" width="26" height="26" />
+          PG-Swarm
         </div>
         <div className="topbar-right">
           <StatusDot satellites={satellites} />

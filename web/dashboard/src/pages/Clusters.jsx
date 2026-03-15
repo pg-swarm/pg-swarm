@@ -170,7 +170,7 @@ export default function Clusters() {
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState('');
 
-  useEffect(() => { document.title = 'Clusters - pg-swarm'; }, []);
+  useEffect(() => { document.title = 'Clusters - PG-Swarm'; }, []);
 
   if (clusters.length === 0) {
     return (

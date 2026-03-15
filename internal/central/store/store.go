@@ -63,15 +63,15 @@ type Store interface {
 	CreatePostgresVariant(ctx context.Context, v *models.PostgresVariant) error
 	DeletePostgresVariant(ctx context.Context, id uuid.UUID) error
 
-	// Backup Rules
-	CreateBackupRule(ctx context.Context, rule *models.BackupRule) error
-	GetBackupRule(ctx context.Context, id uuid.UUID) (*models.BackupRule, error)
-	ListBackupRules(ctx context.Context) ([]*models.BackupRule, error)
-	UpdateBackupRule(ctx context.Context, rule *models.BackupRule) error
-	DeleteBackupRule(ctx context.Context, id uuid.UUID) error
-	AttachBackupRuleToProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error
-	DetachBackupRuleFromProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error
-	ListBackupRulesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupRule, error)
+	// Backup Profiles
+	CreateBackupProfile(ctx context.Context, rule *models.BackupProfile) error
+	GetBackupProfile(ctx context.Context, id uuid.UUID) (*models.BackupProfile, error)
+	ListBackupProfiles(ctx context.Context) ([]*models.BackupProfile, error)
+	UpdateBackupProfile(ctx context.Context, rule *models.BackupProfile) error
+	DeleteBackupProfile(ctx context.Context, id uuid.UUID) error
+	AttachBackupProfileToProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
+	DetachBackupProfileFromProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
+	ListBackupProfilesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupProfile, error)
 
 	// Backup Inventory
 	CreateBackupInventory(ctx context.Context, inv *models.BackupInventory) error
