@@ -1056,5 +1056,341 @@ func (s *PostgresStore) ListEventsByCluster(ctx context.Context, satelliteID uui
 	return result, rows.Err()
 }
 
+// ---------- Backup Rules ----------
+
+const backupRuleCols = `id, name, description, config, created_at, updated_at`
+
+func scanBackupRule(row pgx.Row) (*models.BackupRule, error) {
+	var r models.BackupRule
+	err := row.Scan(&r.ID, &r.Name, &r.Description, &r.Config, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if r.Config == nil {
+		r.Config = json.RawMessage("{}")
+	}
+	return &r, nil
+}
+
+// CreateBackupRule inserts a new backup rule.
+func (s *PostgresStore) CreateBackupRule(ctx context.Context, rule *models.BackupRule) error {
+	if rule.ID == uuid.Nil {
+		rule.ID = uuid.New()
+	}
+	if rule.Config == nil {
+		rule.Config = json.RawMessage("{}")
+	}
+	now := time.Now()
+	rule.CreatedAt = now
+	rule.UpdatedAt = now
+
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO backup_rules (id, name, description, config, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		rule.ID, rule.Name, rule.Description, rule.Config, rule.CreatedAt, rule.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create backup rule: %w", err)
+	}
+	return nil
+}
+
+// GetBackupRule returns a backup rule by its ID.
+func (s *PostgresStore) GetBackupRule(ctx context.Context, id uuid.UUID) (*models.BackupRule, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+backupRuleCols+` FROM backup_rules WHERE id = $1`, id)
+	r, err := scanBackupRule(row)
+	if err != nil {
+		return nil, fmt.Errorf("get backup rule %s: %w", id, err)
+	}
+	return r, nil
+}
+
+// ListBackupRules returns all backup rules ordered by creation time.
+func (s *PostgresStore) ListBackupRules(ctx context.Context) ([]*models.BackupRule, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+backupRuleCols+` FROM backup_rules ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list backup rules: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.BackupRule
+	for rows.Next() {
+		r, err := scanBackupRule(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan backup rule row: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// UpdateBackupRule updates a backup rule.
+func (s *PostgresStore) UpdateBackupRule(ctx context.Context, rule *models.BackupRule) error {
+	if rule.Config == nil {
+		rule.Config = json.RawMessage("{}")
+	}
+	rule.UpdatedAt = time.Now()
+
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE backup_rules SET name = $1, description = $2, config = $3, updated_at = $4
+		 WHERE id = $5`,
+		rule.Name, rule.Description, rule.Config, rule.UpdatedAt, rule.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update backup rule: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("backup rule %s not found", rule.ID)
+	}
+	return nil
+}
+
+// DeleteBackupRule removes a backup rule by its ID.
+func (s *PostgresStore) DeleteBackupRule(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM backup_rules WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete backup rule: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("backup rule %s not found", id)
+	}
+	return nil
+}
+
+// AttachBackupRuleToProfile links a backup rule to a profile via the join table.
+func (s *PostgresStore) AttachBackupRuleToProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO profile_backup_rules (profile_id, backup_rule_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		profileID, backupRuleID,
+	)
+	if err != nil {
+		return fmt.Errorf("attach backup rule to profile: %w", err)
+	}
+	return nil
+}
+
+// DetachBackupRuleFromProfile removes a backup rule from a profile.
+func (s *PostgresStore) DetachBackupRuleFromProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM profile_backup_rules WHERE profile_id = $1 AND backup_rule_id = $2`,
+		profileID, backupRuleID,
+	)
+	if err != nil {
+		return fmt.Errorf("detach backup rule from profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("backup rule %s not attached to profile %s", backupRuleID, profileID)
+	}
+	return nil
+}
+
+// ListBackupRulesForProfile returns all backup rules attached to a profile.
+func (s *PostgresStore) ListBackupRulesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupRule, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+backupRuleCols+` FROM backup_rules
+		 WHERE id IN (SELECT backup_rule_id FROM profile_backup_rules WHERE profile_id = $1)
+		 ORDER BY created_at DESC`, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("list backup rules for profile: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.BackupRule
+	for rows.Next() {
+		r, err := scanBackupRule(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan backup rule row: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// ---------- Backup Inventory ----------
+
+const backupInvCols = `id, satellite_id, cluster_name, backup_rule_id, backup_type, status, started_at, completed_at, size_bytes, backup_path, pg_version, wal_start_lsn, wal_end_lsn, error_message, created_at`
+
+func scanBackupInventory(row pgx.Row) (*models.BackupInventory, error) {
+	var inv models.BackupInventory
+	err := row.Scan(
+		&inv.ID, &inv.SatelliteID, &inv.ClusterName, &inv.BackupRuleID,
+		&inv.BackupType, &inv.Status, &inv.StartedAt, &inv.CompletedAt,
+		&inv.SizeBytes, &inv.BackupPath, &inv.PgVersion,
+		&inv.WalStartLSN, &inv.WalEndLSN, &inv.ErrorMessage, &inv.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &inv, nil
+}
+
+// CreateBackupInventory inserts a new backup inventory record.
+func (s *PostgresStore) CreateBackupInventory(ctx context.Context, inv *models.BackupInventory) error {
+	if inv.ID == uuid.Nil {
+		inv.ID = uuid.New()
+	}
+	if inv.Status == "" {
+		inv.Status = "running"
+	}
+	now := time.Now()
+	if inv.StartedAt.IsZero() {
+		inv.StartedAt = now
+	}
+	inv.CreatedAt = now
+
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO backup_inventory (id, satellite_id, cluster_name, backup_rule_id, backup_type, status, started_at, completed_at, size_bytes, backup_path, pg_version, wal_start_lsn, wal_end_lsn, error_message, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+		inv.ID, inv.SatelliteID, inv.ClusterName, inv.BackupRuleID,
+		inv.BackupType, inv.Status, inv.StartedAt, inv.CompletedAt,
+		inv.SizeBytes, inv.BackupPath, inv.PgVersion,
+		inv.WalStartLSN, inv.WalEndLSN, inv.ErrorMessage, inv.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create backup inventory: %w", err)
+	}
+	return nil
+}
+
+// UpdateBackupInventory updates an existing backup inventory record.
+func (s *PostgresStore) UpdateBackupInventory(ctx context.Context, inv *models.BackupInventory) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE backup_inventory SET status = $1, completed_at = $2, size_bytes = $3, backup_path = $4,
+		 pg_version = $5, wal_start_lsn = $6, wal_end_lsn = $7, error_message = $8
+		 WHERE id = $9`,
+		inv.Status, inv.CompletedAt, inv.SizeBytes, inv.BackupPath,
+		inv.PgVersion, inv.WalStartLSN, inv.WalEndLSN, inv.ErrorMessage, inv.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update backup inventory: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("backup inventory %s not found", inv.ID)
+	}
+	return nil
+}
+
+// ListBackupInventory returns backup records for a satellite cluster.
+func (s *PostgresStore) ListBackupInventory(ctx context.Context, satelliteID uuid.UUID, clusterName string) ([]*models.BackupInventory, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+backupInvCols+` FROM backup_inventory
+		 WHERE satellite_id = $1 AND cluster_name = $2
+		 ORDER BY started_at DESC`,
+		satelliteID, clusterName)
+	if err != nil {
+		return nil, fmt.Errorf("list backup inventory: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.BackupInventory
+	for rows.Next() {
+		inv, err := scanBackupInventory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan backup inventory row: %w", err)
+		}
+		result = append(result, inv)
+	}
+	return result, rows.Err()
+}
+
+// GetBackupInventory returns a backup inventory record by its ID.
+func (s *PostgresStore) GetBackupInventory(ctx context.Context, id uuid.UUID) (*models.BackupInventory, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+backupInvCols+` FROM backup_inventory WHERE id = $1`, id)
+	inv, err := scanBackupInventory(row)
+	if err != nil {
+		return nil, fmt.Errorf("get backup inventory %s: %w", id, err)
+	}
+	return inv, nil
+}
+
+// ---------- Restore Operations ----------
+
+const restoreOpCols = `id, satellite_id, cluster_name, backup_id, restore_type, target_time, target_database, status, error_message, started_at, completed_at, created_at`
+
+func scanRestoreOperation(row pgx.Row) (*models.RestoreOperation, error) {
+	var op models.RestoreOperation
+	err := row.Scan(
+		&op.ID, &op.SatelliteID, &op.ClusterName, &op.BackupID,
+		&op.RestoreType, &op.TargetTime, &op.TargetDatabase,
+		&op.Status, &op.ErrorMessage, &op.StartedAt, &op.CompletedAt, &op.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &op, nil
+}
+
+// CreateRestoreOperation inserts a new restore operation record.
+func (s *PostgresStore) CreateRestoreOperation(ctx context.Context, op *models.RestoreOperation) error {
+	if op.ID == uuid.Nil {
+		op.ID = uuid.New()
+	}
+	if op.Status == "" {
+		op.Status = "pending"
+	}
+	op.CreatedAt = time.Now()
+
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO restore_operations (id, satellite_id, cluster_name, backup_id, restore_type, target_time, target_database, status, error_message, started_at, completed_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		op.ID, op.SatelliteID, op.ClusterName, op.BackupID,
+		op.RestoreType, op.TargetTime, op.TargetDatabase,
+		op.Status, op.ErrorMessage, op.StartedAt, op.CompletedAt, op.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create restore operation: %w", err)
+	}
+	return nil
+}
+
+// UpdateRestoreOperation updates an existing restore operation.
+func (s *PostgresStore) UpdateRestoreOperation(ctx context.Context, op *models.RestoreOperation) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE restore_operations SET status = $1, error_message = $2, started_at = $3, completed_at = $4
+		 WHERE id = $5`,
+		op.Status, op.ErrorMessage, op.StartedAt, op.CompletedAt, op.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update restore operation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("restore operation %s not found", op.ID)
+	}
+	return nil
+}
+
+// GetRestoreOperation returns a restore operation by its ID.
+func (s *PostgresStore) GetRestoreOperation(ctx context.Context, id uuid.UUID) (*models.RestoreOperation, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+restoreOpCols+` FROM restore_operations WHERE id = $1`, id)
+	op, err := scanRestoreOperation(row)
+	if err != nil {
+		return nil, fmt.Errorf("get restore operation %s: %w", id, err)
+	}
+	return op, nil
+}
+
+// ListRestoreOperations returns restore operations for a satellite cluster.
+func (s *PostgresStore) ListRestoreOperations(ctx context.Context, satelliteID uuid.UUID, clusterName string) ([]*models.RestoreOperation, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+restoreOpCols+` FROM restore_operations
+		 WHERE satellite_id = $1 AND cluster_name = $2
+		 ORDER BY created_at DESC`,
+		satelliteID, clusterName)
+	if err != nil {
+		return nil, fmt.Errorf("list restore operations: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.RestoreOperation
+	for rows.Next() {
+		op, err := scanRestoreOperation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan restore operation row: %w", err)
+		}
+		result = append(result, op)
+	}
+	return result, rows.Err()
+}
+
 // Compile-time check that PostgresStore implements Store.
 var _ Store = (*PostgresStore)(nil)

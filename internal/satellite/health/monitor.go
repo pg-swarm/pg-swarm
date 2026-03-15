@@ -25,24 +25,27 @@ const clusterStartGrace = 10 * time.Minute
 
 // Monitor periodically checks the health of all managed PostgreSQL clusters.
 type Monitor struct {
-	client     kubernetes.Interface
-	operator   *operator.Operator
-	onHealth   func(*pgswarmv1.ClusterHealthReport)
-	onEvent    func(*pgswarmv1.EventReport)
-	interval   time.Duration
-	lastStates map[string]pgswarmv1.ClusterState
-	mu         sync.Mutex
-	firstSeen  map[string]time.Time // tracks when each cluster was first observed
+	client       kubernetes.Interface
+	operator     *operator.Operator
+	onHealth     func(*pgswarmv1.ClusterHealthReport)
+	onEvent      func(*pgswarmv1.EventReport)
+	onBackup     func(*pgswarmv1.BackupStatusReport)
+	interval     time.Duration
+	lastStates   map[string]pgswarmv1.ClusterState
+	mu           sync.Mutex
+	firstSeen    map[string]time.Time // tracks when each cluster was first observed
+	lastBackupCM map[string]string    // tracks last-seen backup status ConfigMap resourceVersion
 }
 
 // New creates a new health Monitor.
 func New(client kubernetes.Interface, op *operator.Operator, interval time.Duration) *Monitor {
 	return &Monitor{
-		client:     client,
-		operator:   op,
-		interval:   interval,
-		lastStates: make(map[string]pgswarmv1.ClusterState),
-		firstSeen:  make(map[string]time.Time),
+		client:       client,
+		operator:     op,
+		interval:     interval,
+		lastStates:   make(map[string]pgswarmv1.ClusterState),
+		firstSeen:    make(map[string]time.Time),
+		lastBackupCM: make(map[string]string),
 	}
 }
 
@@ -54,6 +57,11 @@ func (m *Monitor) SetOnHealth(fn func(*pgswarmv1.ClusterHealthReport)) {
 // SetOnEvent sets the callback for event reports.
 func (m *Monitor) SetOnEvent(fn func(*pgswarmv1.EventReport)) {
 	m.onEvent = fn
+}
+
+// SetOnBackup sets the callback for backup status reports.
+func (m *Monitor) SetOnBackup(fn func(*pgswarmv1.BackupStatusReport)) {
+	m.onBackup = fn
 }
 
 // Run starts the health check loop. It blocks until ctx is cancelled.
@@ -127,6 +135,46 @@ func (m *Monitor) checkAll(ctx context.Context) {
 			}
 		}
 		m.lastStates[key] = r.report.State
+	}
+
+	// Check for backup status ConfigMap updates
+	if m.onBackup != nil {
+		m.checkBackupStatuses(ctx, clusters)
+	}
+}
+
+// checkBackupStatuses looks for backup-status ConfigMaps and reports new completions.
+func (m *Monitor) checkBackupStatuses(ctx context.Context, clusters []operator.ManagedCluster) {
+	for _, mc := range clusters {
+		cmName := mc.ClusterName + "-backup-status"
+		cm, err := m.client.CoreV1().ConfigMaps(mc.Namespace).Get(ctx, cmName, metav1.GetOptions{})
+		if err != nil {
+			continue // no backup status ConfigMap = no backup running
+		}
+
+		key := mc.Namespace + "/" + cmName
+		if cm.ResourceVersion == m.lastBackupCM[key] {
+			continue // no change since last check
+		}
+		m.lastBackupCM[key] = cm.ResourceVersion
+
+		report := &pgswarmv1.BackupStatusReport{
+			ClusterName:  mc.ClusterName,
+			Namespace:    mc.Namespace,
+			BackupType:   cm.Data["backup_type"],
+			Status:       cm.Data["status"],
+			BackupPath:   cm.Data["backup_path"],
+			ErrorMessage: cm.Data["error_message"],
+		}
+
+		if t, err := time.Parse(time.RFC3339, cm.Data["started_at"]); err == nil {
+			report.StartedAt = timestamppb.New(t)
+		}
+		if t, err := time.Parse(time.RFC3339, cm.Data["completed_at"]); err == nil {
+			report.CompletedAt = timestamppb.New(t)
+		}
+
+		m.onBackup(report)
 	}
 }
 

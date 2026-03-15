@@ -45,6 +45,21 @@ export const api = {
   deletePostgresVariant: (id) => request('/postgres-variants/' + id, { method: 'DELETE' }),
   satelliteLogs: (id, limit, level) => request('/satellites/' + id + '/logs?limit=' + (limit || 200) + '&level=' + (level || 'info')),
   setSatelliteLogLevel: (id, level) => request('/satellites/' + id + '/log-level', { method: 'POST', body: JSON.stringify({ level }) }),
+
+  // Backup Rules
+  backupRules:        ()           => request('/backup-rules'),
+  createBackupRule:   (data)       => request('/backup-rules', { method: 'POST', body: JSON.stringify(data) }),
+  getBackupRule:      (id)         => request('/backup-rules/' + id),
+  updateBackupRule:   (id, data)   => request('/backup-rules/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteBackupRule:   (id)         => request('/backup-rules/' + id, { method: 'DELETE' }),
+  attachBackupRule:   (profileId, backupRuleId) => request('/profiles/' + profileId + '/attach-backup-rule', { method: 'POST', body: JSON.stringify({ backup_rule_id: backupRuleId }) }),
+  detachBackupRule:   (profileId, backupRuleId) => request('/profiles/' + profileId + '/detach-backup-rule', { method: 'POST', body: JSON.stringify({ backup_rule_id: backupRuleId }) }),
+
+  // Backup Inventory & Restore
+  clusterBackups:     (id)         => request('/clusters/' + id + '/backups'),
+  getBackup:          (id)         => request('/backups/' + id),
+  initiateRestore:    (clusterId, data) => request('/clusters/' + clusterId + '/restore', { method: 'POST', body: JSON.stringify(data) }),
+  clusterRestores:    (id)         => request('/clusters/' + id + '/restores'),
 };
 
 export function subscribeSatelliteLogs(satelliteId, onEntry, onError) {

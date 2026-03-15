@@ -23,6 +23,7 @@ type Connector struct {
 	OnStorageClassRequest func() *pgswarmv1.StorageClassReport
 	OnSwitchover          func(*pgswarmv1.SwitchoverRequest) *pgswarmv1.SwitchoverResult
 	OnSetLogLevel         func(string)
+	OnRestoreCommand      func(*pgswarmv1.RestoreCommand)
 }
 
 // NewConnector creates a new stream Connector targeting the given central
@@ -143,6 +144,15 @@ func (c *Connector) connect(ctx context.Context) error {
 			log.Info().Str("level", payload.SetLogLevel.Level).Msg("log level change requested by central")
 			if c.OnSetLogLevel != nil {
 				c.OnSetLogLevel(payload.SetLogLevel.Level)
+			}
+		case *pgswarmv1.CentralMessage_RestoreCommand:
+			log.Info().
+				Str("cluster", payload.RestoreCommand.ClusterName).
+				Str("restore_id", payload.RestoreCommand.RestoreId).
+				Str("type", payload.RestoreCommand.RestoreType).
+				Msg("restore command received from central")
+			if c.OnRestoreCommand != nil {
+				c.OnRestoreCommand(payload.RestoreCommand)
 			}
 		}
 	}

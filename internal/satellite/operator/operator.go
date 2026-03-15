@@ -185,6 +185,10 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 		log.Warn().Err(err).Str("resource", "configmap/"+cfgStoreName).Msg("delete failed")
 	}
 
+	// Delete backup CronJobs and credential Secret
+	log.Trace().Msg("HandleDelete cleaning up backup resources")
+	cleanupBackupCronJobs(ctx, o.client, ns, name)
+
 	// Remove finalizers from PVCs and delete them
 	removeFinalizedPVCs(ctx, o.client, ns, name)
 
@@ -350,6 +354,28 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	log.Trace().Msg("reconcile: labeling pods")
 	if err := labelPods(ctx, o.client, cfg.Namespace, cfg.ClusterName); err != nil {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to label pods (will retry on next reconcile)")
+	}
+
+	// 10. Backup CronJobs
+	if backupEnabled(cfg) {
+		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup credential secrets")
+		for _, backup := range cfg.Backups {
+			backupSecret := buildBackupCredentialSecret(cfg, backup)
+			if backupSecret != nil {
+				if err := createOrPreserveSecret(ctx, o.client, backupSecret); err != nil {
+					return fmt.Errorf("backup credential secret: %w", err)
+				}
+			}
+		}
+
+		log.Trace().Msg("reconcile: reconciling backup cronjobs")
+		if err := reconcileBackupCronJobs(ctx, o.client, cfg); err != nil {
+			return fmt.Errorf("backup cronjobs: %w", err)
+		}
+	} else {
+		// Cleanup backup resources if backup was detached
+		log.Trace().Msg("reconcile: cleaning up backup cronjobs (backup disabled)")
+		cleanupBackupCronJobs(ctx, o.client, cfg.Namespace, cfg.ClusterName)
 	}
 
 	return nil

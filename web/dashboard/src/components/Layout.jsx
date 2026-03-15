@@ -4,7 +4,7 @@ import { useTheme } from '../context/ThemeContext';
 import { deriveSatState } from '../api';
 import {
   LayoutDashboard, Satellite, Boxes, GitBranch, Database,
-  Activity, Settings, RefreshCw, Sun, Moon, Monitor
+  Activity, Settings, RefreshCw, Sun, Moon, Monitor, Archive
 } from 'lucide-react';
 
 const NAV = [
@@ -12,6 +12,7 @@ const NAV = [
   { to: '/satellites',        label: 'Satellites',        icon: Satellite },
   { to: '/profiles',          label: 'Profiles',          icon: Boxes },
   { to: '/deployment-rules',  label: 'Deployment Rules',  icon: GitBranch },
+  { to: '/backup-rules',     label: 'Backup Rules',      icon: Archive },
   { to: '/clusters',          label: 'Clusters',          icon: Database },
   { to: '/events',            label: 'Events',            icon: Activity },
   { to: '/admin',             label: 'Admin',             icon: Settings },

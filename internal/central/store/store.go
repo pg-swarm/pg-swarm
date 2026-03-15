@@ -63,6 +63,28 @@ type Store interface {
 	CreatePostgresVariant(ctx context.Context, v *models.PostgresVariant) error
 	DeletePostgresVariant(ctx context.Context, id uuid.UUID) error
 
+	// Backup Rules
+	CreateBackupRule(ctx context.Context, rule *models.BackupRule) error
+	GetBackupRule(ctx context.Context, id uuid.UUID) (*models.BackupRule, error)
+	ListBackupRules(ctx context.Context) ([]*models.BackupRule, error)
+	UpdateBackupRule(ctx context.Context, rule *models.BackupRule) error
+	DeleteBackupRule(ctx context.Context, id uuid.UUID) error
+	AttachBackupRuleToProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error
+	DetachBackupRuleFromProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error
+	ListBackupRulesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupRule, error)
+
+	// Backup Inventory
+	CreateBackupInventory(ctx context.Context, inv *models.BackupInventory) error
+	UpdateBackupInventory(ctx context.Context, inv *models.BackupInventory) error
+	ListBackupInventory(ctx context.Context, satelliteID uuid.UUID, clusterName string) ([]*models.BackupInventory, error)
+	GetBackupInventory(ctx context.Context, id uuid.UUID) (*models.BackupInventory, error)
+
+	// Restore Operations
+	CreateRestoreOperation(ctx context.Context, op *models.RestoreOperation) error
+	UpdateRestoreOperation(ctx context.Context, op *models.RestoreOperation) error
+	GetRestoreOperation(ctx context.Context, id uuid.UUID) (*models.RestoreOperation, error)
+	ListRestoreOperations(ctx context.Context, satelliteID uuid.UUID, clusterName string) ([]*models.RestoreOperation, error)
+
 	// Health
 	UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error
 	UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error
