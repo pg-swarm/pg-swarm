@@ -1570,24 +1570,18 @@ func (s *RESTServer) detachBackupProfile(c *fiber.Ctx) error {
 // rePushClustersForProfile bumps config_version and re-pushes configs for all
 // clusters linked to the given profile via deployment rules.
 func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uuid.UUID) {
-	rules, err := s.store.GetDeploymentRulesByProfile(ctx, profileID)
+	// Find all clusters using this profile (covers both manual and rule-based)
+	clusters, err := s.store.GetClusterConfigsByProfile(ctx, profileID)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to get deployment rules for profile")
+		log.Error().Err(err).Msg("failed to get clusters for profile")
 		return
 	}
-	for _, rule := range rules {
-		clusters, err := s.store.GetClusterConfigsByDeploymentRule(ctx, rule.ID)
-		if err != nil {
-			log.Error().Err(err).Str("rule_id", rule.ID.String()).Msg("failed to get clusters for rule")
+	for _, cfg := range clusters {
+		if err := s.store.UpdateClusterConfig(ctx, cfg); err != nil {
+			log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to bump config version")
 			continue
 		}
-		for _, cfg := range clusters {
-			if err := s.store.UpdateClusterConfig(ctx, cfg); err != nil {
-				log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to bump config version")
-				continue
-			}
-			s.pushConfigToSatellite(cfg)
-		}
+		s.pushConfigToSatellite(cfg)
 	}
 }
 

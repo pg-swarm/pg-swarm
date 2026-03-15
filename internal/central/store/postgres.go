@@ -498,6 +498,26 @@ func (s *PostgresStore) GetClusterConfigsBySatellite(ctx context.Context, satell
 	return result, rows.Err()
 }
 
+// GetClusterConfigsByProfile returns all cluster configurations linked to a profile (directly or via deployment rules).
+func (s *PostgresStore) GetClusterConfigsByProfile(ctx context.Context, profileID uuid.UUID) ([]*models.ClusterConfig, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+cfgCols+` FROM cluster_configs WHERE profile_id = $1 ORDER BY created_at DESC`, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("get cluster configs by profile: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.ClusterConfig
+	for rows.Next() {
+		cfg, err := scanClusterConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan cluster config row: %w", err)
+		}
+		result = append(result, cfg)
+	}
+	return result, rows.Err()
+}
+
 // ---------- Profiles ----------
 
 // CreateProfile inserts a new cluster profile.
