@@ -16,10 +16,11 @@ import (
 
 const defaultBackupImage = "ghcr.io/pg-swarm/pg-swarm-backup:latest"
 
-// backupEnabled returns true if at least one backup rule is attached.
+// backupEnabled returns true if at least one backup profile is attached.
 func backupEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return len(cfg.Backups) > 0
 }
+
 
 // backupImageForRule returns the container image for a backup CronJob.
 func backupImageForRule(backup *pgswarmv1.BackupConfig) string {
@@ -29,7 +30,7 @@ func backupImageForRule(backup *pgswarmv1.BackupConfig) string {
 	return defaultBackupImage
 }
 
-// ruleShortID returns a short prefix from a backup rule ID for K8s resource naming.
+// ruleShortID returns a short prefix from a backup profile ID for K8s resource naming.
 func ruleShortID(ruleID string) string {
 	if len(ruleID) >= 8 {
 		return ruleID[:8]
@@ -47,13 +48,35 @@ func backupStatusConfigMapName(clusterName string) string {
 	return resourceName(clusterName, "backup-status")
 }
 
-// buildBackupCredentialSecret creates a K8s Secret containing destination credentials for one backup rule.
+// buildBackupCredentialSecret creates a K8s Secret containing destination credentials for one backup profile.
 func buildBackupCredentialSecret(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig) *corev1.Secret {
 	if backup == nil || backup.Destination == nil {
 		return nil
 	}
 
-	ruleShort := ruleShortID(backup.BackupRuleId)
+	data := map[string]string{}
+	dest := backup.Destination
+	switch dest.Type {
+	case "s3":
+		if dest.S3 != nil {
+			if dest.S3.AccessKeyId != "" {
+				data["aws-access-key-id"] = dest.S3.AccessKeyId
+			}
+			if dest.S3.SecretAccessKey != "" {
+				data["aws-secret-access-key"] = dest.S3.SecretAccessKey
+			}
+		}
+	case "gcs":
+		if dest.Gcs != nil && dest.Gcs.ServiceAccountJson != "" {
+			data["service-account-json"] = dest.Gcs.ServiceAccountJson
+		}
+	case "sftp":
+		if dest.Sftp != nil && dest.Sftp.Password != "" {
+			data["sftp-password"] = dest.Sftp.Password
+		}
+	}
+
+	ruleShort := ruleShortID(backup.BackupProfileId)
 	return &corev1.Secret{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -62,21 +85,21 @@ func buildBackupCredentialSecret(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1
 			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Type:       corev1.SecretTypeOpaque,
-		StringData: map[string]string{},
+		StringData: data,
 	}
 }
 
-// buildBaseBackupCronJob creates a CronJob for pg_basebackup for one backup rule.
+// buildBaseBackupCronJob creates a CronJob for pg_basebackup for one backup profile.
 func buildBaseBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig) *batchv1.CronJob {
 	if backup == nil || backup.Physical == nil || backup.Physical.BaseSchedule == "" {
 		return nil
 	}
 
-	ruleShort := ruleShortID(backup.BackupRuleId)
+	ruleShort := ruleShortID(backup.BackupProfileId)
 	secretName := resourceName(cfg.ClusterName, "secret")
 	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	labels["pg-swarm/backup-type"] = "base"
-	labels["pg-swarm/backup-rule"] = ruleShort
+	labels["pg-swarm/backup-profile"] = ruleShort
 
 	env := backupEnvVars(cfg, backup, secretName)
 	script := baseBackupScript(backup.Destination)
@@ -115,17 +138,17 @@ func buildBaseBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.Back
 	}
 }
 
-// buildLogicalBackupCronJob creates a CronJob for pg_dump/pg_dumpall for one backup rule.
+// buildLogicalBackupCronJob creates a CronJob for pg_dump/pg_dumpall for one backup profile.
 func buildLogicalBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig) *batchv1.CronJob {
 	if backup == nil || backup.Logical == nil || backup.Logical.Schedule == "" {
 		return nil
 	}
 
-	ruleShort := ruleShortID(backup.BackupRuleId)
+	ruleShort := ruleShortID(backup.BackupProfileId)
 	secretName := resourceName(cfg.ClusterName, "secret")
 	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	labels["pg-swarm/backup-type"] = "logical"
-	labels["pg-swarm/backup-rule"] = ruleShort
+	labels["pg-swarm/backup-profile"] = ruleShort
 
 	env := backupEnvVars(cfg, backup, secretName)
 	script := logicalBackupScript(backup)
@@ -174,7 +197,7 @@ func pgMajorVersion(version string) string {
 
 // backupEnvVars returns common env vars for backup CronJob containers.
 func backupEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig, secretName string) []corev1.EnvVar {
-	ruleShort := ruleShortID(backup.BackupRuleId)
+	ruleShort := ruleShortID(backup.BackupProfileId)
 	rwService := resourceName(cfg.ClusterName, "rw")
 	pgMajor := "17"
 	if cfg.Postgres != nil && cfg.Postgres.Version != "" {
@@ -193,7 +216,7 @@ func backupEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig,
 		}},
 		{Name: "CLUSTER_NAME", Value: cfg.ClusterName},
 		{Name: "NAMESPACE", Value: cfg.Namespace},
-		{Name: "BACKUP_RULE_ID", Value: backup.BackupRuleId},
+		{Name: "BACKUP_RULE_ID", Value: backup.BackupProfileId},
 		{Name: "DEST_TYPE", Value: backup.Destination.Type},
 		{Name: "BACKUP_STATUS_CM", Value: backupStatusConfigMapName(cfg.ClusterName)},
 	}
@@ -233,18 +256,34 @@ func backupEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig,
 		)
 	case "gcs":
 		if dest.Gcs != nil {
+			credsSecret := backupCredentialSecretName(cfg.ClusterName, ruleShort)
 			vars = append(vars,
 				corev1.EnvVar{Name: "GCS_BUCKET", Value: dest.Gcs.Bucket},
 				corev1.EnvVar{Name: "GCS_PREFIX", Value: dest.Gcs.PathPrefix},
+				corev1.EnvVar{Name: "GOOGLE_APPLICATION_CREDENTIALS_JSON", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: credsSecret},
+						Key:                  "service-account-json",
+						Optional:             boolPtr(true),
+					},
+				}},
 			)
 		}
 	case "sftp":
 		if dest.Sftp != nil {
+			credsSecret := backupCredentialSecretName(cfg.ClusterName, ruleShort)
 			vars = append(vars,
 				corev1.EnvVar{Name: "SFTP_HOST", Value: dest.Sftp.Host},
 				corev1.EnvVar{Name: "SFTP_PORT", Value: fmt.Sprintf("%d", dest.Sftp.Port)},
 				corev1.EnvVar{Name: "SFTP_USER", Value: dest.Sftp.User},
 				corev1.EnvVar{Name: "SFTP_BASE_PATH", Value: dest.Sftp.BasePath},
+				corev1.EnvVar{Name: "SFTP_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: credsSecret},
+						Key:                  "sftp-password",
+						Optional:             boolPtr(true),
+					},
+				}},
 			)
 		}
 	case "local":
@@ -283,35 +322,91 @@ func backupWalArchiveCommand(dest *pgswarmv1.BackupDestination) string {
 	return ""
 }
 
+// downloadMetadataSnippet returns a shell snippet to download backups.db from the destination.
+func downloadMetadataSnippet(dest *pgswarmv1.BackupDestination) string {
+	if dest == nil {
+		return ""
+	}
+	switch dest.Type {
+	case "s3":
+		return "aws s3 cp \"s3://${S3_BUCKET}/${S3_PREFIX}${METADATA_REMOTE_PATH}\" \"$METADATA_DB\" ${S3_ENDPOINT:+--endpoint-url $S3_ENDPOINT} 2>/dev/null || true\n"
+	case "gcs":
+		return "gsutil cp \"gs://${GCS_BUCKET}/${GCS_PREFIX}${METADATA_REMOTE_PATH}\" \"$METADATA_DB\" 2>/dev/null || true\n"
+	case "sftp":
+		return "sftp -P ${SFTP_PORT:-22} ${SFTP_USER}@${SFTP_HOST}:${SFTP_BASE_PATH}/${METADATA_REMOTE_PATH} \"$METADATA_DB\" 2>/dev/null || true\n"
+	case "local":
+		return "cp /backup-storage/${METADATA_REMOTE_PATH} \"$METADATA_DB\" 2>/dev/null || true\n"
+	}
+	return ""
+}
+
+// uploadMetadataSnippet returns a shell snippet to upload backups.db to the destination.
+func uploadMetadataSnippet(dest *pgswarmv1.BackupDestination) string {
+	if dest == nil {
+		return ""
+	}
+	switch dest.Type {
+	case "s3":
+		return "aws s3 cp \"$METADATA_DB\" \"s3://${S3_BUCKET}/${S3_PREFIX}${METADATA_REMOTE_PATH}\" ${S3_ENDPOINT:+--endpoint-url $S3_ENDPOINT}\n"
+	case "gcs":
+		return "gsutil cp \"$METADATA_DB\" \"gs://${GCS_BUCKET}/${GCS_PREFIX}${METADATA_REMOTE_PATH}\"\n"
+	case "sftp":
+		return "sftp -P ${SFTP_PORT:-22} ${SFTP_USER}@${SFTP_HOST}:${SFTP_BASE_PATH}/${METADATA_REMOTE_PATH} <<< $'put '\"$METADATA_DB\"\n"
+	case "local":
+		return "mkdir -p /backup-storage/${CLUSTER_NAME}/metadata && cp \"$METADATA_DB\" /backup-storage/${METADATA_REMOTE_PATH}\n"
+	}
+	return ""
+}
+
+// uploadBackupSnippet returns a shell snippet to upload BACKUP_DIR to BACKUP_PATH at the destination.
+func uploadBackupSnippet(dest *pgswarmv1.BackupDestination) string {
+	if dest == nil {
+		return ""
+	}
+	switch dest.Type {
+	case "s3":
+		return "aws s3 cp \"$BACKUP_DIR\" \"s3://${S3_BUCKET}/${S3_PREFIX}${BACKUP_PATH}\" --recursive ${S3_ENDPOINT:+--endpoint-url $S3_ENDPOINT}\n"
+	case "gcs":
+		return "gsutil -m cp -r \"$BACKUP_DIR\" \"gs://${GCS_BUCKET}/${GCS_PREFIX}${BACKUP_PATH}\"\n"
+	case "sftp":
+		return "sftp -P ${SFTP_PORT:-22} ${SFTP_USER}@${SFTP_HOST}:${SFTP_BASE_PATH}/${BACKUP_PATH} <<< $'put -r '\"$BACKUP_DIR\"\n"
+	case "local":
+		return "mkdir -p /backup-storage/${BACKUP_PATH} && cp -r \"$BACKUP_DIR\"/* /backup-storage/${BACKUP_PATH}/\n"
+	}
+	return ""
+}
+
 // baseBackupScript returns the shell script for a base backup CronJob.
 func baseBackupScript(dest *pgswarmv1.BackupDestination) string {
 	var sb strings.Builder
 	sb.WriteString("set -eo pipefail\n")
 	sb.WriteString("source /usr/local/bin/pg-select-version.sh\n")
+	sb.WriteString("source /usr/local/bin/backup-metadata.sh\n")
+	sb.WriteString("BACKUP_ID=$(cat /proc/sys/kernel/random/uuid)\n")
 	sb.WriteString("TIMESTAMP=$(date +%Y%m%d_%H%M%S)\n")
 	sb.WriteString("BACKUP_DIR=/tmp/basebackup_${TIMESTAMP}\n")
+	sb.WriteString("BACKUP_PATH=\"${CLUSTER_NAME}/base/${TIMESTAMP}\"\n")
 	sb.WriteString("echo \"Starting base backup for ${CLUSTER_NAME}\"\n")
+	sb.WriteString("\n")
+	sb.WriteString("# Download metadata DB from destination\n")
+	sb.WriteString(downloadMetadataSnippet(dest))
+	sb.WriteString("init_metadata_db\n")
+	sb.WriteString("PG_VER=$(pg_basebackup --version | awk '{print $NF}')\n")
+	sb.WriteString("insert_backup \"$BACKUP_ID\" base '' \"$BACKUP_PATH\" \"$PG_VER\"\n")
+	sb.WriteString("\n")
 	sb.WriteString("pg_basebackup -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" -D \"$BACKUP_DIR\" -Ft -z -Xs -P\n")
 	sb.WriteString("BACKUP_SIZE=$(du -sb \"$BACKUP_DIR\" | cut -f1)\n")
-
-	// Upload based on destination
-	sb.WriteString("BACKUP_PATH=\"${CLUSTER_NAME}/base/${TIMESTAMP}\"\n")
-	if dest != nil {
-		switch dest.Type {
-		case "s3":
-			sb.WriteString("aws s3 cp \"$BACKUP_DIR\" \"s3://${S3_BUCKET}/${S3_PREFIX}${BACKUP_PATH}\" --recursive")
-			sb.WriteString(" ${S3_ENDPOINT:+--endpoint-url $S3_ENDPOINT}")
-			sb.WriteString(" ${S3_FORCE_PATH_STYLE:+--no-sign-request}\n")
-		case "gcs":
-			sb.WriteString("gsutil -m cp -r \"$BACKUP_DIR\" \"gs://${GCS_BUCKET}/${GCS_PREFIX}${BACKUP_PATH}\"\n")
-		case "sftp":
-			sb.WriteString("sftp -P ${SFTP_PORT:-22} ${SFTP_USER}@${SFTP_HOST}:${SFTP_BASE_PATH}/${BACKUP_PATH} <<< $'put -r '\"$BACKUP_DIR\"\n")
-		case "local":
-			sb.WriteString("mkdir -p /backup-storage/${BACKUP_PATH} && cp -r \"$BACKUP_DIR\"/* /backup-storage/${BACKUP_PATH}/\n")
-		}
-	}
-
-	// Write status to ConfigMap
+	sb.WriteString("\n")
+	sb.WriteString("# Upload backup\n")
+	sb.WriteString(uploadBackupSnippet(dest))
+	sb.WriteString("\n")
+	sb.WriteString("# Store manifest and update metadata\n")
+	sb.WriteString("if [ -f \"$BACKUP_DIR/backup_manifest\" ]; then\n")
+	sb.WriteString("  store_manifest \"$BACKUP_ID\" \"$BACKUP_DIR/backup_manifest\"\n")
+	sb.WriteString("fi\n")
+	sb.WriteString("complete_backup \"$BACKUP_ID\" \"$BACKUP_SIZE\" '' ''\n")
+	sb.WriteString(uploadMetadataSnippet(dest))
+	sb.WriteString("\n")
 	sb.WriteString("STATUS='completed'\n")
 	sb.WriteString("ERROR=''\n")
 	sb.WriteString(statusReportScript("base"))
@@ -324,9 +419,20 @@ func logicalBackupScript(backup *pgswarmv1.BackupConfig) string {
 	var sb strings.Builder
 	sb.WriteString("set -eo pipefail\n")
 	sb.WriteString("source /usr/local/bin/pg-select-version.sh\n")
+	sb.WriteString("source /usr/local/bin/backup-metadata.sh\n")
+	sb.WriteString("BACKUP_ID=$(cat /proc/sys/kernel/random/uuid)\n")
 	sb.WriteString("TIMESTAMP=$(date +%Y%m%d_%H%M%S)\n")
-	sb.WriteString("DUMP_FILE=/tmp/logical_${TIMESTAMP}.dump\n")
+	sb.WriteString("BACKUP_DIR=/tmp/logical_${TIMESTAMP}\n")
+	sb.WriteString("mkdir -p \"$BACKUP_DIR\"\n")
+	sb.WriteString("BACKUP_PATH=\"${CLUSTER_NAME}/logical/${TIMESTAMP}\"\n")
 	sb.WriteString("echo \"Starting logical backup for ${CLUSTER_NAME}\"\n")
+	sb.WriteString("\n")
+	sb.WriteString("# Download metadata DB\n")
+	sb.WriteString(downloadMetadataSnippet(backup.Destination))
+	sb.WriteString("init_metadata_db\n")
+	sb.WriteString("PG_VER=$(pg_dump --version | awk '{print $NF}')\n")
+	sb.WriteString("insert_backup \"$BACKUP_ID\" logical '' \"$BACKUP_PATH\" \"$PG_VER\"\n")
+	sb.WriteString("\n")
 
 	format := "custom"
 	if backup.Logical.Format != "" {
@@ -334,37 +440,42 @@ func logicalBackupScript(backup *pgswarmv1.BackupConfig) string {
 	}
 
 	if len(backup.Logical.Databases) == 0 {
-		sb.WriteString(fmt.Sprintf("pg_dumpall -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" -f \"$DUMP_FILE\"\n"))
+		// pg_dumpall outputs plain text — gzip it
+		sb.WriteString("pg_dumpall -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" | gzip > \"$BACKUP_DIR/dumpall.sql.gz\"\n")
 	} else {
-		// Dump each database
-		for i, db := range backup.Logical.Databases {
-			file := fmt.Sprintf("/tmp/logical_${TIMESTAMP}_%s.dump", db)
-			sb.WriteString(fmt.Sprintf("pg_dump -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" -Fc -f \"%s\" \"%s\"\n", file, db))
-			if i == 0 {
-				sb.WriteString(fmt.Sprintf("DUMP_FILE=\"%s\"\n", file))
+		formatFlag := "-Fc" // custom format (already compressed)
+		switch format {
+		case "plain":
+			formatFlag = "-Fp"
+		case "directory":
+			formatFlag = "-Fd"
+		}
+		for _, db := range backup.Logical.Databases {
+			if format == "plain" {
+				// Plain format — gzip it
+				file := fmt.Sprintf("$BACKUP_DIR/%s.sql.gz", db)
+				sb.WriteString(fmt.Sprintf("pg_dump -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" %s \"%s\" | gzip > \"%s\"\n", formatFlag, db, file))
+			} else if format == "directory" {
+				dir := fmt.Sprintf("$BACKUP_DIR/%s", db)
+				sb.WriteString(fmt.Sprintf("pg_dump -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" %s -f \"%s\" \"%s\"\n", formatFlag, dir, db))
+			} else {
+				// Custom format (built-in compression)
+				file := fmt.Sprintf("$BACKUP_DIR/%s.dump", db)
+				sb.WriteString(fmt.Sprintf("pg_dump -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" %s -f \"%s\" \"%s\"\n", formatFlag, file, db))
 			}
 		}
-		_ = format // format flag handled above in -Fc
 	}
 
-	sb.WriteString("BACKUP_SIZE=$(du -sb \"$DUMP_FILE\" | cut -f1)\n")
-	sb.WriteString("BACKUP_PATH=\"${CLUSTER_NAME}/logical/${TIMESTAMP}\"\n")
-
-	dest := backup.Destination
-	if dest != nil {
-		switch dest.Type {
-		case "s3":
-			sb.WriteString("aws s3 cp \"$DUMP_FILE\" \"s3://${S3_BUCKET}/${S3_PREFIX}${BACKUP_PATH}/\" --recursive")
-			sb.WriteString(" ${S3_ENDPOINT:+--endpoint-url $S3_ENDPOINT}\n")
-		case "gcs":
-			sb.WriteString("gsutil cp \"$DUMP_FILE\" \"gs://${GCS_BUCKET}/${GCS_PREFIX}${BACKUP_PATH}/\"\n")
-		case "sftp":
-			sb.WriteString("sftp -P ${SFTP_PORT:-22} ${SFTP_USER}@${SFTP_HOST}:${SFTP_BASE_PATH}/${BACKUP_PATH} <<< $'put '\"$DUMP_FILE\"\n")
-		case "local":
-			sb.WriteString("mkdir -p /backup-storage/${BACKUP_PATH} && cp \"$DUMP_FILE\" /backup-storage/${BACKUP_PATH}/\n")
-		}
-	}
-
+	sb.WriteString("\n")
+	sb.WriteString("BACKUP_SIZE=$(du -sb \"$BACKUP_DIR\" | cut -f1)\n")
+	sb.WriteString("\n")
+	sb.WriteString("# Upload backup\n")
+	sb.WriteString(uploadBackupSnippet(backup.Destination))
+	sb.WriteString("\n")
+	sb.WriteString("# Update metadata\n")
+	sb.WriteString("complete_backup \"$BACKUP_ID\" \"$BACKUP_SIZE\" '' ''\n")
+	sb.WriteString(uploadMetadataSnippet(backup.Destination))
+	sb.WriteString("\n")
 	sb.WriteString("STATUS='completed'\n")
 	sb.WriteString("ERROR=''\n")
 	sb.WriteString(statusReportScript("logical"))
@@ -396,17 +507,122 @@ echo "Backup %s completed"
 `, backupType, backupType)
 }
 
-// reconcileBackupCronJobs creates or updates backup CronJobs for all attached backup rules.
+// buildIncrementalBackupCronJob creates a CronJob for pg_basebackup --incremental (PG 17+).
+func buildIncrementalBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig) *batchv1.CronJob {
+	if backup == nil || backup.Physical == nil || backup.Physical.IncrementalSchedule == "" {
+		return nil
+	}
+
+	ruleShort := ruleShortID(backup.BackupProfileId)
+	secretName := resourceName(cfg.ClusterName, "secret")
+	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
+	labels["pg-swarm/backup-type"] = "incremental"
+	labels["pg-swarm/backup-profile"] = ruleShort
+
+	env := backupEnvVars(cfg, backup, secretName)
+	script := incrementalBackupScript(backup.Destination)
+
+	var historyLimit int32 = 3
+	return &batchv1.CronJob{
+		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "CronJob"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName(cfg.ClusterName, "incr-backup-"+ruleShort),
+			Namespace: cfg.Namespace,
+			Labels:    labels,
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule:                   backup.Physical.IncrementalSchedule,
+			SuccessfulJobsHistoryLimit: &historyLimit,
+			FailedJobsHistoryLimit:     &historyLimit,
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: labels},
+						Spec: corev1.PodSpec{
+							RestartPolicy: corev1.RestartPolicyOnFailure,
+							Containers: []corev1.Container{
+								{
+									Name:    "incr-backup",
+									Image:   backupImageForRule(backup),
+									Command: []string{"bash", "-c", script},
+									Env:     env,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// incrementalBackupScript returns the shell script for an incremental backup CronJob.
+// The latest backup_manifest is read from the SQLite metadata DB at the destination.
+// If no manifest exists (first run), it falls back to a full base backup.
+func incrementalBackupScript(dest *pgswarmv1.BackupDestination) string {
+	var sb strings.Builder
+	sb.WriteString("set -eo pipefail\n")
+	sb.WriteString("source /usr/local/bin/pg-select-version.sh\n")
+	sb.WriteString("source /usr/local/bin/backup-metadata.sh\n")
+	sb.WriteString("BACKUP_ID=$(cat /proc/sys/kernel/random/uuid)\n")
+	sb.WriteString("TIMESTAMP=$(date +%Y%m%d_%H%M%S)\n")
+	sb.WriteString("BACKUP_DIR=/tmp/incrbackup_${TIMESTAMP}\n")
+	sb.WriteString("BACKUP_PATH=\"${CLUSTER_NAME}/incremental/${TIMESTAMP}\"\n")
+	sb.WriteString("MANIFEST_FILE=/tmp/prev_manifest\n")
+	sb.WriteString("echo \"Starting incremental backup for ${CLUSTER_NAME}\"\n")
+	sb.WriteString("\n")
+	sb.WriteString("# Download metadata DB and read latest manifest\n")
+	sb.WriteString(downloadMetadataSnippet(dest))
+	sb.WriteString("init_metadata_db\n")
+	sb.WriteString("PG_VER=$(pg_basebackup --version | awk '{print $NF}')\n")
+	sb.WriteString("PARENT_ID=$(get_latest_backup_id base)\n")
+	sb.WriteString("[ -z \"$PARENT_ID\" ] && PARENT_ID=$(get_latest_backup_id incremental)\n")
+	sb.WriteString("\n")
+	sb.WriteString("if get_latest_manifest \"$MANIFEST_FILE\"; then\n")
+	sb.WriteString("  echo \"Incremental relative to previous backup\"\n")
+	sb.WriteString("  insert_backup \"$BACKUP_ID\" incremental \"$PARENT_ID\" \"$BACKUP_PATH\" \"$PG_VER\"\n")
+	sb.WriteString("  pg_basebackup -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" -D \"$BACKUP_DIR\" --incremental=\"$MANIFEST_FILE\" -Ft -z -Xs -P\n")
+	sb.WriteString("else\n")
+	sb.WriteString("  echo \"No prior manifest found — taking full base backup\"\n")
+	sb.WriteString("  insert_backup \"$BACKUP_ID\" base '' \"$BACKUP_PATH\" \"$PG_VER\"\n")
+	sb.WriteString("  pg_basebackup -h \"$PGHOST\" -p \"$PGPORT\" -U \"$PGUSER\" -D \"$BACKUP_DIR\" -Ft -z -Xs -P\n")
+	sb.WriteString("fi\n")
+	sb.WriteString("\n")
+	sb.WriteString("BACKUP_SIZE=$(du -sb \"$BACKUP_DIR\" | cut -f1)\n")
+	sb.WriteString("\n")
+	sb.WriteString("# Upload backup\n")
+	sb.WriteString(uploadBackupSnippet(dest))
+	sb.WriteString("\n")
+	sb.WriteString("# Store manifest and update metadata\n")
+	sb.WriteString("if [ -f \"$BACKUP_DIR/backup_manifest\" ]; then\n")
+	sb.WriteString("  store_manifest \"$BACKUP_ID\" \"$BACKUP_DIR/backup_manifest\"\n")
+	sb.WriteString("fi\n")
+	sb.WriteString("complete_backup \"$BACKUP_ID\" \"$BACKUP_SIZE\" '' ''\n")
+	sb.WriteString(uploadMetadataSnippet(dest))
+	sb.WriteString("\n")
+	sb.WriteString("STATUS='completed'\n")
+	sb.WriteString("ERROR=''\n")
+	sb.WriteString(statusReportScript("incremental"))
+
+	return sb.String()
+}
+
+// reconcileBackupCronJobs creates or updates backup CronJobs for all attached backup profiles.
 func reconcileBackupCronJobs(ctx context.Context, client kubernetes.Interface, cfg *pgswarmv1.ClusterConfig) error {
 	for _, backup := range cfg.Backups {
 		if cj := buildBaseBackupCronJob(cfg, backup); cj != nil {
 			if err := createOrUpdateCronJob(ctx, client, cj); err != nil {
-				return fmt.Errorf("base backup cronjob (rule %s): %w", ruleShortID(backup.BackupRuleId), err)
+				return fmt.Errorf("base backup cronjob (rule %s): %w", ruleShortID(backup.BackupProfileId), err)
+			}
+		}
+		if cj := buildIncrementalBackupCronJob(cfg, backup); cj != nil {
+			if err := createOrUpdateCronJob(ctx, client, cj); err != nil {
+				return fmt.Errorf("incremental backup cronjob (rule %s): %w", ruleShortID(backup.BackupProfileId), err)
 			}
 		}
 		if cj := buildLogicalBackupCronJob(cfg, backup); cj != nil {
 			if err := createOrUpdateCronJob(ctx, client, cj); err != nil {
-				return fmt.Errorf("logical backup cronjob (rule %s): %w", ruleShortID(backup.BackupRuleId), err)
+				return fmt.Errorf("logical backup cronjob (rule %s): %w", ruleShortID(backup.BackupProfileId), err)
 			}
 		}
 	}

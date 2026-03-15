@@ -11,7 +11,7 @@ export default function Satellites() {
   const { satellites, refresh } = useData();
   const toast = useToast();
 
-  useEffect(() => { document.title = 'Satellites - pg-swarm'; }, []);
+  useEffect(() => { document.title = 'Satellites - PG-Swarm'; }, []);
   const [editingLabels, setEditingLabels] = useState(null);
   const [labelKey, setLabelKey] = useState('');
   const [labelVal, setLabelVal] = useState('');

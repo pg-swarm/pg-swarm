@@ -951,7 +951,7 @@ type ClusterConfig struct {
 	LabelSelector      map[string]string      `protobuf:"bytes,15,rep,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // deployment rule label selector (for K8s labels)
 	Paused             bool                   `protobuf:"varint,16,opt,name=paused,proto3" json:"paused,omitempty"`                                                                                                             // when true, RW service is removed (read-only mode)
 	DeletionProtection bool                   `protobuf:"varint,17,opt,name=deletion_protection,json=deletionProtection,proto3" json:"deletion_protection,omitempty"`                                                           // when true, PVCs get a finalizer to prevent accidental deletion
-	Backups            []*BackupConfig        `protobuf:"bytes,18,rep,name=backups,proto3" json:"backups,omitempty"`                                                                                                            // backup rule configs (one per attached backup rule)
+	Backups            []*BackupConfig        `protobuf:"bytes,18,rep,name=backups,proto3" json:"backups,omitempty"`                                                                                                            // backup profile configs (one per attached backup profile)
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }

@@ -111,7 +111,7 @@ message ClusterConfig {
   map<string, string> label_selector = 15;       // deployment rule label selector (for K8s labels)
   bool paused = 16;                              // when true, RW service is removed (read-only mode)
   bool deletion_protection = 17;                  // when true, PVCs get a finalizer to prevent accidental deletion
-  repeated BackupConfig backups = 18;              // backup rule configs (one per attached backup rule)
+  repeated BackupConfig backups = 18;              // backup profile configs (one per attached backup profile)
 }
 
 message PostgresSpec {

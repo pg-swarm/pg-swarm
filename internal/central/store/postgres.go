@@ -1056,12 +1056,12 @@ func (s *PostgresStore) ListEventsByCluster(ctx context.Context, satelliteID uui
 	return result, rows.Err()
 }
 
-// ---------- Backup Rules ----------
+// ---------- Backup Profiles ----------
 
-const backupRuleCols = `id, name, description, config, created_at, updated_at`
+const backupProfileCols = `id, name, description, config, created_at, updated_at`
 
-func scanBackupRule(row pgx.Row) (*models.BackupRule, error) {
-	var r models.BackupRule
+func scanBackupProfile(row pgx.Row) (*models.BackupProfile, error) {
+	var r models.BackupProfile
 	err := row.Scan(&r.ID, &r.Name, &r.Description, &r.Config, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -1072,8 +1072,8 @@ func scanBackupRule(row pgx.Row) (*models.BackupRule, error) {
 	return &r, nil
 }
 
-// CreateBackupRule inserts a new backup rule.
-func (s *PostgresStore) CreateBackupRule(ctx context.Context, rule *models.BackupRule) error {
+// CreateBackupProfile inserts a new backup profile.
+func (s *PostgresStore) CreateBackupProfile(ctx context.Context, rule *models.BackupProfile) error {
 	if rule.ID == uuid.Nil {
 		rule.ID = uuid.New()
 	}
@@ -1085,121 +1085,121 @@ func (s *PostgresStore) CreateBackupRule(ctx context.Context, rule *models.Backu
 	rule.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO backup_rules (id, name, description, config, created_at, updated_at)
+		`INSERT INTO backup_profiles (id, name, description, config, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		rule.ID, rule.Name, rule.Description, rule.Config, rule.CreatedAt, rule.UpdatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("create backup rule: %w", err)
+		return fmt.Errorf("create backup profile: %w", err)
 	}
 	return nil
 }
 
-// GetBackupRule returns a backup rule by its ID.
-func (s *PostgresStore) GetBackupRule(ctx context.Context, id uuid.UUID) (*models.BackupRule, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+backupRuleCols+` FROM backup_rules WHERE id = $1`, id)
-	r, err := scanBackupRule(row)
+// GetBackupProfile returns a backup profile by its ID.
+func (s *PostgresStore) GetBackupProfile(ctx context.Context, id uuid.UUID) (*models.BackupProfile, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+backupProfileCols+` FROM backup_profiles WHERE id = $1`, id)
+	r, err := scanBackupProfile(row)
 	if err != nil {
-		return nil, fmt.Errorf("get backup rule %s: %w", id, err)
+		return nil, fmt.Errorf("get backup profile %s: %w", id, err)
 	}
 	return r, nil
 }
 
-// ListBackupRules returns all backup rules ordered by creation time.
-func (s *PostgresStore) ListBackupRules(ctx context.Context) ([]*models.BackupRule, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+backupRuleCols+` FROM backup_rules ORDER BY created_at DESC`)
+// ListBackupProfiles returns all backup profiles ordered by creation time.
+func (s *PostgresStore) ListBackupProfiles(ctx context.Context) ([]*models.BackupProfile, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+backupProfileCols+` FROM backup_profiles ORDER BY created_at DESC`)
 	if err != nil {
-		return nil, fmt.Errorf("list backup rules: %w", err)
+		return nil, fmt.Errorf("list backup profiles: %w", err)
 	}
 	defer rows.Close()
 
-	var result []*models.BackupRule
+	var result []*models.BackupProfile
 	for rows.Next() {
-		r, err := scanBackupRule(rows)
+		r, err := scanBackupProfile(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan backup rule row: %w", err)
+			return nil, fmt.Errorf("scan backup profile row: %w", err)
 		}
 		result = append(result, r)
 	}
 	return result, rows.Err()
 }
 
-// UpdateBackupRule updates a backup rule.
-func (s *PostgresStore) UpdateBackupRule(ctx context.Context, rule *models.BackupRule) error {
+// UpdateBackupProfile updates a backup profile.
+func (s *PostgresStore) UpdateBackupProfile(ctx context.Context, rule *models.BackupProfile) error {
 	if rule.Config == nil {
 		rule.Config = json.RawMessage("{}")
 	}
 	rule.UpdatedAt = time.Now()
 
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE backup_rules SET name = $1, description = $2, config = $3, updated_at = $4
+		`UPDATE backup_profiles SET name = $1, description = $2, config = $3, updated_at = $4
 		 WHERE id = $5`,
 		rule.Name, rule.Description, rule.Config, rule.UpdatedAt, rule.ID,
 	)
 	if err != nil {
-		return fmt.Errorf("update backup rule: %w", err)
+		return fmt.Errorf("update backup profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("backup rule %s not found", rule.ID)
+		return fmt.Errorf("backup profile %s not found", rule.ID)
 	}
 	return nil
 }
 
-// DeleteBackupRule removes a backup rule by its ID.
-func (s *PostgresStore) DeleteBackupRule(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM backup_rules WHERE id = $1`, id)
+// DeleteBackupProfile removes a backup profile by its ID.
+func (s *PostgresStore) DeleteBackupProfile(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM backup_profiles WHERE id = $1`, id)
 	if err != nil {
-		return fmt.Errorf("delete backup rule: %w", err)
+		return fmt.Errorf("delete backup profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("backup rule %s not found", id)
+		return fmt.Errorf("backup profile %s not found", id)
 	}
 	return nil
 }
 
-// AttachBackupRuleToProfile links a backup rule to a profile via the join table.
-func (s *PostgresStore) AttachBackupRuleToProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error {
+// AttachBackupProfileToProfile links a backup profile to a profile via the join table.
+func (s *PostgresStore) AttachBackupProfileToProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO profile_backup_rules (profile_id, backup_rule_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-		profileID, backupRuleID,
+		`INSERT INTO profile_backup_profiles (profile_id, backup_profile_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		profileID, backupProfileID,
 	)
 	if err != nil {
-		return fmt.Errorf("attach backup rule to profile: %w", err)
+		return fmt.Errorf("attach backup profile to profile: %w", err)
 	}
 	return nil
 }
 
-// DetachBackupRuleFromProfile removes a backup rule from a profile.
-func (s *PostgresStore) DetachBackupRuleFromProfile(ctx context.Context, profileID, backupRuleID uuid.UUID) error {
+// DetachBackupProfileFromProfile removes a backup profile from a profile.
+func (s *PostgresStore) DetachBackupProfileFromProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error {
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM profile_backup_rules WHERE profile_id = $1 AND backup_rule_id = $2`,
-		profileID, backupRuleID,
+		`DELETE FROM profile_backup_profiles WHERE profile_id = $1 AND backup_profile_id = $2`,
+		profileID, backupProfileID,
 	)
 	if err != nil {
-		return fmt.Errorf("detach backup rule from profile: %w", err)
+		return fmt.Errorf("detach backup profile from profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("backup rule %s not attached to profile %s", backupRuleID, profileID)
+		return fmt.Errorf("backup profile %s not attached to profile %s", backupProfileID, profileID)
 	}
 	return nil
 }
 
-// ListBackupRulesForProfile returns all backup rules attached to a profile.
-func (s *PostgresStore) ListBackupRulesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupRule, error) {
+// ListBackupProfilesForProfile returns all backup profiles attached to a profile.
+func (s *PostgresStore) ListBackupProfilesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupProfile, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+backupRuleCols+` FROM backup_rules
-		 WHERE id IN (SELECT backup_rule_id FROM profile_backup_rules WHERE profile_id = $1)
+		`SELECT `+backupProfileCols+` FROM backup_profiles
+		 WHERE id IN (SELECT backup_profile_id FROM profile_backup_profiles WHERE profile_id = $1)
 		 ORDER BY created_at DESC`, profileID)
 	if err != nil {
-		return nil, fmt.Errorf("list backup rules for profile: %w", err)
+		return nil, fmt.Errorf("list backup profiles for profile: %w", err)
 	}
 	defer rows.Close()
 
-	var result []*models.BackupRule
+	var result []*models.BackupProfile
 	for rows.Next() {
-		r, err := scanBackupRule(rows)
+		r, err := scanBackupProfile(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan backup rule row: %w", err)
+			return nil, fmt.Errorf("scan backup profile row: %w", err)
 		}
 		result = append(result, r)
 	}
@@ -1208,12 +1208,12 @@ func (s *PostgresStore) ListBackupRulesForProfile(ctx context.Context, profileID
 
 // ---------- Backup Inventory ----------
 
-const backupInvCols = `id, satellite_id, cluster_name, backup_rule_id, backup_type, status, started_at, completed_at, size_bytes, backup_path, pg_version, wal_start_lsn, wal_end_lsn, error_message, created_at`
+const backupInvCols = `id, satellite_id, cluster_name, backup_profile_id, backup_type, status, started_at, completed_at, size_bytes, backup_path, pg_version, wal_start_lsn, wal_end_lsn, error_message, created_at`
 
 func scanBackupInventory(row pgx.Row) (*models.BackupInventory, error) {
 	var inv models.BackupInventory
 	err := row.Scan(
-		&inv.ID, &inv.SatelliteID, &inv.ClusterName, &inv.BackupRuleID,
+		&inv.ID, &inv.SatelliteID, &inv.ClusterName, &inv.BackupProfileID,
 		&inv.BackupType, &inv.Status, &inv.StartedAt, &inv.CompletedAt,
 		&inv.SizeBytes, &inv.BackupPath, &inv.PgVersion,
 		&inv.WalStartLSN, &inv.WalEndLSN, &inv.ErrorMessage, &inv.CreatedAt,
@@ -1239,9 +1239,9 @@ func (s *PostgresStore) CreateBackupInventory(ctx context.Context, inv *models.B
 	inv.CreatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO backup_inventory (id, satellite_id, cluster_name, backup_rule_id, backup_type, status, started_at, completed_at, size_bytes, backup_path, pg_version, wal_start_lsn, wal_end_lsn, error_message, created_at)
+		`INSERT INTO backup_inventory (id, satellite_id, cluster_name, backup_profile_id, backup_type, status, started_at, completed_at, size_bytes, backup_path, pg_version, wal_start_lsn, wal_end_lsn, error_message, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-		inv.ID, inv.SatelliteID, inv.ClusterName, inv.BackupRuleID,
+		inv.ID, inv.SatelliteID, inv.ClusterName, inv.BackupProfileID,
 		inv.BackupType, inv.Status, inv.StartedAt, inv.CompletedAt,
 		inv.SizeBytes, inv.BackupPath, inv.PgVersion,
 		inv.WalStartLSN, inv.WalEndLSN, inv.ErrorMessage, inv.CreatedAt,

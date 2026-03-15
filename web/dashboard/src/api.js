@@ -46,14 +46,15 @@ export const api = {
   satelliteLogs: (id, limit, level) => request('/satellites/' + id + '/logs?limit=' + (limit || 200) + '&level=' + (level || 'info')),
   setSatelliteLogLevel: (id, level) => request('/satellites/' + id + '/log-level', { method: 'POST', body: JSON.stringify({ level }) }),
 
-  // Backup Rules
-  backupRules:        ()           => request('/backup-rules'),
-  createBackupRule:   (data)       => request('/backup-rules', { method: 'POST', body: JSON.stringify(data) }),
-  getBackupRule:      (id)         => request('/backup-rules/' + id),
-  updateBackupRule:   (id, data)   => request('/backup-rules/' + id, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteBackupRule:   (id)         => request('/backup-rules/' + id, { method: 'DELETE' }),
-  attachBackupRule:   (profileId, backupRuleId) => request('/profiles/' + profileId + '/attach-backup-rule', { method: 'POST', body: JSON.stringify({ backup_rule_id: backupRuleId }) }),
-  detachBackupRule:   (profileId, backupRuleId) => request('/profiles/' + profileId + '/detach-backup-rule', { method: 'POST', body: JSON.stringify({ backup_rule_id: backupRuleId }) }),
+  // Backup Profiles
+  backupProfiles:        ()           => request('/backup-profiles'),
+  createBackupProfile:   (data)       => request('/backup-profiles', { method: 'POST', body: JSON.stringify(data) }),
+  getBackupProfile:      (id)         => request('/backup-profiles/' + id),
+  updateBackupProfile:   (id, data)   => request('/backup-profiles/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteBackupProfile:   (id)         => request('/backup-profiles/' + id, { method: 'DELETE' }),
+  attachBackupProfile:   (profileId, backupProfileId) => request('/profiles/' + profileId + '/attach-backup-profile', { method: 'POST', body: JSON.stringify({ backup_profile_id: backupProfileId }) }),
+  detachBackupProfile:   (profileId, backupProfileId) => request('/profiles/' + profileId + '/detach-backup-profile', { method: 'POST', body: JSON.stringify({ backup_profile_id: backupProfileId }) }),
+  profileBackupProfiles: (profileId) => request('/profiles/' + profileId + '/backup-profiles'),
 
   // Backup Inventory & Restore
   clusterBackups:     (id)         => request('/clusters/' + id + '/backups'),

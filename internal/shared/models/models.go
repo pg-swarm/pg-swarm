@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -258,25 +259,25 @@ type Event struct {
 
 // ---------- Backup ----------
 
-type BackupRule struct {
+type BackupProfile struct {
 	ID          uuid.UUID       `json:"id" db:"id"`
 	Name        string          `json:"name" db:"name"`
 	Description string          `json:"description" db:"description"`
-	Config      json.RawMessage `json:"config" db:"config"` // BackupRuleSpec JSON
+	Config      json.RawMessage `json:"config" db:"config"` // BackupProfileSpec JSON
 	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
 }
 
-// ParseBackupRuleSpec deserializes the Config JSON into a BackupRuleSpec.
-func (r *BackupRule) ParseBackupRuleSpec() (*BackupRuleSpec, error) {
-	var spec BackupRuleSpec
+// ParseBackupProfileSpec deserializes the Config JSON into a BackupProfileSpec.
+func (r *BackupProfile) ParseBackupProfileSpec() (*BackupProfileSpec, error) {
+	var spec BackupProfileSpec
 	if err := json.Unmarshal(r.Config, &spec); err != nil {
 		return nil, err
 	}
 	return &spec, nil
 }
 
-type BackupRuleSpec struct {
+type BackupProfileSpec struct {
 	Physical    *PhysicalBackupSpec `json:"physical,omitempty"`
 	Logical     *LogicalBackupSpec  `json:"logical,omitempty"`
 	Destination DestinationSpec     `json:"destination"`
@@ -285,9 +286,10 @@ type BackupRuleSpec struct {
 }
 
 type PhysicalBackupSpec struct {
-	BaseSchedule       string `json:"base_schedule"`                      // cron: "0 2 * * 0"
-	WalArchiveEnabled  bool   `json:"wal_archive_enabled"`                // enable continuous WAL archiving
-	ArchiveTimeoutSecs int32  `json:"archive_timeout_seconds,omitempty"`  // default 60
+	BaseSchedule          string `json:"base_schedule"`                        // cron for full backups: "0 2 * * 0"
+	IncrementalSchedule   string `json:"incremental_schedule,omitempty"`       // cron for incrementals: "0 2 * * 1-6" (PG 17+)
+	WalArchiveEnabled     bool   `json:"wal_archive_enabled"`                  // enable continuous WAL archiving
+	ArchiveTimeoutSecs    int32  `json:"archive_timeout_seconds,omitempty"`    // default 60
 }
 
 type LogicalBackupSpec struct {
@@ -335,27 +337,50 @@ type LocalConfig struct {
 }
 
 type RetentionSpec struct {
-	BaseBackupCount    int `json:"base_backup_count,omitempty"`    // default 7
-	WalRetentionDays   int `json:"wal_retention_days,omitempty"`   // default 14
-	LogicalBackupCount int `json:"logical_backup_count,omitempty"` // default 30
+	BaseBackupCount        int `json:"base_backup_count,omitempty"`        // default 7
+	IncrementalBackupCount int `json:"incremental_backup_count,omitempty"` // default 6 (per full cycle)
+	WalRetentionDays       int `json:"wal_retention_days,omitempty"`       // default 14
+	LogicalBackupCount     int `json:"logical_backup_count,omitempty"`     // default 30
 }
 
-// ValidateBackupRuleSpec validates the backup rule configuration.
-func ValidateBackupRuleSpec(spec *BackupRuleSpec) error {
+// ValidateBackupProfileSpec validates the backup profile configuration.
+func ValidateBackupProfileSpec(spec *BackupProfileSpec) error {
 	if spec.Physical == nil && spec.Logical == nil {
-		return fmt.Errorf("backup rule must define at least one of physical or logical backup")
+		return fmt.Errorf("backup profile must define either physical or logical backup")
 	}
-	if spec.Physical != nil && spec.Physical.BaseSchedule == "" {
-		return fmt.Errorf("physical backup requires base_schedule")
+	if spec.Physical != nil && spec.Logical != nil {
+		return fmt.Errorf("backup profile must define either physical or logical backup, not both")
 	}
-	if spec.Logical != nil && spec.Logical.Schedule == "" {
-		return fmt.Errorf("logical backup requires schedule")
+	if spec.Physical != nil {
+		if spec.Physical.BaseSchedule == "" {
+			return fmt.Errorf("physical backup requires base_schedule")
+		}
+		// Validate WAL retention covers the base backup span
+		if spec.Physical.WalArchiveEnabled {
+			walDays := spec.Retention.WalRetentionDays
+			if walDays <= 0 {
+				walDays = 14
+			}
+			baseCount := spec.Retention.BaseBackupCount
+			if baseCount <= 0 {
+				baseCount = 7
+			}
+			if minDays := estimateCronIntervalDays(spec.Physical.BaseSchedule) * baseCount; minDays > 0 && walDays < minDays {
+				return fmt.Errorf("wal_retention_days (%d) is too short to cover %d base backups at schedule %q (need at least %d days for PITR)",
+					walDays, baseCount, spec.Physical.BaseSchedule, minDays)
+			}
+		}
 	}
-	if spec.Logical != nil && spec.Logical.Format != "" {
-		switch spec.Logical.Format {
-		case "custom", "plain", "directory":
-		default:
-			return fmt.Errorf("logical backup format must be \"custom\", \"plain\", or \"directory\"")
+	if spec.Logical != nil {
+		if spec.Logical.Schedule == "" {
+			return fmt.Errorf("logical backup requires schedule")
+		}
+		if spec.Logical.Format != "" {
+			switch spec.Logical.Format {
+			case "custom", "plain", "directory":
+			default:
+				return fmt.Errorf("logical backup format must be \"custom\", \"plain\", or \"directory\"")
+			}
 		}
 	}
 	switch spec.Destination.Type {
@@ -381,11 +406,45 @@ func ValidateBackupRuleSpec(spec *BackupRuleSpec) error {
 	return nil
 }
 
+// estimateCronIntervalDays returns the approximate interval in days for a cron schedule.
+// Returns 0 if the schedule can't be parsed.
+func estimateCronIntervalDays(cron string) int {
+	parts := strings.Fields(cron)
+	if len(parts) < 5 {
+		return 0
+	}
+	dayOfMonth, month, dayOfWeek := parts[2], parts[3], parts[4]
+
+	// Weekly: "* * 0" or "* * 1,4"
+	if dayOfMonth == "*" && month == "*" && dayOfWeek != "*" {
+		days := strings.Count(dayOfWeek, ",") + 1
+		return 7 / days
+	}
+	// Daily: "* * *"
+	if dayOfMonth == "*" && month == "*" && dayOfWeek == "*" {
+		return 1
+	}
+	// Monthly: "1 * *"
+	if dayOfMonth != "*" && month == "*" && dayOfWeek == "*" {
+		dates := strings.Count(dayOfMonth, ",") + 1
+		return 30 / dates
+	}
+	// Every N days: "*/N * *"
+	if strings.HasPrefix(dayOfMonth, "*/") {
+		n := 0
+		fmt.Sscanf(dayOfMonth[2:], "%d", &n)
+		if n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
 type BackupInventory struct {
 	ID           uuid.UUID  `json:"id" db:"id"`
 	SatelliteID  uuid.UUID  `json:"satellite_id" db:"satellite_id"`
 	ClusterName  string     `json:"cluster_name" db:"cluster_name"`
-	BackupRuleID uuid.UUID  `json:"backup_rule_id" db:"backup_rule_id"`
+	BackupProfileID uuid.UUID  `json:"backup_profile_id" db:"backup_profile_id"`
 	BackupType   string     `json:"backup_type" db:"backup_type"`   // "base", "wal", "logical"
 	Status       string     `json:"status" db:"status"`             // "running", "completed", "failed"
 	StartedAt    time.Time  `json:"started_at" db:"started_at"`
