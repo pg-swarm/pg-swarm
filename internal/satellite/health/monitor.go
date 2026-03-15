@@ -58,6 +58,7 @@ func (m *Monitor) SetOnEvent(fn func(*pgswarmv1.EventReport)) {
 
 // Run starts the health check loop. It blocks until ctx is cancelled.
 func (m *Monitor) Run(ctx context.Context) {
+	log.Trace().Dur("interval", m.interval).Msg("health monitor starting")
 	// Initial delay to let clusters start
 	select {
 	case <-time.After(10 * time.Second):
@@ -75,6 +76,7 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			log.Trace().Msg("health monitor tick")
 			m.checkAll(ctx)
 		}
 	}
@@ -82,6 +84,7 @@ func (m *Monitor) Run(ctx context.Context) {
 
 func (m *Monitor) checkAll(ctx context.Context) {
 	clusters := m.operator.ManagedClusters()
+	log.Trace().Int("cluster_count", len(clusters)).Msg("checkAll starting")
 
 	// Check all clusters in parallel so a broken cluster doesn't block
 	// health reporting for healthy ones.
@@ -129,6 +132,7 @@ func (m *Monitor) checkAll(ctx context.Context) {
 
 func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) *pgswarmv1.ClusterHealthReport {
 	clusterKey := mc.Namespace + "/" + mc.ClusterName
+	log.Trace().Str("cluster", clusterKey).Msg("checkCluster start")
 
 	// Track when we first observed this cluster for the startup grace period.
 	m.mu.Lock()
@@ -149,6 +153,7 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 		return nil
 	}
 
+	log.Trace().Str("cluster", clusterKey).Int("pod_count", len(pods.Items)).Msg("checkCluster pods found")
 	if len(pods.Items) == 0 {
 		return nil
 	}
@@ -168,6 +173,7 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	wg.Wait()
 
 	state := DeriveClusterState(instances, mc.Replicas, clusterAge)
+	log.Trace().Str("cluster", clusterKey).Str("state", state.String()).Msg("checkCluster derived state")
 	if mc.Paused {
 		state = pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED
 	}

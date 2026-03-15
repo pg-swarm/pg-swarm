@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -19,19 +21,21 @@ import (
 
 // RESTServer handles the REST API endpoints for the central server.
 type RESTServer struct {
-	store    store.Store
-	registry *registry.Registry
-	streams  *StreamManager
-	app      *fiber.App
+	store     store.Store
+	registry  *registry.Registry
+	streams   *StreamManager
+	logBuffer *LogBuffer
+	app       *fiber.App
 }
 
 // NewRESTServer creates a new RESTServer.
-func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager) *RESTServer {
+func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager, lb *LogBuffer) *RESTServer {
 	srv := &RESTServer{
-		store:    s,
-		registry: reg,
-		streams:  sm,
-		app:      fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
+		store:     s,
+		registry:  reg,
+		streams:   sm,
+		logBuffer: lb,
+		app:       fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
 	}
 	srv.setupRoutes()
 	return srv
@@ -76,6 +80,9 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/satellites/:id/reject", s.rejectSatellite)
 	api.Put("/satellites/:id/labels", s.updateSatelliteLabels)
 	api.Post("/satellites/:id/refresh-storage-classes", s.refreshStorageClasses)
+	api.Get("/satellites/:id/logs", s.getSatelliteLogs)
+	api.Get("/satellites/:id/logs/stream", s.streamSatelliteLogs)
+	api.Post("/satellites/:id/log-level", s.setSatelliteLogLevel)
 
 	// Cluster configs
 	api.Get("/clusters", s.listClusterConfigs)
@@ -102,6 +109,11 @@ func (s *RESTServer) setupRoutes() {
 	api.Put("/profiles/:id", s.updateProfile)
 	api.Delete("/profiles/:id", s.deleteProfile)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
+
+	// Postgres Variants (admin)
+	api.Get("/postgres-variants", s.listPostgresVariants)
+	api.Post("/postgres-variants", s.createPostgresVariant)
+	api.Delete("/postgres-variants/:id", s.deletePostgresVariant)
 
 	// Postgres Versions (admin)
 	api.Get("/postgres-versions", s.listPostgresVersions)
@@ -185,6 +197,9 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
 	cfg.ID = uuid.New()
 	cfg.State = models.ClusterStateCreating
@@ -245,6 +260,9 @@ func (s *RESTServer) updateClusterConfig(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
 	cfg.ID = id
 
@@ -292,6 +310,88 @@ func (s *RESTServer) refreshStorageClasses(c *fiber.Ctx) error {
 
 	log.Info().Str("satellite_id", id.String()).Msg("storage class refresh requested")
 	return c.JSON(fiber.Map{"status": "refresh requested"})
+}
+
+func (s *RESTServer) getSatelliteLogs(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	limit := 200
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	level := c.Query("level", "trace")
+
+	entries := s.logBuffer.Recent(id, limit, level)
+	if entries == nil {
+		entries = make([]*LogEntryJSON, 0)
+	}
+	return c.JSON(entries)
+}
+
+func (s *RESTServer) streamSatelliteLogs(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+
+	ch, unsub := s.logBuffer.Subscribe(id)
+
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer unsub()
+		for {
+			select {
+			case entry, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, err := json.Marshal(entry)
+				if err != nil {
+					continue
+				}
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+					return
+				}
+				if err := w.Flush(); err != nil {
+					return
+				}
+			}
+		}
+	})
+	return nil
+}
+
+func (s *RESTServer) setSatelliteLogLevel(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.Level == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "level is required"})
+	}
+
+	if s.streams == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "stream manager not available"})
+	}
+
+	if err := s.streams.PushSetLogLevel(id, body.Level); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("satellite_id", id.String()).Str("level", body.Level).Msg("log level change sent")
+	return c.JSON(fiber.Map{"status": "level change sent", "level": body.Level})
 }
 
 func (s *RESTServer) pauseCluster(c *fiber.Ctx) error {
@@ -793,6 +893,9 @@ func (s *RESTServer) createProfile(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
 	profile.ID = uuid.New()
 	profile.Locked = false
@@ -837,6 +940,9 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
@@ -894,6 +1000,49 @@ func (s *RESTServer) cloneProfile(c *fiber.Ctx) error {
 
 	log.Info().Str("source", id.String()).Str("clone", clone.ID.String()).Str("name", clone.Name).Msg("profile cloned")
 	return c.Status(fiber.StatusCreated).JSON(clone)
+}
+
+// --- Postgres Variants (admin) ---
+
+func (s *RESTServer) listPostgresVariants(c *fiber.Ctx) error {
+	variants, err := s.store.ListPostgresVariants(c.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list postgres variants")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list postgres variants"})
+	}
+	return c.JSON(variants)
+}
+
+func (s *RESTServer) createPostgresVariant(c *fiber.Ctx) error {
+	var v models.PostgresVariant
+	if err := c.BodyParser(&v); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if v.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+
+	if err := s.store.CreatePostgresVariant(c.Context(), &v); err != nil {
+		log.Error().Err(err).Msg("failed to create postgres variant")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create postgres variant"})
+	}
+
+	log.Info().Str("name", v.Name).Msg("postgres variant created")
+	return c.Status(fiber.StatusCreated).JSON(v)
+}
+
+func (s *RESTServer) deletePostgresVariant(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid variant id"})
+	}
+
+	if err := s.store.DeletePostgresVariant(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("id", id.String()).Msg("postgres variant deleted")
+	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
 // --- Postgres Versions (admin) ---
@@ -974,6 +1123,24 @@ func (s *RESTServer) setDefaultPostgresVersion(c *fiber.Ctx) error {
 
 	log.Info().Str("id", id.String()).Msg("default postgres version set")
 	return c.JSON(fiber.Map{"status": "default set"})
+}
+
+// validatePostgresImage checks that a postgres image can be resolved for the
+// given spec — either via the postgres_versions table or an explicit image field.
+// Returns an error suitable for returning to the API caller.
+func validatePostgresImage(st store.Store, spec *models.ClusterSpec) error {
+	if spec.Postgres.Version == "" {
+		return fmt.Errorf("postgres version is required")
+	}
+	image := resolvePostgresImage(st, spec)
+	if image == "" {
+		variant := spec.Postgres.Variant
+		if variant == "" {
+			variant = "alpine"
+		}
+		return fmt.Errorf("cannot resolve postgres image: version %q variant %q is not in the postgres versions registry and no explicit image was provided — add it via Admin > Postgres Versions or set the image field", spec.Postgres.Version, variant)
+	}
+	return nil
 }
 
 // resolvePostgresImage looks up the image tag for a version+variant and prepends the registry.

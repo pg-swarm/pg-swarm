@@ -21,6 +21,7 @@ import (
 // primary (pg_wal_switch + checkpoint) and promotes the target replica.
 // It also updates the leader lease so the failover sidecar doesn't fight.
 func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1.SwitchoverRequest, password string) *pgswarmv1.SwitchoverResult {
+	log.Trace().Str("cluster", req.ClusterName).Str("target", req.TargetPod).Str("namespace", req.Namespace).Msg("Switchover entry")
 	result := &pgswarmv1.SwitchoverResult{ClusterName: req.ClusterName}
 	ns := req.Namespace
 	target := req.TargetPod
@@ -31,6 +32,7 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 		Msg("starting planned switchover")
 
 	// 1. Verify the target pod exists and is a replica
+	log.Trace().Str("target", target).Msg("Switchover: verifying target pod")
 	targetPod, err := client.CoreV1().Pods(ns).Get(ctx, target, metav1.GetOptions{})
 	if err != nil {
 		result.ErrorMessage = fmt.Sprintf("target pod not found: %v", err)
@@ -41,6 +43,7 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 		return result
 	}
 
+	log.Trace().Msg("Switchover: target verified as replica")
 	// 2. Find the current primary pod
 	pods, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("pg-swarm.io/cluster=%s,pg-swarm.io/role=primary", req.ClusterName),
@@ -50,6 +53,7 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 		return result
 	}
 	primaryPod := &pods.Items[0]
+	log.Trace().Str("primary", primaryPod.Name).Msg("Switchover: current primary found")
 
 	// Read superuser password from the target to verify PG connectivity
 	targetHost := fmt.Sprintf("%s.%s-headless.%s.svc.cluster.local",
@@ -74,6 +78,7 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 	}
 
 	// 4. Checkpoint on primary to flush pending WAL
+	log.Trace().Msg("Switchover: running checkpoint on primary")
 	primaryConn, err := pgx.Connect(ctx, fmt.Sprintf(
 		"postgres://postgres:%s@%s:5432/postgres?connect_timeout=5&sslmode=disable", escapedPass, primaryHost))
 	if err != nil {
@@ -87,6 +92,7 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 	}
 
 	// 4b. Fence the old primary — block new writes and terminate client connections
+	log.Trace().Msg("Switchover: fencing old primary")
 	if err := pgfence.FencePrimary(ctx, primaryConn); err != nil {
 		log.Warn().Err(err).Msg("fencing old primary failed (proceeding with switchover)")
 	}
@@ -99,6 +105,7 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 	}
 
 	// 6. Promote the target replica
+	log.Trace().Str("target", target).Msg("Switchover: promoting target")
 	if _, err := targetConn.Exec(ctx, "SELECT pg_promote()"); err != nil {
 		result.ErrorMessage = fmt.Sprintf("pg_promote() failed: %v", err)
 		return result

@@ -58,6 +58,11 @@ type Store interface {
 	DeletePostgresVersion(ctx context.Context, id uuid.UUID) error
 	SetDefaultPostgresVersion(ctx context.Context, id uuid.UUID) error
 
+	// Postgres Variants
+	ListPostgresVariants(ctx context.Context) ([]*models.PostgresVariant, error)
+	CreatePostgresVariant(ctx context.Context, v *models.PostgresVariant) error
+	DeletePostgresVariant(ctx context.Context, id uuid.UUID) error
+
 	// Health
 	UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error
 	UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error

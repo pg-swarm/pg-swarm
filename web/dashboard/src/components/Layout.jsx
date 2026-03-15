@@ -1,9 +1,10 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { useData } from '../context/DataContext';
+import { useTheme } from '../context/ThemeContext';
 import { deriveSatState } from '../api';
 import {
   LayoutDashboard, Satellite, Boxes, GitBranch, Database,
-  Activity, Settings, RefreshCw
+  Activity, Settings, RefreshCw, Sun, Moon, Monitor
 } from 'lucide-react';
 
 const NAV = [
@@ -31,6 +32,12 @@ function StatusDot({ satellites }) {
 
 export default function Layout() {
   const { satellites, lastRefresh, refresh } = useData();
+  const { theme, setTheme } = useTheme();
+  const ThemeIcon = { light: Sun, dark: Moon, system: Monitor }[theme];
+  function cycleTheme() {
+    const cycle = ['light', 'dark', 'system'];
+    setTheme(cycle[(cycle.indexOf(theme) + 1) % cycle.length]);
+  }
 
   return (
     <>
@@ -45,6 +52,10 @@ export default function Layout() {
         </div>
         <div className="topbar-right">
           <StatusDot satellites={satellites} />
+          <button className="theme-toggle" onClick={cycleTheme} title={`Theme: ${theme}`}>
+            <ThemeIcon size={13} />
+            {theme}
+          </button>
         </div>
       </header>
 

@@ -44,7 +44,7 @@ func main() {
 	pgStore := store.NewPostgresStore(pool)
 	reg := registry.New(pgStore)
 	grpcServer := server.NewGRPCServer(reg, pgStore)
-	restServer := server.NewRESTServer(pgStore, reg, grpcServer.GetStreams())
+	restServer := server.NewRESTServer(pgStore, reg, grpcServer.GetStreams(), grpcServer.GetLogBuffer())
 
 	// Start gRPC server
 	go func() {

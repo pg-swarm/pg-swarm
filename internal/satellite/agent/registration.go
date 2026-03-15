@@ -29,12 +29,14 @@ var errNeedReRegister = errors.New("registration credentials rejected, re-regist
 // register → wait-for-approval flow, retrying indefinitely until
 // the context is cancelled.
 func (a *Agent) ensureIdentity(ctx context.Context) error {
+	log.Trace().Msg("attempting to load identity from env")
 	identity, err := a.loadIdentity()
 	if err == nil {
 		a.identity = identity
 		log.Info().Str("satellite_id", identity.SatelliteID).Msg("loaded existing identity")
 		return nil
 	}
+	log.Trace().Err(err).Msg("identity load failed, will register")
 	if !os.IsNotExist(err) {
 		log.Warn().Err(err).Msg("identity unreadable, will re-register")
 	}
@@ -83,6 +85,7 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 //   - ctx.Err()            → context cancelled; caller must stop
 //   - other error          → transient failure; caller should retry with backoff
 func (a *Agent) registerAndWaitForApproval(ctx context.Context) error {
+	log.Trace().Str("central_addr", a.config.CentralAddr).Msg("registration: dialing central")
 	conn, err := grpc.NewClient(
 		a.config.CentralAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -95,6 +98,7 @@ func (a *Agent) registerAndWaitForApproval(ctx context.Context) error {
 	client := pgswarmv1.NewRegistrationServiceClient(conn)
 
 	// --- Step 1: Register (retry on transient errors) ---
+	log.Trace().Msg("registration: calling Register RPC")
 	resp, err := a.callRegister(ctx, client)
 	if err != nil {
 		return err
@@ -103,6 +107,7 @@ func (a *Agent) registerAndWaitForApproval(ctx context.Context) error {
 		Msg("registered with central, waiting for approval...")
 
 	// --- Step 2: Poll CheckApproval ---
+	log.Trace().Str("satellite_id", resp.SatelliteId).Msg("registration: starting approval poll")
 	return a.pollApproval(ctx, client, resp)
 }
 
@@ -202,10 +207,12 @@ func (a *Agent) pollApproval(ctx context.Context, client pgswarmv1.RegistrationS
 			}
 
 			if !resp.Approved {
+				log.Trace().Str("satellite_id", reg.SatelliteId).Msg("poll tick: not yet approved")
 				log.Debug().Str("satellite_id", reg.SatelliteId).Msg("pending approval...")
 				continue
 			}
 
+			log.Trace().Str("satellite_id", reg.SatelliteId).Msg("approval received")
 			// Approved — set identity in memory immediately (works without pod restart).
 			a.identity = &Identity{
 				SatelliteID: reg.SatelliteId,
@@ -214,6 +221,7 @@ func (a *Agent) pollApproval(ctx context.Context, client pgswarmv1.RegistrationS
 			if err := a.saveIdentity(ctx); err != nil {
 				return fmt.Errorf("save identity: %w", err)
 			}
+			log.Trace().Str("satellite_id", reg.SatelliteId).Msg("identity saved to K8s secret")
 			log.Info().Str("satellite_id", reg.SatelliteId).Msg("approved by central")
 			return nil
 		}

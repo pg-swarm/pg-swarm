@@ -230,6 +230,14 @@ type PostgresVersion struct {
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
+// PostgresVariant is a supported base-image variant (e.g. "alpine", "debian").
+type PostgresVariant struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	Name        string    `json:"name" db:"name"`
+	Description string    `json:"description" db:"description"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+}
+
 type ClusterHealth struct {
 	SatelliteID uuid.UUID       `json:"satellite_id" db:"satellite_id"`
 	ClusterName string          `json:"cluster_name" db:"cluster_name"`
