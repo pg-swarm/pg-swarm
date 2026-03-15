@@ -148,9 +148,10 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, satellites, refresh } = useData();
+  const { profiles, postgresVersions, satellites, clusters, refresh } = useData();
   const toast = useToast();
   const [editing, setEditing] = useState(null);
+  const [viewing, setViewing] = useState(null);
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
   const [scRefreshing, setScRefreshing] = useState(false);
@@ -196,6 +197,21 @@ export default function Profiles() {
       spec: { ...emptySpec(), ...spec, pg_params, hba_rules },
       isNew: false,
     });
+  }
+
+  function startView(profile) {
+    const spec = parseSpec(profile.config);
+    const pg_params = { ...DEFAULT_PG_PARAMS, ...spec.pg_params };
+    const hba_rules = spec.hba_rules?.length ? spec.hba_rules : [...DEFAULT_HBA_RULES];
+    setViewing({
+      name: profile.name,
+      description: profile.description,
+      spec: { ...emptySpec(), ...spec, pg_params, hba_rules },
+    });
+  }
+
+  function clusterCountForProfile(profileId) {
+    return (clusters || []).filter(c => c.profile_id === profileId).length;
   }
 
   async function save() {
@@ -245,6 +261,10 @@ export default function Profiles() {
     return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} />;
   }
 
+  if (viewing) {
+    return <ProfileView state={viewing} onClose={() => setViewing(null)} />;
+  }
+
   return (
     <>
       <div className="card-head-bar">
@@ -270,6 +290,7 @@ export default function Profiles() {
           <div className="empty">No profiles created yet</div>
         ) : profiles.map(p => {
           const spec = parseSpec(p.config);
+          const clusterCount = clusterCountForProfile(p.id);
           return (
             <div className="cl-card" key={p.id}>
               <div className="cl-head">
@@ -278,6 +299,9 @@ export default function Profiles() {
                   {p.locked
                     ? <span className="badge badge-amber"><span className="dot" />Locked</span>
                     : <span className="badge badge-green"><span className="dot" />Editable</span>}
+                  {clusterCount > 0 && (
+                    <span className="badge badge-gray">{clusterCount} cluster{clusterCount !== 1 ? 's' : ''}</span>
+                  )}
                 </div>
               </div>
               <div className="cl-body">
@@ -300,7 +324,9 @@ export default function Profiles() {
               <div className="cl-foot">
                 <span>{timeAgo(p.created_at)}</span>
                 <span className="actions" style={{ marginLeft: 'auto' }}>
-                  {!p.locked && <button className="btn btn-sm" onClick={() => startEdit(p)}>Edit</button>}
+                  {p.locked
+                    ? <button className="btn btn-sm" onClick={() => startView(p)}>View</button>
+                    : <button className="btn btn-sm" onClick={() => startEdit(p)}>Edit</button>}
                   <button className="btn btn-sm" onClick={() => { setCloneTarget(p.id); setCloneName(p.name + '-copy'); }}>Clone</button>
                   {!p.locked && <button className="btn btn-sm btn-reject" onClick={() => remove(p.id)}>Delete</button>}
                 </span>
@@ -829,16 +855,42 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, stor
   );
 }
 
+// ── Profile View (read-only for locked profiles) ────────────────────────────
+
+function ProfileView({ state, onClose }) {
+  const spec = state.spec;
+  const changedParams = Object.entries(spec.pg_params || {}).filter(([k, v]) => DEFAULT_PG_PARAMS[k] !== v);
+
+  return (
+    <div className="profile-form">
+      <div className="card-head-bar">
+        <span className="card-head-title">Profile: {state.name}</span>
+        <div className="actions">
+          <button className="btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+      <ConfirmReport
+        state={state}
+        spec={spec}
+        changedParams={changedParams}
+        onConfirm={onClose}
+        onCancel={onClose}
+        readOnly
+      />
+    </div>
+  );
+}
+
 // ── Confirmation Report ─────────────────────────────────────────────────────
 
-function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel }) {
-  return (
-    <div className="confirm-overlay">
-      <div className="confirm-modal">
-        <div className="confirm-header">
-          <h3>Configuration Report</h3>
-          <p className="muted sm">Review before saving profile <strong>{state.name || '(unnamed)'}</strong></p>
-        </div>
+function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOnly }) {
+  const content = (
+    <>
+      <div className="confirm-header">
+        <h3>{readOnly ? 'Profile Configuration' : 'Configuration Report'}</h3>
+        {!readOnly && <p className="muted sm">Review before saving profile <strong>{state.name || '(unnamed)'}</strong></p>}
+        {readOnly && state.description && <p className="muted sm">{state.description}</p>}
+      </div>
 
         <div className="confirm-body">
           {/* Cluster */}
@@ -915,10 +967,23 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel }) {
           )}
         </div>
 
-        <div className="confirm-footer">
-          <button className="btn btn-approve" onClick={onConfirm}>Confirm & Save</button>
-          <button className="btn btn-reject" onClick={onCancel}>Back to Editing</button>
-        </div>
+        {!readOnly && (
+          <div className="confirm-footer">
+            <button className="btn btn-approve" onClick={onConfirm}>Confirm & Save</button>
+            <button className="btn btn-reject" onClick={onCancel}>Back to Editing</button>
+          </div>
+        )}
+    </>
+  );
+
+  if (readOnly) {
+    return <div className="confirm-body-standalone">{content}</div>;
+  }
+
+  return (
+    <div className="confirm-overlay">
+      <div className="confirm-modal">
+        {content}
       </div>
     </div>
   );

@@ -115,9 +115,15 @@ type InstanceHealth struct {
 	// Per-database sizes
 	DatabaseStats []*DatabaseStat `protobuf:"bytes,18,rep,name=database_stats,json=databaseStats,proto3" json:"database_stats,omitempty"`
 	// Slow queries (from pg_stat_statements, top by mean_exec_time)
-	SlowQueries   []*SlowQuery `protobuf:"bytes,19,rep,name=slow_queries,json=slowQueries,proto3" json:"slow_queries,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SlowQueries []*SlowQuery `protobuf:"bytes,19,rep,name=slow_queries,json=slowQueries,proto3" json:"slow_queries,omitempty"`
+	// Index hit ratio (0.0–1.0) from pg_statio_user_indexes
+	IndexHitRatio float64 `protobuf:"fixed64,20,opt,name=index_hit_ratio,json=indexHitRatio,proto3" json:"index_hit_ratio,omitempty"`
+	// Transaction commit ratio (0.0–1.0) from pg_stat_database
+	TxnCommitRatio float64 `protobuf:"fixed64,21,opt,name=txn_commit_ratio,json=txnCommitRatio,proto3" json:"txn_commit_ratio,omitempty"`
+	// Active connection count (state = 'active' in pg_stat_activity)
+	ConnectionsActive int32 `protobuf:"varint,22,opt,name=connections_active,json=connectionsActive,proto3" json:"connections_active,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *InstanceHealth) Reset() {
@@ -281,6 +287,27 @@ func (x *InstanceHealth) GetSlowQueries() []*SlowQuery {
 		return x.SlowQueries
 	}
 	return nil
+}
+
+func (x *InstanceHealth) GetIndexHitRatio() float64 {
+	if x != nil {
+		return x.IndexHitRatio
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetTxnCommitRatio() float64 {
+	if x != nil {
+		return x.TxnCommitRatio
+	}
+	return 0
+}
+
+func (x *InstanceHealth) GetConnectionsActive() int32 {
+	if x != nil {
+		return x.ConnectionsActive
+	}
+	return 0
 }
 
 type DatabaseStat struct {
@@ -661,7 +688,7 @@ const file_health_proto_rawDesc = "" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12.\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x18.pgswarm.v1.ClusterStateR\x05state\x128\n" +
 	"\tinstances\x18\x03 \x03(\v2\x1a.pgswarm.v1.InstanceHealthR\tinstances\x128\n" +
-	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xce\x06\n" +
+	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xcf\a\n" +
 	"\x0eInstanceHealth\x12\x19\n" +
 	"\bpod_name\x18\x01 \x01(\tR\apodName\x12,\n" +
 	"\x04role\x18\x02 \x01(\x0e2\x18.pgswarm.v1.InstanceRoleR\x04role\x12\x14\n" +
@@ -685,7 +712,10 @@ const file_health_proto_rawDesc = "" +
 	"tableStats\x12$\n" +
 	"\x0ewal_disk_bytes\x18\x11 \x01(\x03R\fwalDiskBytes\x12?\n" +
 	"\x0edatabase_stats\x18\x12 \x03(\v2\x18.pgswarm.v1.DatabaseStatR\rdatabaseStats\x128\n" +
-	"\fslow_queries\x18\x13 \x03(\v2\x15.pgswarm.v1.SlowQueryR\vslowQueries\"z\n" +
+	"\fslow_queries\x18\x13 \x03(\v2\x15.pgswarm.v1.SlowQueryR\vslowQueries\x12&\n" +
+	"\x0findex_hit_ratio\x18\x14 \x01(\x01R\rindexHitRatio\x12(\n" +
+	"\x10txn_commit_ratio\x18\x15 \x01(\x01R\x0etxnCommitRatio\x12-\n" +
+	"\x12connections_active\x18\x16 \x01(\x05R\x11connectionsActive\"z\n" +
 	"\fDatabaseStat\x12#\n" +
 	"\rdatabase_name\x18\x01 \x01(\tR\fdatabaseName\x12\x1d\n" +
 	"\n" +
