@@ -90,10 +90,10 @@ export default function SatelliteLogs() {
       const found = sats.find(s => s.id === id);
       if (found) {
         setSat(found);
-        document.title = `Logs: ${found.hostname || found.k8s_cluster_name} - pg-swarm`;
+        document.title = `Logs: ${found.hostname || found.k8s_cluster_name} - PG-Swarm`;
       }
     }).catch(() => {});
-    return () => { document.title = 'pg-swarm'; };
+    return () => { document.title = 'PG-Swarm'; };
   }, [id]);
 
   // Fetch recent logs + SSE subscription

@@ -12,7 +12,7 @@ const SEV_ICONS = {
 export default function Events() {
   const { events, satellites } = useData();
 
-  useEffect(() => { document.title = 'Events - pg-swarm'; }, []);
+  useEffect(() => { document.title = 'Events - PG-Swarm'; }, []);
 
   return (
     <div className="card">

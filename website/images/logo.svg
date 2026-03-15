@@ -1,5 +1,37 @@
-<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
-  <ellipse cx="12" cy="5" rx="9" ry="3"/>
-  <path d="M3 5V19C3 20.5 7 22 12 22S21 20.5 21 19V5"/>
-  <path d="M3 12C3 13.5 7 15 12 15S21 13.5 21 12"/>
+<!-- Option 4: Shield with database + network nodes -->
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <!-- Shield outline -->
+  <path d="M64 10 L110 30 L110 70 Q110 100 64 118 Q18 100 18 70 L18 30 Z"
+    fill="#1a2f26" stroke="#5a9e78" stroke-width="2.5"/>
+
+  <!-- Inner glow -->
+  <path d="M64 18 L102 35 L102 68 Q102 94 64 110 Q26 94 26 68 L26 35 Z"
+    fill="#0d1f16" stroke="none"/>
+
+  <!-- Database cylinder in center -->
+  <ellipse cx="64" cy="46" rx="16" ry="6" fill="#5a9e78"/>
+  <rect x="48" y="46" width="32" height="20" fill="#5a9e78"/>
+  <ellipse cx="64" cy="66" rx="16" ry="6" fill="#4a8566"/>
+  <ellipse cx="64" cy="56" rx="16" ry="6" fill="none" stroke="#3a7556" stroke-width="1"/>
+  <ellipse cx="64" cy="46" rx="11" ry="3.5" fill="#6db88e" opacity="0.3"/>
+
+  <!-- Three satellite dots below database -->
+  <circle cx="44" cy="84" r="5" fill="#2a4a3a" stroke="#5a9e78" stroke-width="1.5"/>
+  <circle cx="44" cy="84" r="2" fill="#5a9e78"/>
+  <circle cx="64" cy="90" r="5" fill="#2a4a3a" stroke="#5a9e78" stroke-width="1.5"/>
+  <circle cx="64" cy="90" r="2" fill="#5a9e78"/>
+  <circle cx="84" cy="84" r="5" fill="#2a4a3a" stroke="#5a9e78" stroke-width="1.5"/>
+  <circle cx="84" cy="84" r="2" fill="#5a9e78"/>
+
+  <!-- Lines from db to satellites -->
+  <line x1="56" y1="68" x2="44" y2="79" stroke="#5a9e78" stroke-width="1" opacity="0.5"/>
+  <line x1="64" y1="72" x2="64" y2="85" stroke="#5a9e78" stroke-width="1" opacity="0.5"/>
+  <line x1="72" y1="68" x2="84" y2="79" stroke="#5a9e78" stroke-width="1" opacity="0.5"/>
+
+  <!-- Satellite interconnections -->
+  <line x1="49" y1="84" x2="59" y2="90" stroke="#5a9e78" stroke-width="0.8" opacity="0.3"/>
+  <line x1="69" y1="90" x2="79" y2="84" stroke="#5a9e78" stroke-width="0.8" opacity="0.3"/>
+
+  <!-- HA checkmark accent at top -->
+  <path d="M56 30 L62 36 L74 24" stroke="#7ab896" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
