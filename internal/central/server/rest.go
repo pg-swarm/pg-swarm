@@ -111,14 +111,15 @@ func (s *RESTServer) setupRoutes() {
 	api.Delete("/profiles/:id", s.deleteProfile)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
 
-	// Backup Rules
-	api.Get("/backup-rules", s.listBackupRules)
-	api.Post("/backup-rules", s.createBackupRule)
-	api.Get("/backup-rules/:id", s.getBackupRule)
-	api.Put("/backup-rules/:id", s.updateBackupRule)
-	api.Delete("/backup-rules/:id", s.deleteBackupRule)
-	api.Post("/profiles/:id/attach-backup-rule", s.attachBackupRule)
-	api.Post("/profiles/:id/detach-backup-rule", s.detachBackupRule)
+	// Backup Profiles
+	api.Get("/backup-profiles", s.listBackupProfiles)
+	api.Post("/backup-profiles", s.createBackupProfile)
+	api.Get("/backup-profiles/:id", s.getBackupProfile)
+	api.Put("/backup-profiles/:id", s.updateBackupProfile)
+	api.Delete("/backup-profiles/:id", s.deleteBackupProfile)
+	api.Post("/profiles/:id/attach-backup-profile", s.attachBackupProfile)
+	api.Post("/profiles/:id/detach-backup-profile", s.detachBackupProfile)
+	api.Get("/profiles/:id/backup-profiles", s.listProfileBackupProfiles)
 
 	// Backup Inventory & Restore
 	api.Get("/clusters/:id/backups", s.listClusterBackups)
@@ -1300,16 +1301,16 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 		}
 	}
 
-	// Resolve backup rules from profile
+	// Resolve backup profiles from profile
 	if cfg.ProfileID != nil {
-		if rules, err := st.ListBackupRulesForProfile(context.Background(), *cfg.ProfileID); err == nil {
+		if rules, err := st.ListBackupProfilesForProfile(context.Background(), *cfg.ProfileID); err == nil {
 			for _, rule := range rules {
-				ruleSpec, err := rule.ParseBackupRuleSpec()
+				ruleSpec, err := rule.ParseBackupProfileSpec()
 				if err != nil {
 					continue
 				}
 				bc := buildProtoBackupConfig(ruleSpec)
-				bc.BackupRuleId = rule.ID.String()
+				bc.BackupProfileId = rule.ID.String()
 				protoConfig.Backups = append(protoConfig.Backups, bc)
 			}
 		}
@@ -1318,8 +1319,8 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 	return protoConfig, nil
 }
 
-// buildProtoBackupConfig converts a BackupRuleSpec into a proto BackupConfig.
-func buildProtoBackupConfig(spec *models.BackupRuleSpec) *pgswarmv1.BackupConfig {
+// buildProtoBackupConfig converts a BackupProfileSpec into a proto BackupConfig.
+func buildProtoBackupConfig(spec *models.BackupProfileSpec) *pgswarmv1.BackupConfig {
 	bc := &pgswarmv1.BackupConfig{
 		BackupImage: spec.BackupImage,
 	}
@@ -1327,6 +1328,7 @@ func buildProtoBackupConfig(spec *models.BackupRuleSpec) *pgswarmv1.BackupConfig
 	if spec.Physical != nil {
 		bc.Physical = &pgswarmv1.PhysicalBackupConfig{
 			BaseSchedule:          spec.Physical.BaseSchedule,
+			IncrementalSchedule:   spec.Physical.IncrementalSchedule,
 			WalArchiveEnabled:     spec.Physical.WalArchiveEnabled,
 			ArchiveTimeoutSeconds: spec.Physical.ArchiveTimeoutSecs,
 		}
@@ -1347,18 +1349,21 @@ func buildProtoBackupConfig(spec *models.BackupRuleSpec) *pgswarmv1.BackupConfig
 	case "s3":
 		if spec.Destination.S3 != nil {
 			bc.Destination.S3 = &pgswarmv1.S3Destination{
-				Bucket:         spec.Destination.S3.Bucket,
-				Region:         spec.Destination.S3.Region,
-				Endpoint:       spec.Destination.S3.Endpoint,
-				PathPrefix:     spec.Destination.S3.PathPrefix,
-				ForcePathStyle: spec.Destination.S3.ForcePathStyle,
+				Bucket:          spec.Destination.S3.Bucket,
+				Region:          spec.Destination.S3.Region,
+				Endpoint:        spec.Destination.S3.Endpoint,
+				PathPrefix:      spec.Destination.S3.PathPrefix,
+				ForcePathStyle:  spec.Destination.S3.ForcePathStyle,
+				AccessKeyId:     spec.Destination.S3.AccessKeyID,
+				SecretAccessKey: spec.Destination.S3.SecretAccessKey,
 			}
 		}
 	case "gcs":
 		if spec.Destination.GCS != nil {
 			bc.Destination.Gcs = &pgswarmv1.GCSDestination{
-				Bucket:     spec.Destination.GCS.Bucket,
-				PathPrefix: spec.Destination.GCS.PathPrefix,
+				Bucket:             spec.Destination.GCS.Bucket,
+				PathPrefix:         spec.Destination.GCS.PathPrefix,
+				ServiceAccountJson: spec.Destination.GCS.ServiceAccountJSON,
 			}
 		}
 	case "sftp":
@@ -1368,6 +1373,7 @@ func buildProtoBackupConfig(spec *models.BackupRuleSpec) *pgswarmv1.BackupConfig
 				Port:     int32(spec.Destination.SFTP.Port),
 				User:     spec.Destination.SFTP.User,
 				BasePath: spec.Destination.SFTP.BasePath,
+				Password: spec.Destination.SFTP.Password,
 			}
 		}
 	case "local":
@@ -1380,29 +1386,30 @@ func buildProtoBackupConfig(spec *models.BackupRuleSpec) *pgswarmv1.BackupConfig
 	}
 
 	bc.Retention = &pgswarmv1.BackupRetention{
-		BaseBackupCount:    int32(spec.Retention.BaseBackupCount),
-		WalRetentionDays:   int32(spec.Retention.WalRetentionDays),
-		LogicalBackupCount: int32(spec.Retention.LogicalBackupCount),
+		BaseBackupCount:        int32(spec.Retention.BaseBackupCount),
+		IncrementalBackupCount: int32(spec.Retention.IncrementalBackupCount),
+		WalRetentionDays:       int32(spec.Retention.WalRetentionDays),
+		LogicalBackupCount:     int32(spec.Retention.LogicalBackupCount),
 	}
 
 	return bc
 }
 
-// --- Backup Rules ---
+// --- Backup Profiles ---
 
-func (s *RESTServer) listBackupRules(c *fiber.Ctx) error {
-	rules, err := s.store.ListBackupRules(c.Context())
+func (s *RESTServer) listBackupProfiles(c *fiber.Ctx) error {
+	rules, err := s.store.ListBackupProfiles(c.Context())
 	if err != nil {
-		return fmt.Errorf("list backup rules: %w", err)
+		return fmt.Errorf("list backup profiles: %w", err)
 	}
 	if rules == nil {
-		rules = []*models.BackupRule{}
+		rules = []*models.BackupProfile{}
 	}
 	return c.JSON(rules)
 }
 
-func (s *RESTServer) createBackupRule(c *fiber.Ctx) error {
-	var rule models.BackupRule
+func (s *RESTServer) createBackupProfile(c *fiber.Ctx) error {
+	var rule models.BackupProfile
 	if err := c.BodyParser(&rule); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
@@ -1410,40 +1417,40 @@ func (s *RESTServer) createBackupRule(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
 
-	// Validate the backup rule spec
-	spec, err := rule.ParseBackupRuleSpec()
+	// Validate the backup profile spec
+	spec, err := rule.ParseBackupProfileSpec()
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid config: "+err.Error())
 	}
-	if err := models.ValidateBackupRuleSpec(spec); err != nil {
+	if err := models.ValidateBackupProfileSpec(spec); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
-	if err := s.store.CreateBackupRule(c.Context(), &rule); err != nil {
-		return fmt.Errorf("create backup rule: %w", err)
+	if err := s.store.CreateBackupProfile(c.Context(), &rule); err != nil {
+		return fmt.Errorf("create backup profile: %w", err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(rule)
 }
 
-func (s *RESTServer) getBackupRule(c *fiber.Ctx) error {
+func (s *RESTServer) getBackupProfile(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
-	rule, err := s.store.GetBackupRule(c.Context(), id)
+	rule, err := s.store.GetBackupProfile(c.Context(), id)
 	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup rule not found")
+		return fiber.NewError(fiber.StatusNotFound, "backup profile not found")
 	}
 	return c.JSON(rule)
 }
 
-func (s *RESTServer) updateBackupRule(c *fiber.Ctx) error {
+func (s *RESTServer) updateBackupProfile(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
 
-	var rule models.BackupRule
+	var rule models.BackupProfile
 	if err := c.BodyParser(&rule); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
@@ -1453,55 +1460,78 @@ func (s *RESTServer) updateBackupRule(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
 
-	spec, err := rule.ParseBackupRuleSpec()
+	spec, err := rule.ParseBackupProfileSpec()
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid config: "+err.Error())
 	}
-	if err := models.ValidateBackupRuleSpec(spec); err != nil {
+	if err := models.ValidateBackupProfileSpec(spec); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
-	if err := s.store.UpdateBackupRule(c.Context(), &rule); err != nil {
-		return fmt.Errorf("update backup rule: %w", err)
+	if err := s.store.UpdateBackupProfile(c.Context(), &rule); err != nil {
+		return fmt.Errorf("update backup profile: %w", err)
 	}
 	return c.JSON(rule)
 }
 
-func (s *RESTServer) deleteBackupRule(c *fiber.Ctx) error {
+func (s *RESTServer) deleteBackupProfile(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
-	if err := s.store.DeleteBackupRule(c.Context(), id); err != nil {
-		return fmt.Errorf("delete backup rule: %w", err)
+	if err := s.store.DeleteBackupProfile(c.Context(), id); err != nil {
+		return fmt.Errorf("delete backup profile: %w", err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-func (s *RESTServer) attachBackupRule(c *fiber.Ctx) error {
+func (s *RESTServer) attachBackupProfile(c *fiber.Ctx) error {
 	profileID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid profile id")
 	}
 
 	var body struct {
-		BackupRuleID string `json:"backup_rule_id"`
+		BackupProfileID string `json:"backup_profile_id"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	backupRuleID, err := uuid.Parse(body.BackupRuleID)
+	backupProfileID, err := uuid.Parse(body.BackupProfileID)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_rule_id")
+		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_profile_id")
 	}
 
-	// Verify backup rule exists
-	if _, err := s.store.GetBackupRule(c.Context(), backupRuleID); err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup rule not found")
+	// Verify backup profile exists and determine its type
+	newRule, err := s.store.GetBackupProfile(c.Context(), backupProfileID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "backup profile not found")
+	}
+	newSpec, err := newRule.ParseBackupProfileSpec()
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid backup profile config")
 	}
 
-	if err := s.store.AttachBackupRuleToProfile(c.Context(), profileID, backupRuleID); err != nil {
-		return fmt.Errorf("attach backup rule: %w", err)
+	// Enforce: at most one physical and one logical rule per profile
+	existing, _ := s.store.ListBackupProfilesForProfile(c.Context(), profileID)
+	for _, r := range existing {
+		if r.ID == backupProfileID {
+			return fiber.NewError(fiber.StatusConflict, "backup profile already attached")
+		}
+		spec, err := r.ParseBackupProfileSpec()
+		if err != nil {
+			continue
+		}
+		if newSpec.Physical != nil && spec.Physical != nil {
+			return fiber.NewError(fiber.StatusConflict, "profile already has a physical backup profile attached")
+		}
+		if newSpec.Logical != nil && spec.Logical != nil {
+			return fiber.NewError(fiber.StatusConflict, "profile already has a logical backup profile attached")
+		}
+	}
+
+	if err := s.store.AttachBackupProfileToProfile(c.Context(), profileID, backupProfileID); err != nil {
+		return fmt.Errorf("attach backup profile: %w", err)
 	}
 
 	// Bump config_version and re-push all clusters using this profile
@@ -1510,25 +1540,25 @@ func (s *RESTServer) attachBackupRule(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "attached"})
 }
 
-func (s *RESTServer) detachBackupRule(c *fiber.Ctx) error {
+func (s *RESTServer) detachBackupProfile(c *fiber.Ctx) error {
 	profileID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid profile id")
 	}
 
 	var body struct {
-		BackupRuleID string `json:"backup_rule_id"`
+		BackupProfileID string `json:"backup_profile_id"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	backupRuleID, err := uuid.Parse(body.BackupRuleID)
+	backupProfileID, err := uuid.Parse(body.BackupProfileID)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_rule_id")
+		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_profile_id")
 	}
 
-	if err := s.store.DetachBackupRuleFromProfile(c.Context(), profileID, backupRuleID); err != nil {
-		return fmt.Errorf("detach backup rule: %w", err)
+	if err := s.store.DetachBackupProfileFromProfile(c.Context(), profileID, backupProfileID); err != nil {
+		return fmt.Errorf("detach backup profile: %w", err)
 	}
 
 	// Bump config_version and re-push all clusters using this profile
@@ -1631,10 +1661,10 @@ func (s *RESTServer) initiateRestore(c *fiber.Ctx) error {
 
 	// Send restore command to satellite via gRPC
 	if s.streams != nil {
-		// Resolve the backup rule to get destination config
+		// Resolve the backup profile to get destination config
 		var dest *pgswarmv1.BackupDestination
-		if rule, err := s.store.GetBackupRule(c.Context(), backup.BackupRuleID); err == nil {
-			if ruleSpec, err := rule.ParseBackupRuleSpec(); err == nil {
+		if rule, err := s.store.GetBackupProfile(c.Context(), backup.BackupProfileID); err == nil {
+			if ruleSpec, err := rule.ParseBackupProfileSpec(); err == nil {
 				protoBackup := buildProtoBackupConfig(ruleSpec)
 				dest = protoBackup.Destination
 			}
@@ -1682,6 +1712,21 @@ func (s *RESTServer) listClusterRestores(c *fiber.Ctx) error {
 		ops = []*models.RestoreOperation{}
 	}
 	return c.JSON(ops)
+}
+
+func (s *RESTServer) listProfileBackupProfiles(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	rules, err := s.store.ListBackupProfilesForProfile(c.Context(), id)
+	if err != nil {
+		return fmt.Errorf("list backup profiles for profile: %w", err)
+	}
+	if rules == nil {
+		rules = []*models.BackupProfile{}
+	}
+	return c.JSON(rules)
 }
 
 // --- Error handler ---

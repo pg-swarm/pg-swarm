@@ -148,15 +148,54 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, postgresVariants, satellites, clusters, refresh } = useData();
+  const { profiles, postgresVersions, postgresVariants, satellites, clusters, backupProfiles, refresh } = useData();
   const toast = useToast();
 
-  useEffect(() => { document.title = 'Profiles - pg-swarm'; }, []);
+  useEffect(() => { document.title = 'Profiles - PG-Swarm'; }, []);
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
   const [scRefreshing, setScRefreshing] = useState(false);
+  // Track attached backup profiles per profile: { profileId: [rule, ...] }
+  const [attachedRules, setAttachedRules] = useState({});
+
+  // Load attached backup profiles for all profiles
+  useEffect(() => {
+    if (!profiles.length) return;
+    Promise.all(profiles.map(p =>
+      api.profileBackupProfiles(p.id).then(rules => [p.id, rules || []]).catch(() => [p.id, []])
+    )).then(pairs => {
+      const map = {};
+      for (const [id, rules] of pairs) map[id] = rules;
+      setAttachedRules(map);
+    });
+  }, [profiles]);
+
+  async function attachRule(profileId, ruleId) {
+    try {
+      await api.attachBackupProfile(profileId, ruleId);
+      toast('Backup rule attached');
+      // Refresh attached rules for this profile
+      const rules = await api.profileBackupProfiles(profileId);
+      setAttachedRules(prev => ({ ...prev, [profileId]: rules || [] }));
+      refresh();
+    } catch (e) {
+      toast('Attach failed: ' + e.message, true);
+    }
+  }
+
+  async function detachRule(profileId, ruleId) {
+    try {
+      await api.detachBackupProfile(profileId, ruleId);
+      toast('Backup rule detached');
+      const rules = await api.profileBackupProfiles(profileId);
+      setAttachedRules(prev => ({ ...prev, [profileId]: rules || [] }));
+      refresh();
+    } catch (e) {
+      toast('Detach failed: ' + e.message, true);
+    }
+  }
 
   // Deduplicate storage classes across all satellites
   const storageClasses = useMemo(() => {
@@ -260,7 +299,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} backupProfiles={backupProfiles} attachedBackupProfiles={attachedRules[editing.id] || []} onAttachBackup={attachRule} onDetachBackup={detachRule} />;
   }
 
   if (viewing) {
@@ -322,6 +361,13 @@ export default function Profiles() {
                   {Object.keys(spec.pg_params || {}).length > 0 && <span className="tag">{Object.keys(spec.pg_params).length} pg params</span>}
                   {(spec.hba_rules || []).length > 0 && <span className="tag">{spec.hba_rules.length} hba rules</span>}
                 </div>
+                <ProfileBackupProfiles
+                  profileId={p.id}
+                  attached={attachedRules[p.id] || []}
+                  allRules={backupProfiles}
+                  onAttach={attachRule}
+                  onDetach={detachRule}
+                />
               </div>
               <div className="cl-foot">
                 <span>{timeAgo(p.created_at)}</span>
@@ -350,6 +396,61 @@ function KV({ label, value }) {
   );
 }
 
+function ProfileBackupProfiles({ profileId, attached, allRules, onAttach, onDetach }) {
+  const [showPicker, setShowPicker] = useState(false);
+  const attachedIds = new Set(attached.map(r => r.id));
+  const hasPhysical = attached.some(r => { const s = parseSpec(r.config); return !!s.physical; });
+  const hasLogical = attached.some(r => { const s = parseSpec(r.config); return !!s.logical; });
+
+  // Filter available rules: not already attached, and respect one-physical/one-logical limit
+  const available = allRules.filter(r => {
+    if (attachedIds.has(r.id)) return false;
+    const s = parseSpec(r.config);
+    if (s.physical && hasPhysical) return false;
+    if (s.logical && hasLogical) return false;
+    return true;
+  });
+
+  return (
+    <div className="backup-profiles-section">
+      <div className="backup-profiles-header">
+        <span className="backup-profiles-label">Backup Profiles</span>
+        {available.length > 0 && (
+          <button className="btn-link" onClick={() => setShowPicker(!showPicker)}>
+            {showPicker ? 'Cancel' : '+ Attach'}
+          </button>
+        )}
+      </div>
+      {attached.length === 0 && !showPicker && (
+        <span className="sm muted">No backup profiles attached</span>
+      )}
+      {attached.map(r => {
+        const s = parseSpec(r.config);
+        const type = s.physical ? 'Physical' : 'Logical';
+        return (
+          <div key={r.id} className="backup-profile-chip">
+            <span className="tag">{type}</span>
+            <span>{r.name}</span>
+            <button className="btn-link" style={{ color: 'var(--red)' }} onClick={() => onDetach(profileId, r.id)}>Detach</button>
+          </div>
+        );
+      })}
+      {showPicker && (
+        <select className="input" style={{ marginTop: 4 }} defaultValue="" onChange={e => {
+          if (e.target.value) { onAttach(profileId, e.target.value); setShowPicker(false); }
+        }}>
+          <option value="" disabled>Select a backup profile...</option>
+          {available.map(r => {
+            const s = parseSpec(r.config);
+            const type = s.physical ? 'Physical' : 'Logical';
+            return <option key={r.id} value={r.id}>{r.name} ({type})</option>;
+          })}
+        </select>
+      )}
+    </div>
+  );
+}
+
 // ── Tab definitions ─────────────────────────────────────────────────────────
 
 const TABS = [
@@ -359,11 +460,12 @@ const TABS = [
   { id: 'pgconfig', label: 'PostgreSQL' },
   { id: 'hba', label: 'HBA Rules' },
   { id: 'databases', label: 'Databases' },
+  { id: 'backups', label: 'Backups' },
 ];
 
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageClasses, scRefreshing, onRefreshStorageClasses }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageClasses, scRefreshing, onRefreshStorageClasses, backupProfiles, attachedBackupProfiles, onAttachBackup, onDetachBackup }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
@@ -507,6 +609,9 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
             )}
             {tab.id === 'hba' && spec.hba_rules.length > 0 && (
               <span className="tab-badge">{spec.hba_rules.length}</span>
+            )}
+            {tab.id === 'backups' && attachedBackupProfiles.length > 0 && (
+              <span className="tab-badge">{attachedBackupProfiles.length}</span>
             )}
           </button>
         ))}
@@ -839,6 +944,24 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
               </table>
             ) : null}
             <button className="btn btn-sm" onClick={addDatabase} style={{ marginTop: 6 }}>+ Add Database</button>
+          </section>
+        )}
+
+        {activeTab === 'backups' && (
+          <section className="form-section">
+            <h4>Backup Profiles</h4>
+            <p className="muted sm" style={{ marginBottom: 12 }}>Attach up to two backup profiles: one physical (base backup + WAL) and one logical (pg_dump). Each targets a single destination.</p>
+            {state.isNew ? (
+              <div className="empty" style={{ padding: 16 }}>Save the profile first, then attach backup profiles.</div>
+            ) : (
+              <ProfileBackupProfiles
+                profileId={state.id}
+                attached={attachedBackupProfiles}
+                allRules={backupProfiles}
+                onAttach={onAttachBackup}
+                onDetach={onDetachBackup}
+              />
+            )}
           </section>
         )}
       </div>

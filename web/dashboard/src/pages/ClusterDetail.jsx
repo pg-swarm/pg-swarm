@@ -55,9 +55,9 @@ export default function ClusterDetail() {
   useEffect(() => {
     const c = clusters.find(c => c.id === id);
     if (c) {
-      document.title = `${c.name} (${c.namespace || 'default'}) - pg-swarm`;
+      document.title = `${c.name} (${c.namespace || 'default'}) - PG-Swarm`;
     }
-    return () => { document.title = 'pg-swarm'; };
+    return () => { document.title = 'PG-Swarm'; };
   }, [clusters, id]);
 
   const cluster = clusters.find(c => c.id === id);

@@ -12,7 +12,7 @@ export default function DeploymentRules() {
   const { deploymentRules, profiles, clusters, refresh } = useData();
   const toast = useToast();
 
-  useEffect(() => { document.title = 'Deployment Rules - pg-swarm'; }, []);
+  useEffect(() => { document.title = 'Deployment Rules - PG-Swarm'; }, []);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null);
   const [expanded, setExpanded] = useState(null);

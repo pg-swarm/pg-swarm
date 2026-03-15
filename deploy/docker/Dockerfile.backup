@@ -9,7 +9,7 @@
 FROM alpine:3.23
 
 RUN apk add --no-cache \
-    ca-certificates tzdata bash curl \
+    ca-certificates tzdata bash curl gzip \
     postgresql16-client \
     postgresql17-client \
     postgresql18-client \
@@ -17,6 +17,7 @@ RUN apk add --no-cache \
     openssh-client \
     rclone \
     kubectl \
+    sqlite \
     && addgroup -S pgswarm \
     && adduser  -S pgswarm -G pgswarm
 
@@ -36,6 +37,79 @@ fi
 echo "Using PG client version: $(pg_dump --version | head -1)"
 EOF
 RUN chmod +x /usr/local/bin/pg-select-version.sh
+
+# backup-metadata.sh — helper functions for the SQLite metadata DB.
+# Source this in CronJob scripts: source /usr/local/bin/backup-metadata.sh
+COPY <<'METAEOF' /usr/local/bin/backup-metadata.sh
+#!/bin/bash
+# Metadata DB path (local working copy)
+METADATA_DB="/tmp/backups.db"
+METADATA_REMOTE_PATH="${CLUSTER_NAME}/metadata/backups.db"
+
+init_metadata_db() {
+  if [ ! -f "$METADATA_DB" ]; then
+    sqlite3 "$METADATA_DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS backups (
+    id           TEXT PRIMARY KEY,
+    type         TEXT NOT NULL,
+    parent_id    TEXT,
+    started_at   TEXT NOT NULL,
+    completed_at TEXT,
+    size_bytes   INTEGER DEFAULT 0,
+    backup_path  TEXT NOT NULL,
+    pg_version   TEXT,
+    wal_start_lsn TEXT,
+    wal_end_lsn  TEXT,
+    status       TEXT DEFAULT 'running',
+    error        TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS manifests (
+    backup_id TEXT PRIMARY KEY REFERENCES backups(id),
+    data      BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wal_segments (
+    name        TEXT PRIMARY KEY,
+    archived_at TEXT NOT NULL,
+    size_bytes  INTEGER DEFAULT 0
+);
+SQL
+  fi
+}
+
+# Get the latest manifest blob, output to a file. Returns 0 if found.
+get_latest_manifest() {
+  local out="$1"
+  sqlite3 "$METADATA_DB" "SELECT writefile('${out}', data) FROM manifests ORDER BY rowid DESC LIMIT 1;" 2>/dev/null
+  [ -s "$out" ]
+}
+
+# Get the backup_id of the latest completed backup of a given type
+get_latest_backup_id() {
+  local btype="$1"
+  sqlite3 "$METADATA_DB" "SELECT id FROM backups WHERE type='${btype}' AND status='completed' ORDER BY started_at DESC LIMIT 1;" 2>/dev/null
+}
+
+# Insert a new backup record, returns the id
+insert_backup() {
+  local id="$1" btype="$2" parent="$3" path="$4" pgver="$5"
+  local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  sqlite3 "$METADATA_DB" "INSERT INTO backups (id, type, parent_id, started_at, backup_path, pg_version, status) VALUES ('${id}', '${btype}', '${parent}', '${now}', '${path}', '${pgver}', 'running');"
+}
+
+# Complete a backup record
+complete_backup() {
+  local id="$1" size="$2" wal_start="$3" wal_end="$4" status="${5:-completed}" error="$6"
+  local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  sqlite3 "$METADATA_DB" "UPDATE backups SET completed_at='${now}', size_bytes=${size}, wal_start_lsn='${wal_start}', wal_end_lsn='${wal_end}', status='${status}', error='${error}' WHERE id='${id}';"
+}
+
+# Store a manifest blob for a backup
+store_manifest() {
+  local backup_id="$1" manifest_file="$2"
+  sqlite3 "$METADATA_DB" "INSERT OR REPLACE INTO manifests (backup_id, data) VALUES ('${backup_id}', readfile('${manifest_file}'));"
+}
+METAEOF
+RUN chmod +x /usr/local/bin/backup-metadata.sh
 
 USER pgswarm
 

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>pg-swarm - PostgreSQL HA at the Edge</title>
   <meta name="description" content="Centralized management for PostgreSQL High Availability clusters across hundreds of edge Kubernetes clusters.">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
@@ -292,13 +293,13 @@
     <div class="feature-grid">
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128190;</div>
-        <h3>Backup Rules</h3>
+        <h3>Backup Profiles</h3>
         <p>Independent, reusable configurations that define what to back up (physical, logical, or both), where (S3, GCS, SFTP, local PVC), and how long to retain.</p>
       </div>
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128279;</div>
         <h3>Multi-Rule Attach</h3>
-        <p>Attach multiple backup rules to a single profile. Back up to S3 for offsite disaster recovery and a local PVC for fast restores simultaneously.</p>
+        <p>Attach multiple backup profiles to a single profile. Back up to S3 for offsite disaster recovery and a local PVC for fast restores simultaneously.</p>
       </div>
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#9881;</div>
@@ -368,8 +369,8 @@
         <p>Promote any replica to primary with a detailed confirmation modal showing each step and a downtime warning.</p>
       </div>
       <div class="dash-feature">
-        <h4>Backup Rules</h4>
-        <p>Create and manage backup rules with physical/logical schedules, destination config, and retention policies. Attach multiple rules per profile.</p>
+        <h4>Backup Profiles</h4>
+        <p>Create and manage backup profiles with physical/logical schedules, destination config, and retention policies. Attach multiple rules per profile.</p>
       </div>
       <div class="dash-feature">
         <h4>Backup Inventory</h4>

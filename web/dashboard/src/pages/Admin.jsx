@@ -10,7 +10,7 @@ export default function Admin() {
   const { postgresVersions, postgresVariants, refresh } = useData();
   const toast = useToast();
 
-  useEffect(() => { document.title = 'Admin - pg-swarm'; }, []);
+  useEffect(() => { document.title = 'Admin - PG-Swarm'; }, []);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ version: '', variant: '', image_tag: '' });
   const [newVariant, setNewVariant] = useState({ name: '', description: '' });

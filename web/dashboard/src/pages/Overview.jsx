@@ -23,7 +23,7 @@ const SEV_ICONS = {
 export default function Overview() {
   const { satellites, clusters, events } = useData();
 
-  useEffect(() => { document.title = 'Overview - pg-swarm'; }, []);
+  useEffect(() => { document.title = 'Overview - PG-Swarm'; }, []);
 
   const connected = satellites.filter(s => deriveSatState(s) === 'connected').length;
   const pending   = satellites.filter(s => deriveSatState(s) === 'pending').length;

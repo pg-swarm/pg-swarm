@@ -73,7 +73,7 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 			merged["archive_command"] = fmt.Sprintf("'%s'", archive.ArchiveCommand)
 		}
 	} else if walBackup := firstWalArchiveBackup(backups); walBackup != nil {
-		// Auto-configure WAL archiving from the first backup rule with WAL archiving enabled
+		// Auto-configure WAL archiving from the physical backup profile
 		merged["archive_mode"] = "on"
 		timeout := walBackup.Physical.ArchiveTimeoutSeconds
 		if timeout <= 0 {
@@ -83,6 +83,14 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		merged["archive_command"] = fmt.Sprintf("'%s'", backupWalArchiveCommand(walBackup.Destination))
 	} else {
 		merged["archive_mode"] = "off"
+	}
+
+	// Incremental backups (PG 17+) require summarize_wal
+	for _, b := range backups {
+		if b.Physical != nil && b.Physical.IncrementalSchedule != "" {
+			merged["summarize_wal"] = "on"
+			break
+		}
 	}
 
 	// User params override everything (escape hatch)
