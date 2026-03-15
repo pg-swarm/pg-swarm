@@ -7,6 +7,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -36,6 +37,77 @@ func ruleShortID(ruleID string) string {
 		return ruleID[:8]
 	}
 	return ruleID
+}
+
+// backupLeaseName returns the Lease resource name used to prevent base/incremental overlap.
+func backupLeaseName(clusterName string) string {
+	return resourceName(clusterName, "backup-lease")
+}
+
+// backupServiceAccountName returns the ServiceAccount name used by backup CronJob pods.
+func backupServiceAccountName(clusterName string) string {
+	return resourceName(clusterName, "backup")
+}
+
+// buildBackupServiceAccount creates the ServiceAccount for backup CronJob pods.
+func buildBackupServiceAccount(cfg *pgswarmv1.ClusterConfig) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      backupServiceAccountName(cfg.ClusterName),
+			Namespace: cfg.Namespace,
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+		},
+	}
+}
+
+// buildBackupRole creates the RBAC Role granting lease and configmap access for backup pods.
+func buildBackupRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
+	return &rbacv1.Role{
+		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      backupServiceAccountName(cfg.ClusterName),
+			Namespace: cfg.Namespace,
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"coordination.k8s.io"},
+				Resources: []string{"leases"},
+				Verbs:     []string{"get", "create", "update", "delete"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			},
+		},
+	}
+}
+
+// buildBackupRoleBinding creates the RoleBinding linking the backup ServiceAccount to its Role.
+func buildBackupRoleBinding(cfg *pgswarmv1.ClusterConfig) *rbacv1.RoleBinding {
+	saName := backupServiceAccountName(cfg.ClusterName)
+	return &rbacv1.RoleBinding{
+		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      saName,
+			Namespace: cfg.Namespace,
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "Role",
+			Name:     saName,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      saName,
+				Namespace: cfg.Namespace,
+			},
+		},
+	}
 }
 
 // backupCredentialSecretName returns the K8s Secret name for backup destination creds.
@@ -121,7 +193,8 @@ func buildBaseBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.Back
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: labels},
 						Spec: corev1.PodSpec{
-							RestartPolicy: corev1.RestartPolicyOnFailure,
+							ServiceAccountName: backupServiceAccountName(cfg.ClusterName),
+							RestartPolicy:      corev1.RestartPolicyOnFailure,
 							Containers: []corev1.Container{
 								{
 									Name:    "base-backup",
@@ -170,7 +243,8 @@ func buildLogicalBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.B
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: labels},
 						Spec: corev1.PodSpec{
-							RestartPolicy: corev1.RestartPolicyOnFailure,
+							ServiceAccountName: backupServiceAccountName(cfg.ClusterName),
+							RestartPolicy:      corev1.RestartPolicyOnFailure,
 							Containers: []corev1.Container{
 								{
 									Name:    "logical-backup",
@@ -219,6 +293,7 @@ func backupEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig,
 		{Name: "BACKUP_RULE_ID", Value: backup.BackupProfileId},
 		{Name: "DEST_TYPE", Value: backup.Destination.Type},
 		{Name: "BACKUP_STATUS_CM", Value: backupStatusConfigMapName(cfg.ClusterName)},
+		{Name: "BACKUP_LEASE_NAME", Value: backupLeaseName(cfg.ClusterName)},
 	}
 
 	// Add destination-specific env vars
@@ -382,6 +457,25 @@ func baseBackupScript(dest *pgswarmv1.BackupDestination) string {
 	sb.WriteString("set -eo pipefail\n")
 	sb.WriteString("source /usr/local/bin/pg-select-version.sh\n")
 	sb.WriteString("source /usr/local/bin/backup-metadata.sh\n")
+	sb.WriteString("\n")
+	sb.WriteString("# Acquire backup lease to prevent incremental backups from running concurrently\n")
+	sb.WriteString("release_backup_lease() {\n")
+	sb.WriteString("  kubectl delete lease \"${BACKUP_LEASE_NAME}\" -n \"${NAMESPACE}\" --ignore-not-found 2>/dev/null || true\n")
+	sb.WriteString("}\n")
+	sb.WriteString("trap release_backup_lease EXIT\n")
+	sb.WriteString("cat <<LEASEEOF | kubectl apply -f -\n")
+	sb.WriteString("apiVersion: coordination.k8s.io/v1\n")
+	sb.WriteString("kind: Lease\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString("  name: ${BACKUP_LEASE_NAME}\n")
+	sb.WriteString("  namespace: ${NAMESPACE}\n")
+	sb.WriteString("spec:\n")
+	sb.WriteString("  holderIdentity: base-backup\n")
+	sb.WriteString("  leaseDurationSeconds: 3600\n")
+	sb.WriteString("  renewTime: \"$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)\"\n")
+	sb.WriteString("LEASEEOF\n")
+	sb.WriteString("echo \"Acquired backup lease ${BACKUP_LEASE_NAME}\"\n")
+	sb.WriteString("\n")
 	sb.WriteString("BACKUP_ID=$(cat /proc/sys/kernel/random/uuid)\n")
 	sb.WriteString("TIMESTAMP=$(date +%Y%m%d_%H%M%S)\n")
 	sb.WriteString("BACKUP_DIR=/tmp/basebackup_${TIMESTAMP}\n")
@@ -539,7 +633,8 @@ func buildIncrementalBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarm
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: labels},
 						Spec: corev1.PodSpec{
-							RestartPolicy: corev1.RestartPolicyOnFailure,
+							ServiceAccountName: backupServiceAccountName(cfg.ClusterName),
+							RestartPolicy:      corev1.RestartPolicyOnFailure,
 							Containers: []corev1.Container{
 								{
 									Name:    "incr-backup",
@@ -564,6 +659,24 @@ func incrementalBackupScript(dest *pgswarmv1.BackupDestination) string {
 	sb.WriteString("set -eo pipefail\n")
 	sb.WriteString("source /usr/local/bin/pg-select-version.sh\n")
 	sb.WriteString("source /usr/local/bin/backup-metadata.sh\n")
+	sb.WriteString("\n")
+	sb.WriteString("# Skip if a base backup currently holds the backup lease\n")
+	sb.WriteString("LEASE_DATA=$(kubectl get lease \"${BACKUP_LEASE_NAME}\" -n \"${NAMESPACE}\" \\\n")
+	sb.WriteString("  -o jsonpath='{.spec.holderIdentity},{.spec.renewTime},{.spec.leaseDurationSeconds}' 2>/dev/null || true)\n")
+	sb.WriteString("if [ -n \"$LEASE_DATA\" ]; then\n")
+	sb.WriteString("  IFS=',' read -r HOLDER RENEW_TIME DURATION <<< \"$LEASE_DATA\"\n")
+	sb.WriteString("  if [ \"$HOLDER\" = \"base-backup\" ] && [ -n \"$RENEW_TIME\" ]; then\n")
+	sb.WriteString("    DURATION=${DURATION:-3600}\n")
+	sb.WriteString("    RENEW_EPOCH=$(date -d \"$RENEW_TIME\" +%s 2>/dev/null || echo 0)\n")
+	sb.WriteString("    NOW_EPOCH=$(date +%s)\n")
+	sb.WriteString("    if [ $(( NOW_EPOCH - RENEW_EPOCH )) -lt \"$DURATION\" ]; then\n")
+	sb.WriteString("      echo \"Base backup in progress (lease held since ${RENEW_TIME}), skipping incremental\"\n")
+	sb.WriteString("      exit 0\n")
+	sb.WriteString("    fi\n")
+	sb.WriteString("    echo \"Backup lease expired, proceeding with incremental\"\n")
+	sb.WriteString("  fi\n")
+	sb.WriteString("fi\n")
+	sb.WriteString("\n")
 	sb.WriteString("BACKUP_ID=$(cat /proc/sys/kernel/random/uuid)\n")
 	sb.WriteString("TIMESTAMP=$(date +%Y%m%d_%H%M%S)\n")
 	sb.WriteString("BACKUP_DIR=/tmp/incrbackup_${TIMESTAMP}\n")
@@ -609,6 +722,17 @@ func incrementalBackupScript(dest *pgswarmv1.BackupDestination) string {
 
 // reconcileBackupCronJobs creates or updates backup CronJobs for all attached backup profiles.
 func reconcileBackupCronJobs(ctx context.Context, client kubernetes.Interface, cfg *pgswarmv1.ClusterConfig) error {
+	// Ensure backup RBAC resources exist (ServiceAccount, Role, RoleBinding)
+	if err := createOrUpdateServiceAccount(ctx, client, buildBackupServiceAccount(cfg)); err != nil {
+		return fmt.Errorf("backup serviceaccount: %w", err)
+	}
+	if err := createOrUpdateRole(ctx, client, buildBackupRole(cfg)); err != nil {
+		return fmt.Errorf("backup role: %w", err)
+	}
+	if err := createOrUpdateRoleBinding(ctx, client, buildBackupRoleBinding(cfg)); err != nil {
+		return fmt.Errorf("backup rolebinding: %w", err)
+	}
+
 	for _, backup := range cfg.Backups {
 		if cj := buildBaseBackupCronJob(cfg, backup); cj != nil {
 			if err := createOrUpdateCronJob(ctx, client, cj); err != nil {
@@ -631,13 +755,16 @@ func reconcileBackupCronJobs(ctx context.Context, client kubernetes.Interface, c
 
 // cleanupBackupCronJobs removes all backup CronJobs, credential Secrets, and status ConfigMap for a cluster.
 func cleanupBackupCronJobs(ctx context.Context, client kubernetes.Interface, ns, clusterName string) {
-	// Delete all backup CronJobs by label selector
+	// Delete all backup CronJobs and initial Jobs by label selector
 	selector := "pg-swarm.io/cluster=" + clusterName
+	propagation := metav1.DeletePropagationBackground
 	cjList, err := client.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err == nil {
 		for _, cj := range cjList.Items {
 			if _, ok := cj.Labels["pg-swarm/backup-type"]; ok {
 				_ = client.BatchV1().CronJobs(ns).Delete(ctx, cj.Name, metav1.DeleteOptions{})
+				// Also delete the initial Job if it exists
+				_ = client.BatchV1().Jobs(ns).Delete(ctx, cj.Name+"-initial", metav1.DeleteOptions{PropagationPolicy: &propagation})
 			}
 		}
 	}
@@ -655,6 +782,40 @@ func cleanupBackupCronJobs(ctx context.Context, client kubernetes.Interface, ns,
 	if err := client.CoreV1().ConfigMaps(ns).Delete(ctx, statusName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		// best-effort
 	}
+	// Clean up backup lease
+	leaseName := backupLeaseName(clusterName)
+	_ = client.CoordinationV1().Leases(ns).Delete(ctx, leaseName, metav1.DeleteOptions{})
+	// Clean up backup RBAC resources
+	saName := backupServiceAccountName(clusterName)
+	_ = client.RbacV1().RoleBindings(ns).Delete(ctx, saName, metav1.DeleteOptions{})
+	_ = client.RbacV1().Roles(ns).Delete(ctx, saName, metav1.DeleteOptions{})
+	_ = client.CoreV1().ServiceAccounts(ns).Delete(ctx, saName, metav1.DeleteOptions{})
+}
+
+// triggerImmediateJob creates a one-off Job from a CronJob's template to run immediately.
+// Only triggers if no prior Job exists for this CronJob (first attach).
+func triggerImmediateJob(ctx context.Context, client kubernetes.Interface, cj *batchv1.CronJob) {
+	jobName := cj.Name + "-initial"
+	_, err := client.BatchV1().Jobs(cj.Namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err == nil {
+		return // already triggered before
+	}
+	if !apierrors.IsNotFound(err) {
+		return
+	}
+
+	job := &batchv1.Job{
+		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: cj.Namespace,
+			Labels:    cj.Labels,
+		},
+		Spec: cj.Spec.JobTemplate.Spec,
+	}
+	if _, err := client.BatchV1().Jobs(cj.Namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		// best-effort, CronJob will run on schedule anyway
+	}
 }
 
 // createOrUpdateCronJob creates a CronJob if it doesn't exist, or updates it.
@@ -662,6 +823,10 @@ func createOrUpdateCronJob(ctx context.Context, client kubernetes.Interface, des
 	existing, err := client.BatchV1().CronJobs(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = client.BatchV1().CronJobs(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+		if err == nil {
+			// First time creating this CronJob — trigger an immediate run
+			triggerImmediateJob(ctx, client, desired)
+		}
 		return err
 	}
 	if err != nil {

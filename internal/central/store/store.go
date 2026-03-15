@@ -31,6 +31,7 @@ type Store interface {
 	DeleteClusterConfig(ctx context.Context, id uuid.UUID) error
 	SetClusterPaused(ctx context.Context, id uuid.UUID, paused bool) (*models.ClusterConfig, error)
 	GetClusterConfigsBySatellite(ctx context.Context, satelliteID uuid.UUID) ([]*models.ClusterConfig, error)
+	GetClusterConfigsByProfile(ctx context.Context, profileID uuid.UUID) ([]*models.ClusterConfig, error)
 
 	// Profiles
 	CreateProfile(ctx context.Context, profile *models.ClusterProfile) error
