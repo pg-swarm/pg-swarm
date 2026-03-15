@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>pg-swarm - PostgreSQL HA at the Edge</title>
+  <title>PG-Swarm - PostgreSQL HA at the Edge</title>
   <meta name="description" content="Centralized management for PostgreSQL High Availability clusters across hundreds of edge Kubernetes clusters.">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,7 +16,8 @@
 <nav class="nav">
   <div class="container nav-inner">
     <a href="#" class="nav-brand">
-      <span class="nav-logo">pg</span>swarm
+      <img src="images/logo.svg" alt="PG-Swarm" width="28" height="28" class="brand-logo">
+      PG-Swarm
     </a>
     <div class="nav-links">
       <a href="#features">Features</a>
@@ -181,7 +182,7 @@
       <div class="feature-card">
         <div class="feature-icon">&#128190;</div>
         <h3>Managed Backups</h3>
-        <p>Schedule physical and logical backups to S3, GCS, SFTP, or local PVC. Multiple rules per profile with automatic WAL archiving and PITR.</p>
+        <p>Full, incremental, and logical backups with SQLite metadata tracking. Gzip compression, multi-PG-version support, and automatic retention.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#127760;</div>
@@ -208,7 +209,7 @@
     <h2 class="section-title center">Architecture</h2>
     <p class="section-sub center">Three Go binaries. Bidirectional gRPC streaming. No external dependencies beyond PostgreSQL.</p>
     <div class="arch-diagram">
-      <img src="images/architecture.svg" alt="pg-swarm architecture diagram" class="arch-svg">
+      <img src="images/architecture.svg" alt="PG-Swarm architecture diagram" class="arch-svg">
     </div>
     <div class="arch-components">
       <div class="arch-card">
@@ -286,7 +287,7 @@
 <section class="section section-dark" id="backup">
   <div class="container">
     <h2 class="section-title center">Backup & Restore</h2>
-    <p class="section-sub center">Managed backups driven by reusable rules. Multiple rules per profile, automatic CronJobs, point-in-time recovery.</p>
+    <p class="section-sub center">Managed backups with incremental support, SQLite metadata tracking, gzip compression, and point-in-time recovery.</p>
     <div class="arch-diagram">
       <img src="images/backup-architecture.svg" alt="Backup architecture diagram" class="arch-svg">
     </div>
@@ -294,22 +295,22 @@
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128190;</div>
         <h3>Backup Profiles</h3>
-        <p>Independent, reusable configurations that define what to back up (physical, logical, or both), where (S3, GCS, SFTP, local PVC), and how long to retain.</p>
+        <p>Reusable configurations defining backup type (physical or logical), destination, schedule, and retention. Attach one of each type to a cluster profile.</p>
       </div>
       <div class="feature-card feature-card-dark">
-        <div class="feature-icon">&#128279;</div>
-        <h3>Multi-Rule Attach</h3>
-        <p>Attach multiple backup profiles to a single profile. Back up to S3 for offsite disaster recovery and a local PVC for fast restores simultaneously.</p>
+        <div class="feature-icon">&#128194;</div>
+        <h3>Full + Incremental</h3>
+        <p>Daily full base backups with hourly incrementals (PG 17+). Incrementals capture only changed blocks. First run always takes a full backup automatically.</p>
       </div>
       <div class="feature-card feature-card-dark">
-        <div class="feature-icon">&#9881;</div>
-        <h3>CronJob-Based</h3>
-        <p>Backups run as Kubernetes CronJobs, not sidecars. Attach/detach rules with zero impact on running PostgreSQL pods. No rolling restarts.</p>
+        <div class="feature-icon">&#128451;</div>
+        <h3>SQLite Metadata Store</h3>
+        <p>Each destination has a <code>backups.db</code> tracking every backup with parent chains, manifests, sizes, and WAL segments. No external database needed.</p>
       </div>
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128203;</div>
         <h3>WAL Auto-Config</h3>
-        <p>When WAL archiving is enabled on a rule, the operator automatically sets archive_mode, archive_command, and archive_timeout in postgresql.conf.</p>
+        <p>Physical backup profiles with WAL archiving enabled auto-set <code>archive_mode</code>, <code>archive_command</code>, and <code>summarize_wal</code> in postgresql.conf.</p>
       </div>
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#9202;</div>
@@ -317,26 +318,26 @@
         <p>Restore to any point in time from the dashboard. Select a base backup and target timestamp. The satellite handles StatefulSet scaling and recovery setup.</p>
       </div>
       <div class="feature-card feature-card-dark">
-        <div class="feature-icon">&#128202;</div>
-        <h3>Backup Inventory</h3>
-        <p>Every backup is tracked in a central inventory with status, size, WAL LSN range, and PG version. Status flows from satellites via gRPC in real time.</p>
+        <div class="feature-icon">&#128230;</div>
+        <h3>Gzip Compression</h3>
+        <p>All backups are compressed before upload. Base backups use <code>pg_basebackup -z</code>. Logical dumps are gzipped. Custom format uses built-in zlib.</p>
       </div>
     </div>
     <div class="arch-components" style="margin-top: 40px">
       <div class="arch-card">
         <h3>Destinations</h3>
         <code>s3 / gcs / sftp / local</code>
-        <p>S3 and S3-compatible (MinIO), Google Cloud Storage, SFTP servers, or local PersistentVolumeClaims on the satellite cluster.</p>
+        <p>S3 and S3-compatible (MinIO), Google Cloud Storage, SFTP servers, or local PersistentVolumeClaims. Credentials stored as K8s Secrets on each satellite.</p>
       </div>
       <div class="arch-card">
         <h3>Backup Image</h3>
         <code>pg-swarm-backup:latest</code>
-        <p>Alpine-based image with PG 16/17/18 client tools, aws-cli, rclone, and kubectl. Auto-selects the right PG version at runtime.</p>
+        <p>Alpine-based image with PG 16/17/18 client tools, aws-cli, rclone, kubectl, and sqlite3. Auto-selects the right PG version at runtime.</p>
       </div>
       <div class="arch-card">
-        <h3>Retention</h3>
-        <code>count + days</code>
-        <p>Configurable retention per rule: base backup count, WAL retention days, and logical backup count. Enforced automatically after each backup.</p>
+        <h3>Default Profiles</h3>
+        <code>daily-logical-2am / daily-physical-4am</code>
+        <p>Seeded on first run. Logical dump at 2 AM (7 retained). Full base at 4 AM + hourly incrementals + WAL archiving (7 full, 23 incremental, 7 days WAL).</p>
       </div>
     </div>
   </div>
@@ -358,7 +359,7 @@
       </div>
       <div class="dash-feature">
         <h4>Profile Editor</h4>
-        <p>6-tab configuration editor: General, Volumes, Resources, PostgreSQL params (full catalog with 50+ parameters), HBA Rules, and Databases.</p>
+        <p>7-tab configuration editor: General, Volumes, Resources, PostgreSQL params (50+ parameters), HBA Rules, Databases, and Backups.</p>
       </div>
       <div class="dash-feature">
         <h4>Deployment Rules</h4>
@@ -370,11 +371,11 @@
       </div>
       <div class="dash-feature">
         <h4>Backup Profiles</h4>
-        <p>Create and manage backup profiles with physical/logical schedules, destination config, and retention policies. Attach multiple rules per profile.</p>
+        <p>Create physical and logical backup profiles with cron schedules, destination config, and retention policies. Human-readable schedule preview.</p>
       </div>
       <div class="dash-feature">
         <h4>Backup Inventory</h4>
-        <p>View all backups per cluster with status, size, and WAL range. Initiate point-in-time or logical restores directly from the cluster detail page.</p>
+        <p>View all backups per cluster with type, status, size, and WAL range. Initiate point-in-time or logical restores from the cluster detail page.</p>
       </div>
       <div class="dash-feature">
         <h4>Event Log</h4>
@@ -396,7 +397,7 @@
       <div class="stack-item"><strong>Logging</strong><span>zerolog</span></div>
       <div class="stack-item"><strong>Dashboard</strong><span>React 19 + Vite + JSX</span></div>
       <div class="stack-item"><strong>K8s Client</strong><span>client-go v0.35</span></div>
-      <div class="stack-item"><strong>Deployment</strong><span>Docker + Kustomize</span></div>
+      <div class="stack-item"><strong>Backup Metadata</strong><span>SQLite</span></div>
     </div>
   </div>
 </section>
@@ -405,7 +406,7 @@
 <section class="section section-dark" id="quickstart">
   <div class="container">
     <h2 class="section-title center">Quick Start</h2>
-    <p class="section-sub center">Get pg-swarm running locally in under a minute.</p>
+    <p class="section-sub center">Get PG-Swarm running locally in under a minute.</p>
     <div class="code-blocks">
       <div class="code-block">
         <div class="code-header">Build from source</div>
@@ -440,7 +441,8 @@ kubectl apply -k deploy/k8s/satellite/base/
 <footer class="footer">
   <div class="container footer-inner">
     <div class="footer-brand">
-      <span class="nav-logo">pg</span>swarm
+      <img src="images/logo.svg" alt="PG-Swarm" width="32" height="32" class="brand-logo" style="vertical-align: middle; margin-right: 8px;">
+      <span style="font-size: 18px; font-weight: 700;">PG-Swarm</span>
       <p>PostgreSQL HA at the Edge</p>
     </div>
     <div class="footer-links">
