@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { deriveSatState, timeAgo } from '../api';
 import {
@@ -21,6 +22,8 @@ const SEV_ICONS = {
 
 export default function Overview() {
   const { satellites, clusters, events } = useData();
+
+  useEffect(() => { document.title = 'Overview - pg-swarm'; }, []);
 
   const connected = satellites.filter(s => deriveSatState(s) === 'connected').length;
   const pending   = satellites.filter(s => deriveSatState(s) === 'pending').length;

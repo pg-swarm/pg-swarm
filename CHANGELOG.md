@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Satellite log streaming and dynamic log levels
+
+- New proto messages `LogEntry` and `SetLogLevel` on the satellite/central stream for real-time log forwarding and remote log level control.
+- `internal/satellite/logcapture/` package: zerolog `Hook` with bounded channel (256, drop-on-overflow), `SetGlobalLevel()` helper, and `Drain()` goroutine that forwards entries to central.
+- `LOG_LEVEL` env var on satellite (default: "info") sets initial zerolog global level at startup.
+- Central receives log entries via gRPC and stores them in an in-memory ring buffer (1000 entries per satellite) with SSE fan-out to dashboard subscribers.
+- REST endpoints: `GET /satellites/:id/logs` (recent buffered logs), `GET /satellites/:id/logs/stream` (SSE real-time stream), `POST /satellites/:id/log-level` (remote level change).
+- Dashboard: new `/satellites/:id/logs` page with terminal-style log viewer, server-side stream level dropdown, client-side level filter, auto-scroll toggle, and clear button. "Logs" button added to Satellites table for non-pending satellites.
+- Trace-level log statements (~70) added across all satellite packages (agent, registration, connector, operator, reconcile helpers, health monitor, switchover) for detailed debugging when log level is set to "trace".
+
 ### Automatic failover recovery
 
 - Added timeline divergence detection and automatic recovery (pg_rewind with pg_basebackup fallback) so replicas re-sync after a primary promotion without manual intervention.

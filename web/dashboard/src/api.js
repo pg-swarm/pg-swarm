@@ -40,7 +40,34 @@ export const api = {
   updatePostgresVersion: (id, data) => request('/postgres-versions/' + id, { method: 'PUT', body: JSON.stringify(data) }),
   deletePostgresVersion: (id) => request('/postgres-versions/' + id, { method: 'DELETE' }),
   setDefaultPostgresVersion: (id) => request('/postgres-versions/' + id + '/default', { method: 'POST' }),
+  postgresVariants: () => request('/postgres-variants'),
+  createPostgresVariant: (data) => request('/postgres-variants', { method: 'POST', body: JSON.stringify(data) }),
+  deletePostgresVariant: (id) => request('/postgres-variants/' + id, { method: 'DELETE' }),
+  satelliteLogs: (id, limit, level) => request('/satellites/' + id + '/logs?limit=' + (limit || 200) + '&level=' + (level || 'info')),
+  setSatelliteLogLevel: (id, level) => request('/satellites/' + id + '/log-level', { method: 'POST', body: JSON.stringify({ level }) }),
+
+  // Backup Rules
+  backupRules:        ()           => request('/backup-rules'),
+  createBackupRule:   (data)       => request('/backup-rules', { method: 'POST', body: JSON.stringify(data) }),
+  getBackupRule:      (id)         => request('/backup-rules/' + id),
+  updateBackupRule:   (id, data)   => request('/backup-rules/' + id, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteBackupRule:   (id)         => request('/backup-rules/' + id, { method: 'DELETE' }),
+  attachBackupRule:   (profileId, backupRuleId) => request('/profiles/' + profileId + '/attach-backup-rule', { method: 'POST', body: JSON.stringify({ backup_rule_id: backupRuleId }) }),
+  detachBackupRule:   (profileId, backupRuleId) => request('/profiles/' + profileId + '/detach-backup-rule', { method: 'POST', body: JSON.stringify({ backup_rule_id: backupRuleId }) }),
+
+  // Backup Inventory & Restore
+  clusterBackups:     (id)         => request('/clusters/' + id + '/backups'),
+  getBackup:          (id)         => request('/backups/' + id),
+  initiateRestore:    (clusterId, data) => request('/clusters/' + clusterId + '/restore', { method: 'POST', body: JSON.stringify(data) }),
+  clusterRestores:    (id)         => request('/clusters/' + id + '/restores'),
 };
+
+export function subscribeSatelliteLogs(satelliteId, onEntry, onError) {
+  const es = new EventSource(API + '/satellites/' + satelliteId + '/logs/stream');
+  es.onmessage = (e) => { try { onEntry(JSON.parse(e.data)); } catch {} };
+  es.onerror = (e) => { if (onError) onError(e); };
+  return () => es.close();
+}
 
 const HEARTBEAT_TIMEOUT_S = 60;
 

@@ -6,6 +6,7 @@ option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
 
 import "google/protobuf/timestamp.proto";
 import "health.proto";
+import "backup.proto";
 
 service SatelliteStreamService {
   rpc Connect(stream SatelliteMessage) returns (stream CentralMessage);
@@ -19,7 +20,22 @@ message SatelliteMessage {
     ConfigAck config_ack = 4;
     StorageClassReport storage_class_report = 5;
     SwitchoverResult switchover_result = 6;
+    LogEntry log_entry = 7;
+    BackupStatusReport backup_status = 8;
+    RestoreStatusReport restore_status = 9;
   }
+}
+
+message LogEntry {
+  string level = 1;
+  string message = 2;
+  map<string, string> fields = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  string logger = 5;  // source component: "agent", "operator", "stream", "health"
+}
+
+message SetLogLevel {
+  string level = 1;  // "trace", "debug", "info", "warn", "error"
 }
 
 message CentralMessage {
@@ -29,6 +45,8 @@ message CentralMessage {
     HeartbeatAck heartbeat_ack = 3;
     RequestStorageClasses request_storage_classes = 4;
     SwitchoverRequest switchover = 5;
+    SetLogLevel set_log_level = 6;
+    RestoreCommand restore_command = 7;
   }
 }
 
@@ -93,6 +111,7 @@ message ClusterConfig {
   map<string, string> label_selector = 15;       // deployment rule label selector (for K8s labels)
   bool paused = 16;                              // when true, RW service is removed (read-only mode)
   bool deletion_protection = 17;                  // when true, PVCs get a finalizer to prevent accidental deletion
+  repeated BackupConfig backups = 18;              // backup rule configs (one per attached backup rule)
 }
 
 message PostgresSpec {

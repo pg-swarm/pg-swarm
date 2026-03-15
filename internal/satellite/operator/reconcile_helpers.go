@@ -18,12 +18,14 @@ import (
 
 // ensureNamespace creates the namespace if it does not already exist.
 func ensureNamespace(ctx context.Context, client kubernetes.Interface, name string) error {
+	log.Trace().Str("namespace", name).Msg("ensureNamespace entry")
 	if name == "default" {
 		return nil
 	}
 	ns := buildNamespace(name)
 	_, err := client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
+		log.Trace().Str("namespace", name).Msg("ensureNamespace already exists")
 		return nil
 	}
 	return err
@@ -45,9 +47,11 @@ func buildNamespace(name string) *corev1.Namespace {
 // createOrPreserveSecret creates the secret only if it doesn't already exist.
 // This preserves passwords across config updates.
 func createOrPreserveSecret(ctx context.Context, client kubernetes.Interface, desired *corev1.Secret) error {
+	log.Trace().Str("secret", desired.Name).Msg("createOrPreserveSecret entry")
 	_, err := client.CoreV1().Secrets(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if err == nil {
 		// Secret exists — preserve it
+		log.Trace().Str("secret", desired.Name).Msg("createOrPreserveSecret: already exists, preserving")
 		return nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -59,8 +63,10 @@ func createOrPreserveSecret(ctx context.Context, client kubernetes.Interface, de
 
 // createOrUpdateConfigMap creates or updates a ConfigMap to match the desired state.
 func createOrUpdateConfigMap(ctx context.Context, client kubernetes.Interface, desired *corev1.ConfigMap) error {
+	log.Trace().Str("configmap", desired.Name).Msg("createOrUpdateConfigMap entry")
 	existing, err := client.CoreV1().ConfigMaps(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		log.Trace().Str("configmap", desired.Name).Msg("createOrUpdateConfigMap: creating")
 		_, err = client.CoreV1().ConfigMaps(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
 		return err
 	}
@@ -94,8 +100,10 @@ func createOrUpdateService(ctx context.Context, client kubernetes.Interface, des
 
 // createOrUpdateStatefulSet creates or updates a StatefulSet, preserving immutable VolumeClaimTemplates.
 func createOrUpdateStatefulSet(ctx context.Context, client kubernetes.Interface, desired *appsv1.StatefulSet) error {
+	log.Trace().Str("statefulset", desired.Name).Msg("createOrUpdateStatefulSet entry")
 	existing, err := client.AppsV1().StatefulSets(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		log.Trace().Str("statefulset", desired.Name).Msg("createOrUpdateStatefulSet: creating")
 		_, err = client.AppsV1().StatefulSets(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
 		return err
 	}
@@ -104,6 +112,7 @@ func createOrUpdateStatefulSet(ctx context.Context, client kubernetes.Interface,
 	}
 
 	// VolumeClaimTemplates are immutable after creation — warn if storage changed
+	log.Trace().Str("statefulset", desired.Name).Msg("createOrUpdateStatefulSet: comparing VCTs")
 	for i, desiredVCT := range desired.Spec.VolumeClaimTemplates {
 		if i >= len(existing.Spec.VolumeClaimTemplates) {
 			log.Warn().
@@ -134,6 +143,7 @@ func createOrUpdateStatefulSet(ctx context.Context, client kubernetes.Interface,
 // labelPods labels pods based on ordinal: 0=primary, rest=replica.
 // Pods that don't exist yet are silently skipped.
 func labelPods(ctx context.Context, client kubernetes.Interface, namespace, clusterName string) error {
+	log.Trace().Str("cluster", clusterName).Msg("labelPods entry")
 	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", LabelCluster, clusterName),
 	})

@@ -57,6 +57,7 @@ a:hover { text-decoration: underline; }
   border-radius: 6px; font-family: var(--mono); font-weight: 800;
   font-size: 16px; margin-right: 2px;
 }
+.brand-logo { vertical-align: middle; margin-right: 4px; }
 .nav-links { display: flex; align-items: center; gap: 28px; }
 .nav-links a { color: var(--text-secondary); font-size: 14px; font-weight: 500; text-decoration: none; }
 .nav-links a:hover { color: var(--green); }
@@ -162,6 +163,12 @@ a:hover { text-decoration: underline; }
 .feature-icon { font-size: 28px; margin-bottom: 12px; }
 .feature-card h3 { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
 .feature-card p { font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
+.feature-card-dark {
+  background: var(--bg-dark-card); border-color: rgba(255,255,255,.08); color: var(--text-light);
+}
+.feature-card-dark:hover { border-color: var(--green); }
+.feature-card-dark h3 { color: #fff; }
+.feature-card-dark p { color: var(--text-light); }
 
 /* ── Architecture ──────────────────────────────────────────────────── */
 .arch-diagram {
@@ -226,7 +233,8 @@ a:hover { text-decoration: underline; }
 .stack-item span { font-size: 15px; font-weight: 600; }
 
 /* ── Code Blocks ───────────────────────────────────────────────────── */
-.code-blocks { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.code-blocks { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+.code-block-wide { grid-column: 1 / -1; }
 .code-block {
   background: var(--bg-dark-card); border: 1px solid rgba(255,255,255,.08);
   border-radius: var(--radius); overflow: hidden;
@@ -237,7 +245,7 @@ a:hover { text-decoration: underline; }
   text-transform: uppercase; letter-spacing: .5px;
 }
 .code-block pre {
-  padding: 16px; margin: 0; overflow-x: auto;
+  padding: 16px; margin: 0; overflow-x: hidden;
 }
 .code-block code {
   font-family: var(--mono); font-size: 13px; color: var(--green);
