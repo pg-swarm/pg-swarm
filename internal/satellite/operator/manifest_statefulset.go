@@ -334,13 +334,14 @@ if [ -f "$PGDATA/PG_VERSION" ]; then
                     echo "pg_rewind succeeded"
                 else
                     echo "pg_rewind failed — falling back to full re-basebackup"
-                    rm -rf "$PGDATA"/*
-                    # Mark as needs-basebackup so a failed pg_basebackup retries
-                    # on next restart instead of hitting initdb (ordinal 0).
-                    touch "$PGDATA/.pg-swarm-needs-basebackup"
+                    # Mark outside PGDATA (on PVC root) so it survives cleanup
+                    # and a failed pg_basebackup retries instead of hitting initdb.
+                    MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+                    touch "$MARKER"
+                    find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
                     PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
                         -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
-                    rm -f "$PGDATA/.pg-swarm-needs-basebackup"
+                    rm -f "$MARKER"
                     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
                     cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
                 fi
@@ -360,12 +361,20 @@ if [ -f "$PGDATA/PG_VERSION" ]; then
 fi
 
 # Check if this pod was a demoted primary that needs re-basebackup (not initdb).
-# The marker is left by the pg_rewind fallback path above when pg_basebackup fails.
+# The marker lives on the PVC root (outside PGDATA) so it survives cleanup.
+MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
 NEEDS_BASEBACKUP=false
-if [ -f "$PGDATA/.pg-swarm-needs-basebackup" ]; then
+if [ -f "$MARKER" ]; then
     echo "Found needs-basebackup marker — previous re-basebackup failed, retrying"
     NEEDS_BASEBACKUP=true
-    rm -rf "$PGDATA"/*
+    find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+    rm -f "$MARKER"
+fi
+
+# Clean stale partial data from a previous failed init (no PG_VERSION but dir not empty)
+if [ -d "$PGDATA" ] && [ -n "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
+    echo "Cleaning stale PGDATA (no PG_VERSION but directory not empty)"
+    find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
 fi
 
 if [ "$NEEDS_BASEBACKUP" = "false" ] && [ "$ORDINAL" = "0" ]; then
@@ -703,8 +712,10 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 	}
 	interval := cfg.Failover.HealthCheckIntervalSeconds
 	if interval <= 0 {
-		interval = 5
+		interval = 1
 	}
+
+	primaryHostDNS := fmt.Sprintf("%s.%s.svc.cluster.local", resourceName(cfg.ClusterName, "rw"), cfg.Namespace)
 
 	return corev1.Container{
 		Name:            "failover",
@@ -725,6 +736,7 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 			},
 			{Name: "CLUSTER_NAME", Value: cfg.ClusterName},
 			{Name: "HEALTH_CHECK_INTERVAL", Value: fmt.Sprintf("%d", interval)},
+			{Name: "PRIMARY_HOST", Value: primaryHostDNS},
 			{
 				Name: "POSTGRES_PASSWORD",
 				ValueFrom: &corev1.EnvVarSource{
