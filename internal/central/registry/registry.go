@@ -44,30 +44,74 @@ func (r *Registry) Register(ctx context.Context, hostname, k8sClusterName, regio
 	return sat.ID, tempToken, nil
 }
 
-// Approve approves a pending satellite and generates an auth token
-func (r *Registry) Approve(ctx context.Context, satelliteID uuid.UUID) (string, error) {
+// ConflictingSatellite returns the active satellite that occupies the same
+// k8s_cluster_name as the given pending satellite, or nil if there is no conflict.
+func (r *Registry) ConflictingSatellite(ctx context.Context, satelliteID uuid.UUID) (*models.Satellite, error) {
 	sat, err := r.store.GetSatellite(ctx, satelliteID)
 	if err != nil {
-		return "", fmt.Errorf("get satellite: %w", err)
+		return nil, fmt.Errorf("get satellite: %w", err)
+	}
+	existing, err := r.store.GetActiveSatelliteByK8sCluster(ctx, sat.K8sClusterName)
+	if err != nil {
+		return nil, nil // no conflict
+	}
+	if existing.ID == satelliteID {
+		return nil, nil
+	}
+	return existing, nil
+}
+
+// Approve approves a pending satellite and generates an auth token.
+// If replace is true and another active satellite exists for the same
+// k8s_cluster_name, it is replaced: its cluster configs are reassigned
+// and the old satellite is marked as "replaced".
+// If replace is false and a conflict exists, Approve returns an error.
+func (r *Registry) Approve(ctx context.Context, satelliteID uuid.UUID, replace bool) (replacedID *uuid.UUID, authToken string, err error) {
+	sat, err := r.store.GetSatellite(ctx, satelliteID)
+	if err != nil {
+		return nil, "", fmt.Errorf("get satellite: %w", err)
 	}
 	if sat.State != models.SatelliteStatePending {
-		return "", fmt.Errorf("satellite is not in pending state (current: %s)", sat.State)
+		return nil, "", fmt.Errorf("satellite is not in pending state (current: %s)", sat.State)
 	}
 
-	authToken, err := auth.GenerateToken()
+	// Check for an existing active satellite on the same K8s cluster
+	existing, _ := r.store.GetActiveSatelliteByK8sCluster(ctx, sat.K8sClusterName)
+	if existing != nil && existing.ID != satelliteID {
+		if !replace {
+			return nil, "", fmt.Errorf("k8s cluster %q already has an active satellite (%s); approve with replace=true to replace it",
+				sat.K8sClusterName, existing.ID)
+		}
+		// Replace the old satellite: transfer configs, mark replaced
+		count, err := r.store.ReassignClusterConfigs(ctx, existing.ID, satelliteID)
+		if err != nil {
+			return nil, "", fmt.Errorf("reassign cluster configs: %w", err)
+		}
+		if err := r.store.UpdateSatelliteState(ctx, existing.ID, models.SatelliteStateReplaced); err != nil {
+			return nil, "", fmt.Errorf("mark old satellite replaced: %w", err)
+		}
+		log.Info().
+			Str("old_satellite_id", existing.ID.String()).
+			Str("new_satellite_id", satelliteID.String()).
+			Int("configs_reassigned", count).
+			Msg("satellite replaced — cluster configs reassigned")
+		replacedID = &existing.ID
+	}
+
+	authToken, err = auth.GenerateToken()
 	if err != nil {
-		return "", fmt.Errorf("generate auth token: %w", err)
+		return nil, "", fmt.Errorf("generate auth token: %w", err)
 	}
 
 	if err := r.store.SetSatelliteAuthToken(ctx, satelliteID, auth.HashToken(authToken)); err != nil {
-		return "", fmt.Errorf("set auth token: %w", err)
+		return nil, "", fmt.Errorf("set auth token: %w", err)
 	}
 	if err := r.store.UpdateSatelliteState(ctx, satelliteID, models.SatelliteStateApproved); err != nil {
-		return "", fmt.Errorf("update state: %w", err)
+		return nil, "", fmt.Errorf("update state: %w", err)
 	}
 
 	log.Info().Str("satellite_id", satelliteID.String()).Msg("satellite approved")
-	return authToken, nil
+	return replacedID, authToken, nil
 }
 
 // Reject rejects/removes a pending satellite

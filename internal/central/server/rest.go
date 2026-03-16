@@ -59,6 +59,16 @@ func (s *RESTServer) setupRoutes() {
 		Root:       http.FS(web.StaticFS),
 		PathPrefix: "static/assets",
 	}))
+	// Serve favicon from embedded static root
+	s.app.Get("/favicon.svg", func(c *fiber.Ctx) error {
+		data, err := web.StaticFS.ReadFile("static/favicon.svg")
+		if err != nil {
+			return c.SendStatus(fiber.StatusNotFound)
+		}
+		c.Set("Content-Type", "image/svg+xml")
+		return c.Send(data)
+	})
+
 	// SPA catch-all: serve index.html for all non-API routes (BrowserRouter)
 	s.app.Use(func(c *fiber.Ctx) error {
 		path := c.Path()
@@ -163,13 +173,30 @@ func (s *RESTServer) approveSatellite(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
 	}
 
-	authToken, err := s.registry.Approve(c.Context(), id)
+	replace := c.Query("replace") == "true"
+
+	replacedID, authToken, err := s.registry.Approve(c.Context(), id, replace)
 	if err != nil {
 		log.Error().Err(err).Str("satellite_id", id.String()).Msg("failed to approve satellite")
+		// Return 409 for cluster conflicts so the UI can show a confirmation dialog
+		if !replace {
+			if conflict, _ := s.registry.ConflictingSatellite(c.Context(), id); conflict != nil {
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"error":                  err.Error(),
+					"conflicting_satellite":  conflict,
+				})
+			}
+		}
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	return c.JSON(fiber.Map{"auth_token": authToken})
+	result := fiber.Map{"auth_token": authToken}
+	if replacedID != nil {
+		result["replaced_satellite_id"] = replacedID.String()
+		// Disconnect the old satellite's stream if it's still connected
+		s.streams.Remove(*replacedID)
+	}
+	return c.JSON(result)
 }
 
 func (s *RESTServer) rejectSatellite(c *fiber.Ctx) error {
@@ -1570,24 +1597,18 @@ func (s *RESTServer) detachBackupProfile(c *fiber.Ctx) error {
 // rePushClustersForProfile bumps config_version and re-pushes configs for all
 // clusters linked to the given profile via deployment rules.
 func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uuid.UUID) {
-	rules, err := s.store.GetDeploymentRulesByProfile(ctx, profileID)
+	// Find all clusters using this profile (covers both manual and rule-based)
+	clusters, err := s.store.GetClusterConfigsByProfile(ctx, profileID)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to get deployment rules for profile")
+		log.Error().Err(err).Msg("failed to get clusters for profile")
 		return
 	}
-	for _, rule := range rules {
-		clusters, err := s.store.GetClusterConfigsByDeploymentRule(ctx, rule.ID)
-		if err != nil {
-			log.Error().Err(err).Str("rule_id", rule.ID.String()).Msg("failed to get clusters for rule")
+	for _, cfg := range clusters {
+		if err := s.store.UpdateClusterConfig(ctx, cfg); err != nil {
+			log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to bump config version")
 			continue
 		}
-		for _, cfg := range clusters {
-			if err := s.store.UpdateClusterConfig(ctx, cfg); err != nil {
-				log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to bump config version")
-				continue
-			}
-			s.pushConfigToSatellite(cfg)
-		}
+		s.pushConfigToSatellite(cfg)
 	}
 }
 

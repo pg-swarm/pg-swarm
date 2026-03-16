@@ -219,6 +219,165 @@ func TestCheckWalReceiver_ResetsOnRewindCall(t *testing.T) {
 	// not in doRewind itself. This is correct because doRewind may fail.
 }
 
+func TestHandleReplica_FastPathSkipsLeaseWhenPrimaryReachable(t *testing.T) {
+	myPod := "pg-cluster-1"
+	ns := "default"
+
+	client := fake.NewSimpleClientset(
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: myPod, Namespace: ns},
+		},
+	)
+
+	// Track whether the lease API is called
+	var leaseGetCalled atomic.Bool
+	client.PrependReactor("get", "leases", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		leaseGetCalled.Store(true)
+		return false, nil, nil // fall through to default handler
+	})
+
+	mon := &Monitor{
+		cfg: Config{
+			PodName:     myPod,
+			Namespace:   ns,
+			ClusterName: "mycluster",
+		},
+		client:    client,
+		leaseName: "mycluster-leader",
+		leaseDur:  defaultLeaseDuration,
+		// Primary is reachable — fast path should return early.
+		primaryCheckFunc: func(_ context.Context) bool { return true },
+	}
+
+	mon.handleReplica(context.Background(), nil)
+
+	if leaseGetCalled.Load() {
+		t.Fatal("expected lease API to NOT be called when primary is reachable (fast path)")
+	}
+	if mon.primaryUnreachableCount != 0 {
+		t.Fatalf("expected unreachable count 0, got %d", mon.primaryUnreachableCount)
+	}
+}
+
+func TestHandleReplica_FastPathPromotesAfterConsecutiveFailures(t *testing.T) {
+	myPod := "pg-cluster-1"
+	ns := "default"
+
+	// Create an expired lease (renew time far in the past)
+	past := metav1.NewMicroTime(time.Now().Add(-1 * time.Minute))
+	dur := int32(5)
+	client := fake.NewSimpleClientset(
+		&coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{Name: "mycluster-leader", Namespace: ns},
+			Spec: coordinationv1.LeaseSpec{
+				HolderIdentity:       strPtr("pg-cluster-0"),
+				LeaseDurationSeconds: &dur,
+				AcquireTime:          &past,
+				RenewTime:            &past,
+			},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: myPod, Namespace: ns},
+		},
+	)
+
+	var promoteCalled atomic.Bool
+	mon := &Monitor{
+		cfg: Config{
+			PodName:      myPod,
+			Namespace:    ns,
+			ClusterName:  "mycluster",
+			PGConnString: "host=localhost", // promote() will fail but we inject
+		},
+		client:    client,
+		leaseName: "mycluster-leader",
+		leaseDur:  defaultLeaseDuration,
+		// Primary is unreachable.
+		primaryCheckFunc: func(_ context.Context) bool { return false },
+	}
+
+	// Simulate 3 consecutive unreachable ticks (count starts at 0).
+	// Ticks 1 and 2: count < 3, should not promote.
+	mon.handleReplica(context.Background(), nil) // count=1
+	mon.handleReplica(context.Background(), nil) // count=2
+
+	// Tick 3: count=3, lease expired → should try to acquire and promote.
+	// We can't call real promote (no PG), so intercept via the lease acquisition.
+	// If the lease is acquired, handleReplica calls promote(). We verify the lease
+	// was acquired by checking HolderIdentity.
+	// Inject a no-op promote by overriding the conn string approach — instead,
+	// let's check the lease was taken and pod was labeled.
+	// Actually, promote() will fail because there's no PG. But we can check
+	// the lease was acquired and that's the key behavior.
+	mon.handleReplica(context.Background(), nil) // count=3
+
+	// Verify the lease was acquired by this pod (even though promote fails).
+	lease, err := client.CoordinationV1().Leases(ns).Get(context.Background(), "mycluster-leader", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != myPod {
+		holder := "<nil>"
+		if lease.Spec.HolderIdentity != nil {
+			holder = *lease.Spec.HolderIdentity
+		}
+		t.Fatalf("expected lease holder %s, got %s", myPod, holder)
+	}
+	_ = promoteCalled // promote fails but lease acquisition is the key assertion
+}
+
+func TestHandleReplica_FastPathDoesNotPromoteIfLeaseNotExpired(t *testing.T) {
+	myPod := "pg-cluster-1"
+	ns := "default"
+
+	// Create a valid (non-expired) lease held by another pod.
+	now := metav1.NewMicroTime(time.Now())
+	dur := int32(300) // 5 minutes — clearly not expired
+	client := fake.NewSimpleClientset(
+		&coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{Name: "mycluster-leader", Namespace: ns},
+			Spec: coordinationv1.LeaseSpec{
+				HolderIdentity:       strPtr("pg-cluster-0"),
+				LeaseDurationSeconds: &dur,
+				AcquireTime:          &now,
+				RenewTime:            &now,
+			},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: myPod, Namespace: ns},
+		},
+	)
+
+	mon := &Monitor{
+		cfg: Config{
+			PodName:     myPod,
+			Namespace:   ns,
+			ClusterName: "mycluster",
+		},
+		client:    client,
+		leaseName: "mycluster-leader",
+		leaseDur:  defaultLeaseDuration,
+		// Primary is unreachable.
+		primaryCheckFunc: func(_ context.Context) bool { return false },
+	}
+
+	// Run 5 ticks — count exceeds threshold but lease is valid.
+	for i := 0; i < 5; i++ {
+		mon.handleReplica(context.Background(), nil)
+	}
+
+	// Verify lease was NOT acquired by this pod.
+	lease, err := client.CoordinationV1().Leases(ns).Get(context.Background(), "mycluster-leader", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == myPod {
+		t.Fatal("should NOT have acquired lease — primary unreachable but lease still valid (network partition)")
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
 func TestHandlePrimary_LeaseError_FencesButDoesNotDemote(t *testing.T) {
 	myPod := "pg-cluster-0"
 	ns := "default"

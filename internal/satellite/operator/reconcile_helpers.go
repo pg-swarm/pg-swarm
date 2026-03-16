@@ -45,20 +45,41 @@ func buildNamespace(name string) *corev1.Namespace {
 }
 
 // createOrPreserveSecret creates the secret only if it doesn't already exist.
-// This preserves passwords across config updates.
+// This preserves passwords across config updates. If the secret exists but is
+// missing keys that the desired secret has (e.g. backup-password added in a
+// newer version), the missing keys are backfilled without touching existing ones.
 func createOrPreserveSecret(ctx context.Context, client kubernetes.Interface, desired *corev1.Secret) error {
 	log.Trace().Str("secret", desired.Name).Msg("createOrPreserveSecret entry")
-	_, err := client.CoreV1().Secrets(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
-	if err == nil {
-		// Secret exists — preserve it
-		log.Trace().Str("secret", desired.Name).Msg("createOrPreserveSecret: already exists, preserving")
-		return nil
+	existing, err := client.CoreV1().Secrets(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = client.CoreV1().Secrets(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+		return err
 	}
-	if !apierrors.IsNotFound(err) {
+	if err != nil {
 		return fmt.Errorf("get secret %s: %w", desired.Name, err)
 	}
-	_, err = client.CoreV1().Secrets(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
-	return err
+
+	// Backfill any keys present in desired.StringData but missing from the
+	// existing secret. This handles schema upgrades (e.g. adding backup-password)
+	// without overwriting existing passwords.
+	needsUpdate := false
+	for key, val := range desired.StringData {
+		if _, exists := existing.Data[key]; !exists {
+			if existing.StringData == nil {
+				existing.StringData = map[string]string{}
+			}
+			existing.StringData[key] = val
+			needsUpdate = true
+			log.Info().Str("secret", desired.Name).Str("key", key).Msg("backfilling missing secret key")
+		}
+	}
+	if needsUpdate {
+		_, err = client.CoreV1().Secrets(desired.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+		return err
+	}
+
+	log.Trace().Str("secret", desired.Name).Msg("createOrPreserveSecret: already exists, preserving")
+	return nil
 }
 
 // createOrUpdateConfigMap creates or updates a ConfigMap to match the desired state.
@@ -140,8 +161,10 @@ func createOrUpdateStatefulSet(ctx context.Context, client kubernetes.Interface,
 	return err
 }
 
-// labelPods labels pods based on ordinal: 0=primary, rest=replica.
-// Pods that don't exist yet are silently skipped.
+// labelPods assigns initial role labels to pods that don't have one yet.
+// Pods that already carry a role label are left alone — the failover sidecar
+// is the authority on role after initial deployment (it detects pg_is_in_recovery).
+// On first creation: ordinal 0 = primary, rest = replica.
 func labelPods(ctx context.Context, client kubernetes.Interface, namespace, clusterName string) error {
 	log.Trace().Str("cluster", clusterName).Msg("labelPods entry")
 	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
@@ -153,14 +176,17 @@ func labelPods(ctx context.Context, client kubernetes.Interface, namespace, clus
 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		role := RoleReplica
-		// Ordinal 0 is always the initial primary
-		if pod.Name == fmt.Sprintf("%s-0", clusterName) {
-			role = RolePrimary
+
+		// Skip pods that already have a role label — the failover sidecar manages
+		// role labels based on actual PostgreSQL state (pg_is_in_recovery).
+		if _, hasRole := pod.Labels[LabelRole]; hasRole {
+			continue
 		}
 
-		if pod.Labels[LabelRole] == role {
-			continue // already labeled correctly
+		role := RoleReplica
+		// Ordinal 0 is the initial primary
+		if pod.Name == fmt.Sprintf("%s-0", clusterName) {
+			role = RolePrimary
 		}
 
 		patch := map[string]interface{}{
@@ -217,6 +243,35 @@ func createOrUpdateRoleBinding(ctx context.Context, client kubernetes.Interface,
 		return err
 	}
 	return err // RoleBinding roleRef is immutable — no update needed
+}
+
+// createOrUpdatePVC creates a PVC if it doesn't exist, or updates labels only.
+// PVC spec (size, storage class) is immutable on bound volumes, so changes are warned but not applied.
+func createOrUpdatePVC(ctx context.Context, client kubernetes.Interface, desired *corev1.PersistentVolumeClaim) error {
+	existing, err := client.CoreV1().PersistentVolumeClaims(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = client.CoreV1().PersistentVolumeClaims(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("get PVC %s: %w", desired.Name, err)
+	}
+
+	// Warn if size differs — PVC size is immutable on bound volumes
+	existingSize := existing.Spec.Resources.Requests[corev1.ResourceStorage]
+	desiredSize := desired.Spec.Resources.Requests[corev1.ResourceStorage]
+	if existingSize.Cmp(desiredSize) != 0 {
+		log.Warn().
+			Str("pvc", desired.Name).
+			Str("existing_size", existingSize.String()).
+			Str("desired_size", desiredSize.String()).
+			Msg("PVC storage size change detected — PVC size is immutable on bound volumes, change ignored")
+	}
+
+	// Update labels only
+	existing.Labels = desired.Labels
+	_, err = client.CoreV1().PersistentVolumeClaims(desired.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	return err
 }
 
 // reconcilePVCFinalizers ensures PVC finalizers match the current DeletionProtection

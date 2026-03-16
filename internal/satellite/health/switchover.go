@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -11,6 +12,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
@@ -111,6 +113,34 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 		return result
 	}
 
+	// 7. Wait for promotion to complete — pg_is_in_recovery() must return false.
+	// This prevents a race where the sidecar ticks before promotion finishes
+	// and labels the target as replica, causing the lease to expire.
+	log.Trace().Msg("Switchover: waiting for promotion to complete")
+	promoted := false
+	for i := 0; i < 30; i++ {
+		var stillRecovery bool
+		if err := targetConn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&stillRecovery); err == nil && !stillRecovery {
+			promoted = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !promoted {
+		result.ErrorMessage = "pg_promote() was called but target did not exit recovery within 15 seconds"
+		return result
+	}
+
+	// 8. Label pods directly so the sidecars and services pick up the new
+	// topology immediately, without waiting for the next sidecar tick.
+	log.Trace().Msg("Switchover: labeling pods")
+	labelPod(ctx, client, ns, target, "primary")
+	labelPod(ctx, client, ns, primaryPod.Name, "replica")
+
+	// 9. Renew the lease one more time now that the promotion is confirmed,
+	// so the sidecar has a full lease duration to take over renewal.
+	_ = renewLease(ctx, client, ns, leaseName, target)
+
 	log.Info().
 		Str("cluster", req.ClusterName).
 		Str("old_primary", primaryPod.Name).
@@ -121,13 +151,41 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 	return result
 }
 
+// labelPod patches the pg-swarm.io/role label on a pod.
+func labelPod(ctx context.Context, client kubernetes.Interface, namespace, podName, role string) {
+	patch := map[string]any{
+		"metadata": map[string]any{
+			"labels": map[string]string{
+				"pg-swarm.io/role": role,
+			},
+		},
+	}
+	patchBytes, _ := json.Marshal(patch)
+	if _, err := client.CoreV1().Pods(namespace).Patch(ctx, podName, types.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		log.Warn().Err(err).Str("pod", podName).Str("role", role).Msg("failed to label pod during switchover")
+	}
+}
+
+// renewLease renews the leader lease for the given holder.
+func renewLease(ctx context.Context, client kubernetes.Interface, namespace, leaseName, holder string) error {
+	lease, err := client.CoordinationV1().Leases(namespace).Get(ctx, leaseName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	now := metav1.NewMicroTime(time.Now())
+	lease.Spec.HolderIdentity = &holder
+	lease.Spec.RenewTime = &now
+	_, err = client.CoordinationV1().Leases(namespace).Update(ctx, lease, metav1.UpdateOptions{})
+	return err
+}
+
 // transferLease updates the leader lease to point to the new holder.
 func transferLease(ctx context.Context, client kubernetes.Interface, namespace, leaseName, newHolder string) error {
 	lease, err := client.CoordinationV1().Leases(namespace).Get(ctx, leaseName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		// Create a new lease for the target
 		now := metav1.NewMicroTime(time.Now())
-		dur := int32(15)
+		dur := int32(5)
 		_, err := client.CoordinationV1().Leases(namespace).Create(ctx, &coordinationv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: namespace},
 			Spec: coordinationv1.LeaseSpec{

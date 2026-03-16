@@ -1,5 +1,5 @@
 .SILENT:
-.PHONY: proto dashboard dashboard-dev build test lint clean manifests \
+.PHONY: proto dashboard dashboard-dev dashboard-mock build test lint clean manifests \
         docker-build-central docker-build-satellite docker-build-failover docker-build-backup docker-build-all \
         docker-push-central docker-push-satellite docker-push-failover docker-push-backup docker-push-all \
         docker-compose-up docker-compose-down \
@@ -34,6 +34,9 @@ dashboard: ## Build the React dashboard into web/static/
 
 dashboard-dev: ## Run React dashboard with hot-reload (proxies API to localhost:8080)
 	cd web/dashboard && npm install && npm run dev
+
+dashboard-mock: ## Run React dashboard with mock data (no backend needed)
+	cd web/dashboard && npm install && MOCK=true npm run dev
 
 build: proto dashboard ## Compile central, satellite, and failover-sidecar binaries
 	go build -o bin/central ./cmd/central
