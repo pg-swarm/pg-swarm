@@ -1,5 +1,5 @@
 .SILENT:
-.PHONY: proto dashboard dashboard-dev dashboard-mock build test lint clean manifests \
+.PHONY: proto dashboard dashboard-dev dashboard-mock build test test-integration lint clean manifests \
         docker-build-central docker-build-satellite docker-build-failover docker-build-backup docker-build-all \
         docker-push-central docker-push-satellite docker-push-failover docker-push-backup docker-push-all \
         docker-compose-up docker-compose-down \
@@ -50,6 +50,9 @@ clean: ## Remove compiled binaries and generated proto code
 
 test: ## Run unit tests
 	go test ./...
+
+test-integration: ## Run integration tests against minikube (requires running cluster)
+	go test -tags integration -timeout 10m -v ./internal/satellite/operator/
 
 manifests: ## Regenerate operator manifest YAMLs in testdata/
 	go test ./internal/satellite/operator/ -run TestManifests -count=1

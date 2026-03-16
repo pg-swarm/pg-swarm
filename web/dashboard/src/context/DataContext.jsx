@@ -5,14 +5,15 @@ const DataContext = createContext(null);
 
 export function DataProvider({ children }) {
   const [data, setData] = useState({
-    satellites: [], clusters: [], health: [], events: [], profiles: [], deploymentRules: [], postgresVersions: [], postgresVariants: [], backupProfiles: [],
+    satellites: [], clusters: [], health: [], events: [], profiles: [], deploymentRules: [], postgresVersions: [], postgresVariants: [], backupProfiles: [], storageTiers: [],
   });
   const [lastRefresh, setLastRefresh] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupProfiles] = await Promise.all([
-        api.satellites(), api.clusters(), api.health(), api.events(50), api.profiles(), api.deploymentRules(), api.postgresVersions(), api.postgresVariants(), api.backupProfiles(),
+      const safe = (p) => p.catch(() => null);
+      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupProfiles, storageTiers] = await Promise.all([
+        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.backupProfiles()), safe(api.storageTiers()),
       ]);
       setData({
         satellites:        satellites || [],
@@ -23,7 +24,8 @@ export function DataProvider({ children }) {
         deploymentRules:   deploymentRules || [],
         postgresVersions:  postgresVersions || [],
         postgresVariants:  postgresVariants || [],
-        backupProfiles:       backupProfiles || [],
+        backupProfiles:    backupProfiles || [],
+        storageTiers:      storageTiers || [],
       });
       setLastRefresh(new Date());
     } catch (err) {

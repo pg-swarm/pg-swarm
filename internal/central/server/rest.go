@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
@@ -91,6 +92,13 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/satellites/:id/reject", s.rejectSatellite)
 	api.Put("/satellites/:id/labels", s.updateSatelliteLabels)
 	api.Post("/satellites/:id/refresh-storage-classes", s.refreshStorageClasses)
+	api.Put("/satellites/:id/tier-mappings", s.updateSatelliteTierMappings)
+
+	// Storage Tiers (admin)
+	api.Get("/storage-tiers", s.listStorageTiers)
+	api.Post("/storage-tiers", s.createStorageTier)
+	api.Put("/storage-tiers/:id", s.updateStorageTier)
+	api.Delete("/storage-tiers/:id", s.deleteStorageTier)
 	api.Get("/satellites/:id/logs", s.getSatelliteLogs)
 	api.Get("/satellites/:id/logs/stream", s.streamSatelliteLogs)
 	api.Post("/satellites/:id/log-level", s.setSatelliteLogLevel)
@@ -539,6 +547,148 @@ func (s *RESTServer) updateSatelliteLabels(c *fiber.Ctx) error {
 	return c.JSON(sat)
 }
 
+func (s *RESTServer) updateSatelliteTierMappings(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
+	}
+
+	var body struct {
+		TierMappings map[string]string `json:"tier_mappings"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if body.TierMappings == nil {
+		body.TierMappings = map[string]string{}
+	}
+
+	if err := s.store.UpdateSatelliteTierMappings(c.Context(), id, body.TierMappings); err != nil {
+		log.Error().Err(err).Str("satellite_id", id.String()).Msg("failed to update satellite tier mappings")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update tier mappings"})
+	}
+
+	log.Info().Str("satellite_id", id.String()).Interface("tier_mappings", body.TierMappings).Msg("satellite tier mappings updated")
+
+	sat, err := s.store.GetSatellite(c.Context(), id)
+	if err != nil {
+		return c.JSON(fiber.Map{"status": "tier mappings updated"})
+	}
+	return c.JSON(sat)
+}
+
+func (s *RESTServer) listStorageTiers(c *fiber.Ctx) error {
+	tiers, err := s.store.ListStorageTiers(c.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list storage tiers")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list storage tiers"})
+	}
+	return c.JSON(tiers)
+}
+
+func (s *RESTServer) createStorageTier(c *fiber.Ctx) error {
+	var tier models.StorageTier
+	if err := c.BodyParser(&tier); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if tier.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	if err := s.store.CreateStorageTier(c.Context(), &tier); err != nil {
+		log.Error().Err(err).Msg("failed to create storage tier")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create storage tier"})
+	}
+	return c.Status(fiber.StatusCreated).JSON(tier)
+}
+
+func (s *RESTServer) updateStorageTier(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid tier id"})
+	}
+	var tier models.StorageTier
+	if err := c.BodyParser(&tier); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	tier.ID = id
+	if tier.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	if err := s.store.UpdateStorageTier(c.Context(), &tier); err != nil {
+		log.Error().Err(err).Msg("failed to update storage tier")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update storage tier"})
+	}
+	return c.JSON(tier)
+}
+
+func (s *RESTServer) deleteStorageTier(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid tier id"})
+	}
+	if err := s.store.DeleteStorageTier(c.Context(), id); err != nil {
+		log.Error().Err(err).Msg("failed to delete storage tier")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete storage tier"})
+	}
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+// resolveStorageTiers replaces "tier:X" storage class values in a config with
+// concrete class names from the satellite's tier mappings. Returns an error
+// listing any unmapped tiers.
+func resolveStorageTiers(rawConfig json.RawMessage, tierMappings map[string]string) (json.RawMessage, error) {
+	var spec models.ClusterSpec
+	if err := json.Unmarshal(rawConfig, &spec); err != nil {
+		return rawConfig, fmt.Errorf("unmarshal config for tier resolution: %w", err)
+	}
+
+	resolve := func(sc string) (string, error) {
+		if len(sc) > 5 && sc[:5] == "tier:" {
+			tier := sc[5:]
+			mapped, ok := tierMappings[tier]
+			if !ok {
+				return "", fmt.Errorf("unmapped tier %q", tier)
+			}
+			return mapped, nil
+		}
+		return sc, nil
+	}
+
+	var missing []string
+
+	if resolved, err := resolve(spec.Storage.StorageClass); err != nil {
+		missing = append(missing, err.Error())
+	} else {
+		spec.Storage.StorageClass = resolved
+	}
+
+	if spec.WalStorage != nil {
+		if resolved, err := resolve(spec.WalStorage.StorageClass); err != nil {
+			missing = append(missing, err.Error())
+		} else {
+			spec.WalStorage.StorageClass = resolved
+		}
+	}
+
+	if spec.Archive != nil && spec.Archive.ArchiveStorage != nil {
+		if resolved, err := resolve(spec.Archive.ArchiveStorage.StorageClass); err != nil {
+			missing = append(missing, err.Error())
+		} else {
+			spec.Archive.ArchiveStorage.StorageClass = resolved
+		}
+	}
+
+	if len(missing) > 0 {
+		return rawConfig, fmt.Errorf("missing tier mappings: %s", strings.Join(missing, ", "))
+	}
+
+	resolved, err := json.Marshal(spec)
+	if err != nil {
+		return rawConfig, fmt.Errorf("marshal resolved config: %w", err)
+	}
+	return resolved, nil
+}
+
 // --- Health ---
 
 func (s *RESTServer) listClusterHealth(c *fiber.Ctx) error {
@@ -760,6 +910,16 @@ func (s *RESTServer) fanOutDeploymentRule(ctx context.Context, rule *models.Depl
 		if hasConfig[sat.ID] {
 			continue
 		}
+
+		resolvedConfig, err := resolveStorageTiers(profile.Config, sat.TierMappings)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("rule_id", rule.ID.String()).
+				Str("satellite_id", sat.ID.String()).
+				Msg("fan-out: skipping satellite due to missing tier mappings")
+			continue
+		}
+
 		satID := sat.ID
 		cfg := &models.ClusterConfig{
 			Name:             rule.ClusterName,
@@ -767,7 +927,7 @@ func (s *RESTServer) fanOutDeploymentRule(ctx context.Context, rule *models.Depl
 			SatelliteID:      &satID,
 			ProfileID:        &rule.ProfileID,
 			DeploymentRuleID: &rule.ID,
-			Config:           profile.Config,
+			Config:           resolvedConfig,
 		}
 		if err := s.store.CreateClusterConfig(ctx, cfg); err != nil {
 			log.Error().Err(err).
@@ -791,6 +951,13 @@ func (s *RESTServer) fanOutRulesForSatellite(ctx context.Context, satelliteID uu
 	rules, err := s.store.ListDeploymentRules(ctx)
 	if err != nil {
 		log.Error().Err(err).Str("satellite_id", satelliteID.String()).Msg("fan-out: failed to list deployment rules")
+		return
+	}
+
+	// Fetch satellite once for tier mappings
+	sat, err := s.store.GetSatellite(ctx, satelliteID)
+	if err != nil {
+		log.Error().Err(err).Str("satellite_id", satelliteID.String()).Msg("fan-out: failed to get satellite")
 		return
 	}
 
@@ -822,13 +989,22 @@ func (s *RESTServer) fanOutRulesForSatellite(ctx context.Context, satelliteID uu
 			continue
 		}
 
+		resolvedConfig, err := resolveStorageTiers(profile.Config, sat.TierMappings)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("rule_id", rule.ID.String()).
+				Str("satellite_id", satelliteID.String()).
+				Msg("fan-out: skipping rule for satellite due to missing tier mappings")
+			continue
+		}
+
 		cfg := &models.ClusterConfig{
 			Name:             rule.ClusterName,
 			Namespace:        rule.Namespace,
 			SatelliteID:      &satelliteID,
 			ProfileID:        &rule.ProfileID,
 			DeploymentRuleID: &rule.ID,
-			Config:           profile.Config,
+			Config:           resolvedConfig,
 		}
 		if err := s.store.CreateClusterConfig(ctx, cfg); err != nil {
 			log.Error().Err(err).
@@ -1498,6 +1674,10 @@ func (s *RESTServer) updateBackupProfile(c *fiber.Ctx) error {
 	if err := s.store.UpdateBackupProfile(c.Context(), &rule); err != nil {
 		return fmt.Errorf("update backup profile: %w", err)
 	}
+
+	// Re-push configs to all satellites using profiles that have this backup profile attached
+	s.rePushClustersForBackupProfile(c.Context(), id)
+
 	return c.JSON(rule)
 }
 
@@ -1609,6 +1789,19 @@ func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uui
 			continue
 		}
 		s.pushConfigToSatellite(cfg)
+	}
+}
+
+// rePushClustersForBackupProfile re-pushes configs for all clusters linked to
+// profiles that have the given backup profile attached.
+func (s *RESTServer) rePushClustersForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) {
+	profileIDs, err := s.store.ListProfileIDsForBackupProfile(ctx, backupProfileID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list profiles for backup profile")
+		return
+	}
+	for _, pid := range profileIDs {
+		s.rePushClustersForProfile(ctx, pid)
 	}
 }
 

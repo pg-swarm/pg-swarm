@@ -201,6 +201,19 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 	return nil
 }
 
+// TriggerPendingBackups triggers immediate base backup Jobs for any backup
+// CronJobs that haven't run yet. Called by the health monitor when a cluster
+// first transitions to RUNNING.
+func (o *Operator) TriggerPendingBackups(ctx context.Context, ns, clusterName string) {
+	o.mu.RLock()
+	cfg := o.desired[clusterKey(ns, clusterName)]
+	o.mu.RUnlock()
+	if cfg == nil || !backupEnabled(cfg) {
+		return
+	}
+	triggerPendingBaseBackups(ctx, o.client, cfg)
+}
+
 // ManagedCluster is a snapshot of a cluster managed by this operator.
 type ManagedCluster struct {
 	ClusterName string

@@ -21,7 +21,15 @@ type Store interface {
 	UpdateSatelliteHeartbeat(ctx context.Context, id uuid.UUID) error
 	UpdateSatelliteLabels(ctx context.Context, id uuid.UUID, labels map[string]string) error
 	UpdateSatelliteStorageClasses(ctx context.Context, id uuid.UUID, classes []models.StorageClassInfo) error
+	UpdateSatelliteTierMappings(ctx context.Context, id uuid.UUID, mappings map[string]string) error
 	ListSatellitesByLabelSelector(ctx context.Context, selector map[string]string) ([]*models.Satellite, error)
+
+	// Storage Tiers
+	CreateStorageTier(ctx context.Context, tier *models.StorageTier) error
+	GetStorageTier(ctx context.Context, id uuid.UUID) (*models.StorageTier, error)
+	ListStorageTiers(ctx context.Context) ([]*models.StorageTier, error)
+	UpdateStorageTier(ctx context.Context, tier *models.StorageTier) error
+	DeleteStorageTier(ctx context.Context, id uuid.UUID) error
 	GetActiveSatelliteByK8sCluster(ctx context.Context, k8sClusterName string) (*models.Satellite, error)
 	ReassignClusterConfigs(ctx context.Context, oldSatelliteID, newSatelliteID uuid.UUID) (int, error)
 
@@ -75,6 +83,7 @@ type Store interface {
 	AttachBackupProfileToProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
 	DetachBackupProfileFromProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
 	ListBackupProfilesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupProfile, error)
+	ListProfileIDsForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) ([]uuid.UUID, error)
 
 	// Backup Inventory
 	CreateBackupInventory(ctx context.Context, inv *models.BackupInventory) error

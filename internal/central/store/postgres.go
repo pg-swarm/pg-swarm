@@ -24,7 +24,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 
 // Column lists used across queries (keep in sync with scanners below).
 const (
-	satCols = `id, hostname, k8s_cluster_name, region, labels, storage_classes, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
+	satCols = `id, hostname, k8s_cluster_name, region, labels, storage_classes, tier_mappings, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
 	cfgCols = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at`
 	ruleCols = `id, name, profile_id, label_selector, namespace, cluster_name, created_at, updated_at`
 )
@@ -34,6 +34,7 @@ func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 	var sat models.Satellite
 	var labelsJSON []byte
 	var scJSON []byte
+	var tmJSON []byte
 	err := row.Scan(
 		&sat.ID,
 		&sat.Hostname,
@@ -41,6 +42,7 @@ func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 		&sat.Region,
 		&labelsJSON,
 		&scJSON,
+		&tmJSON,
 		&sat.State,
 		&sat.AuthTokenHash,
 		&sat.TempTokenHash,
@@ -66,6 +68,14 @@ func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 	}
 	if sat.StorageClasses == nil {
 		sat.StorageClasses = []models.StorageClassInfo{}
+	}
+	if tmJSON != nil {
+		if err := json.Unmarshal(tmJSON, &sat.TierMappings); err != nil {
+			return nil, fmt.Errorf("unmarshal satellite tier_mappings: %w", err)
+		}
+	}
+	if sat.TierMappings == nil {
+		sat.TierMappings = make(map[string]string)
 	}
 	return &sat, nil
 }
@@ -330,6 +340,102 @@ func (s *PostgresStore) UpdateSatelliteStorageClasses(ctx context.Context, id uu
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("satellite %s not found", id)
+	}
+	return nil
+}
+
+// UpdateSatelliteTierMappings replaces the tier mappings for a satellite.
+func (s *PostgresStore) UpdateSatelliteTierMappings(ctx context.Context, id uuid.UUID, mappings map[string]string) error {
+	if mappings == nil {
+		mappings = make(map[string]string)
+	}
+	tmJSON, err := json.Marshal(mappings)
+	if err != nil {
+		return fmt.Errorf("marshal tier mappings: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE satellites SET tier_mappings = $1, updated_at = NOW() WHERE id = $2`, tmJSON, id)
+	if err != nil {
+		return fmt.Errorf("update satellite tier mappings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("satellite %s not found", id)
+	}
+	return nil
+}
+
+// ---- Storage Tiers ----
+
+func (s *PostgresStore) CreateStorageTier(ctx context.Context, tier *models.StorageTier) error {
+	if tier.ID == uuid.Nil {
+		tier.ID = uuid.New()
+	}
+	now := time.Now()
+	tier.CreatedAt = now
+	tier.UpdatedAt = now
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO storage_tiers (id, name, description, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		tier.ID, tier.Name, tier.Description, tier.CreatedAt, tier.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("create storage tier: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetStorageTier(ctx context.Context, id uuid.UUID) (*models.StorageTier, error) {
+	var t models.StorageTier
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, name, description, created_at, updated_at FROM storage_tiers WHERE id = $1`, id).
+		Scan(&t.ID, &t.Name, &t.Description, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get storage tier: %w", err)
+	}
+	return &t, nil
+}
+
+func (s *PostgresStore) ListStorageTiers(ctx context.Context) ([]*models.StorageTier, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, description, created_at, updated_at FROM storage_tiers ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list storage tiers: %w", err)
+	}
+	defer rows.Close()
+	var tiers []*models.StorageTier
+	for rows.Next() {
+		var t models.StorageTier
+		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan storage tier: %w", err)
+		}
+		tiers = append(tiers, &t)
+	}
+	if tiers == nil {
+		tiers = []*models.StorageTier{}
+	}
+	return tiers, rows.Err()
+}
+
+func (s *PostgresStore) UpdateStorageTier(ctx context.Context, tier *models.StorageTier) error {
+	tier.UpdatedAt = time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE storage_tiers SET name = $1, description = $2, updated_at = $3 WHERE id = $4`,
+		tier.Name, tier.Description, tier.UpdatedAt, tier.ID)
+	if err != nil {
+		return fmt.Errorf("update storage tier: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("storage tier %s not found", tier.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteStorageTier(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM storage_tiers WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete storage tier: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("storage tier %s not found", id)
 	}
 	return nil
 }
@@ -1253,6 +1359,26 @@ func (s *PostgresStore) ListBackupProfilesForProfile(ctx context.Context, profil
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+// ListProfileIDsForBackupProfile returns all profile IDs that have the given backup profile attached.
+func (s *PostgresStore) ListProfileIDsForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT profile_id FROM profile_backup_profiles WHERE backup_profile_id = $1`, backupProfileID)
+	if err != nil {
+		return nil, fmt.Errorf("list profiles for backup profile: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan profile id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ---------- Backup Inventory ----------

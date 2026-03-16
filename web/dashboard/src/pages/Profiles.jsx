@@ -148,7 +148,7 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, postgresVariants, satellites, clusters, backupProfiles, refresh } = useData();
+  const { profiles, postgresVersions, postgresVariants, clusters, backupProfiles, storageTiers, refresh } = useData();
   const toast = useToast();
 
   useEffect(() => { document.title = 'Profiles - PG-Swarm'; }, []);
@@ -156,7 +156,6 @@ export default function Profiles() {
   const [viewing, setViewing] = useState(null);
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
-  const [scRefreshing, setScRefreshing] = useState(false);
   // Track attached backup profiles per profile: { profileId: [rule, ...] }
   const [attachedRules, setAttachedRules] = useState({});
 
@@ -197,32 +196,6 @@ export default function Profiles() {
     }
   }
 
-  // Deduplicate storage classes across all satellites
-  const storageClasses = useMemo(() => {
-    const seen = new Set();
-    const result = [];
-    for (const sat of satellites) {
-      for (const sc of (sat.storage_classes || [])) {
-        if (!seen.has(sc.name)) {
-          seen.add(sc.name);
-          result.push(sc);
-        }
-      }
-    }
-    return result.sort((a, b) => a.name.localeCompare(b.name));
-  }, [satellites]);
-
-  async function refreshAllStorageClasses() {
-    setScRefreshing(true);
-    try {
-      await Promise.all(satellites.map(s => api.refreshStorageClasses(s.id).catch(() => {})));
-      // Wait briefly for reports to arrive, then refresh
-      setTimeout(() => { refresh(); setScRefreshing(false); }, 2000);
-    } catch {
-      setScRefreshing(false);
-    }
-  }
-
   function startCreate() {
     setEditing({ name: '', description: '', spec: emptySpec(), isNew: true });
   }
@@ -255,7 +228,7 @@ export default function Profiles() {
     return (clusters || []).filter(c => c.profile_id === profileId).length;
   }
 
-  async function save() {
+  async function save(pendingBackupAttach = []) {
     const payload = {
       name: editing.name,
       description: editing.description,
@@ -263,8 +236,18 @@ export default function Profiles() {
     };
     try {
       if (editing.isNew) {
-        await api.createProfile(payload);
+        const created = await api.createProfile(payload);
         toast('Profile created');
+        // Attach any pending backup profiles
+        if (pendingBackupAttach.length > 0 && created?.id) {
+          for (const rule of pendingBackupAttach) {
+            try {
+              await api.attachBackupProfile(created.id, rule.id);
+            } catch (e) {
+              toast('Failed to attach backup profile ' + rule.name + ': ' + e.message, true);
+            }
+          }
+        }
       } else {
         await api.updateProfile(editing.id, payload);
         toast('Profile updated');
@@ -299,7 +282,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} backupProfiles={backupProfiles} attachedBackupProfiles={attachedRules[editing.id] || []} onAttachBackup={attachRule} onDetachBackup={detachRule} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} backupProfiles={backupProfiles} attachedBackupProfiles={attachedRules[editing.id] || []} onAttachBackup={attachRule} onDetachBackup={detachRule} />;
   }
 
   if (viewing) {
@@ -429,7 +412,7 @@ function ProfileBackupProfiles({ profileId, attached, allRules, onAttach, onDeta
       )}
       {attached.map(r => {
         const s = parseSpec(r.config);
-        const type = s.physical ? 'Physical' : 'Logical';
+        const type = (s.physical && s.logical) ? 'Physical + Logical' : s.physical ? 'Physical' : 'Logical';
         return (
           <div key={r.id} className="backup-profile-chip">
             <span className="tag">{type}</span>
@@ -445,7 +428,7 @@ function ProfileBackupProfiles({ profileId, attached, allRules, onAttach, onDeta
           <option value="" disabled>Select a backup profile...</option>
           {available.map(r => {
             const s = parseSpec(r.config);
-            const type = s.physical ? 'Physical' : 'Logical';
+            const type = (s.physical && s.logical) ? 'Physical + Logical' : s.physical ? 'Physical' : 'Logical';
             return <option key={r.id} value={r.id}>{r.name} ({type})</option>;
           })}
         </select>
@@ -468,12 +451,13 @@ const TABS = [
 
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageClasses, scRefreshing, onRefreshStorageClasses, backupProfiles, attachedBackupProfiles, onAttachBackup, onDetachBackup }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, backupProfiles, attachedBackupProfiles, onAttachBackup, onDetachBackup }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
   const [pgSearch, setPgSearch] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState({});
+  const [pendingAttach, setPendingAttach] = useState([]);
 
   // Build version options from postgres_versions table
   const versionOptions = useMemo(() => {
@@ -575,7 +559,7 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
 
   function confirmSave() {
     setShowConfirm(false);
-    onSave();
+    onSave(pendingAttach);
   }
 
   // Count non-default pg_params for badge
@@ -671,9 +655,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
           <section className="form-section">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <h4>Volumes</h4>
-              <button className="btn-sm" onClick={onRefreshStorageClasses} disabled={scRefreshing}>
-                {scRefreshing ? 'Refreshing...' : 'Refresh Storage Classes'}
-              </button>
             </div>
             <div className="volume-section">
               <div className="volume-toggle">
@@ -692,8 +673,8 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
                   <input className="input" value={spec.storage.size} onChange={e => setSpec(s => ({ ...s, storage: { ...s.storage, size: e.target.value } }))} />
                 </div>
                 <div className="form-row">
-                  <label>Storage Class</label>
-                  <StorageClassSelect value={spec.storage.storage_class} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, storage: { ...s.storage, storage_class: v } }))} />
+                  <label>Storage Tier</label>
+                  <StorageClassSelect value={spec.storage.storage_class} storageTiers={storageTiers} onChange={v => setSpec(s => ({ ...s, storage: { ...s.storage, storage_class: v } }))} />
                 </div>
               </div>
             </div>
@@ -712,8 +693,8 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
                     <input className="input" value={spec.wal_storage.size} onChange={e => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, size: e.target.value } }))} />
                   </div>
                   <div className="form-row">
-                    <label>Storage Class</label>
-                    <StorageClassSelect value={spec.wal_storage.storage_class} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, storage_class: v } }))} />
+                    <label>Storage Tier</label>
+                    <StorageClassSelect value={spec.wal_storage.storage_class} storageTiers={storageTiers} onChange={v => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, storage_class: v } }))} />
                   </div>
                 </div>
               )}
@@ -727,8 +708,8 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
                     <input className="input" value={spec.archive?.archive_storage?.size || ''} onChange={e => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), size: e.target.value } } }))} />
                   </div>
                   <div className="form-row">
-                    <label>Storage Class</label>
-                    <StorageClassSelect value={spec.archive?.archive_storage?.storage_class || ''} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), storage_class: v } } }))} />
+                    <label>Storage Tier</label>
+                    <StorageClassSelect value={spec.archive?.archive_storage?.storage_class || ''} storageTiers={storageTiers} onChange={v => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), storage_class: v } } }))} />
                   </div>
                 </div>
               </div>
@@ -953,9 +934,20 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
         {activeTab === 'backups' && (
           <section className="form-section">
             <h4>Backup Profiles</h4>
-            <p className="muted sm" style={{ marginBottom: 12 }}>Attach up to two backup profiles: one physical (base backup + WAL) and one logical (pg_dump). Each targets a single destination.</p>
+            <p className="muted sm" style={{ marginBottom: 12 }}>Configure Backup. Profiles can be configured in Backup Profiles.</p>
             {state.isNew ? (
-              <div className="empty" style={{ padding: 16 }}>Save the profile first, then attach backup profiles.</div>
+              <ProfileBackupProfiles
+                profileId="__new__"
+                attached={pendingAttach}
+                allRules={backupProfiles}
+                onAttach={(_pid, ruleId) => {
+                  const rule = backupProfiles.find(r => r.id === ruleId);
+                  if (rule) setPendingAttach(prev => [...prev, rule]);
+                }}
+                onDetach={(_pid, ruleId) => {
+                  setPendingAttach(prev => prev.filter(r => r.id !== ruleId));
+                }}
+              />
             ) : (
               <ProfileBackupProfiles
                 profileId={state.id}
@@ -1126,17 +1118,15 @@ function ReportRow({ label, value }) {
   );
 }
 
-function StorageClassSelect({ value, storageClasses, onChange }) {
-  // If the current value isn't in the list (e.g. typed manually before), keep it as an option
-  const hasValue = !value || storageClasses.some(sc => sc.name === value);
+function StorageClassSelect({ value, storageTiers = [], onChange }) {
+  const isTier = value && value.startsWith('tier:');
+  const hasValue = !value || isTier || storageTiers.some(t => 'tier:' + t.name === value);
   return (
     <select className="input" value={value} onChange={e => onChange(e.target.value)}>
       <option value="">Default</option>
-      {!hasValue && <option value={value}>{value}</option>}
-      {storageClasses.map(sc => (
-        <option key={sc.name} value={sc.name}>
-          {sc.name}{sc.is_default ? ' (default)' : ''} — {sc.provisioner}
-        </option>
+      {!hasValue && value && <option value={value}>{value}</option>}
+      {storageTiers.map(t => (
+        <option key={t.name} value={'tier:' + t.name}>{t.name}{t.description ? ' — ' + t.description : ''}</option>
       ))}
     </select>
   );

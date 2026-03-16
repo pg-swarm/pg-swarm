@@ -13,7 +13,7 @@ const TABS = [
 
 function emptySpec() {
   return {
-    physical: { base_schedule: '0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
+    physical: { base_schedule: '0 0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
     logical: null,
     destination: { type: 's3', s3: { bucket: '', region: '', endpoint: '', path_prefix: '' } },
     retention: { base_backup_count: 7, wal_retention_days: 14, logical_backup_count: 30 },
@@ -25,11 +25,13 @@ function KV({ label, value }) {
 }
 
 // Describe a cron expression in plain English.
+// Supports both 5-field (min hour dom mon dow) and 6-field (sec min hour dom mon dow).
 function describeCron(cron) {
   if (!cron) return null;
   const parts = cron.trim().split(/\s+/);
   if (parts.length < 5) return null;
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  // 6-field: second minute hour dom month dow
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts.length >= 6 ? parts.slice(1) : parts;
 
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -106,7 +108,8 @@ function estimateCronIntervalDays(cron) {
   if (!cron) return null;
   const parts = cron.trim().split(/\s+/);
   if (parts.length < 5) return null;
-  const [, , dayOfMonth, month, dayOfWeek] = parts;
+  const fields = parts.length >= 6 ? parts.slice(1) : parts;
+  const [, , dayOfMonth, month, dayOfWeek] = fields;
 
   // "0 2 * * 0" = weekly
   if (dayOfMonth === '*' && month === '*' && dayOfWeek !== '*') {
@@ -200,7 +203,7 @@ export default function BackupProfiles() {
           <div className="empty">No backup rules created yet</div>
         ) : backupProfiles.map(rule => {
           const spec = parseSpec(rule.config);
-          const backupType = spec.physical ? 'Physical' : spec.logical ? 'Logical' : '-';
+          const backupType = (spec.physical && spec.logical) ? 'Physical + Logical' : spec.physical ? 'Physical' : spec.logical ? 'Logical' : '-';
           const schedule = spec.physical?.base_schedule || spec.logical?.schedule || '-';
           return (
             <div className="cl-card" key={rule.id}>
@@ -257,20 +260,18 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
     setState(prev => ({ ...prev, spec: fn(prev.spec) }));
   }
 
-  function setBackupType(type) {
-    if (type === 'physical') {
-      setSpec(s => ({
-        ...s,
-        physical: { base_schedule: '0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
-        logical: null,
-      }));
-    } else {
-      setSpec(s => ({
-        ...s,
-        physical: null,
-        logical: { schedule: '0 2 * * *', databases: [], format: 'custom' },
-      }));
-    }
+  function togglePhysical() {
+    setSpec(s => ({
+      ...s,
+      physical: s.physical ? null : { base_schedule: '0 0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
+    }));
+  }
+
+  function toggleLogical() {
+    setSpec(s => ({
+      ...s,
+      logical: s.logical ? null : { schedule: '0 0 2 * * *', databases: [], format: 'custom' },
+    }));
   }
 
   function setDestType(type) {
@@ -327,16 +328,16 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <input className="input" value={state.description} onChange={e => setField('description', e.target.value)} placeholder="Optional description" />
               </div>
               <div className="form-row">
-                <label>Backup Type</label>
+                <label>Backup Types</label>
                 <div className="radio-group">
                   <label className="toggle">
-                    <input type="radio" name="backup-type" checked={!!spec.physical} onChange={() => setBackupType('physical')} />
-                    <span>Physical</span>
+                    <input type="checkbox" checked={!!spec.physical} onChange={togglePhysical} />
+                    <span>Enable Physical Backup</span>
                     <span className="info-tip" title="Full binary copy of the data directory. Supports continuous WAL archiving and point-in-time recovery (PITR). Best for disaster recovery."><Info size={14} /></span>
                   </label>
                   <label className="toggle">
-                    <input type="radio" name="backup-type" checked={!!spec.logical} onChange={() => setBackupType('logical')} />
-                    <span>Logical</span>
+                    <input type="checkbox" checked={!!spec.logical} onChange={toggleLogical} />
+                    <span>Enable Logical Backup</span>
                     <span className="info-tip" title="SQL-level dump of database objects and data. Portable across PG versions. Best for migrations, selective restores, and cross-version upgrades."><Info size={14} /></span>
                   </label>
                 </div>
@@ -353,14 +354,14 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <div className="form-grid">
                   <div className="form-row">
                     <label>Base Backup Schedule (cron)</label>
-                    <input className="input" value={spec.physical.base_schedule} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, base_schedule: e.target.value } }))} placeholder="0 2 * * 0" />
+                    <input className="input" value={spec.physical.base_schedule} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, base_schedule: e.target.value } }))} placeholder="0 0 2 * * 0" />
                     {describeCron(spec.physical.base_schedule)
                       ? <span className="form-hint cron-desc">{describeCron(spec.physical.base_schedule)}</span>
-                      : <span className="form-hint">Standard cron: minute hour day month weekday</span>}
+                      : <span className="form-hint">Cron: second minute hour day month weekday</span>}
                   </div>
                   <div className="form-row">
                     <label>Incremental Backup Schedule (PG 17+)</label>
-                    <input className="input" value={spec.physical.incremental_schedule || ''} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, incremental_schedule: e.target.value } }))} placeholder="Optional, e.g. 0 2 * * 1-6" />
+                    <input className="input" value={spec.physical.incremental_schedule || ''} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, incremental_schedule: e.target.value } }))} placeholder="Optional, e.g. 0 0 2 * * 1-6" />
                     {spec.physical.incremental_schedule && describeCron(spec.physical.incremental_schedule)
                       ? <span className="form-hint cron-desc">{describeCron(spec.physical.incremental_schedule)}</span>
                       : <span className="form-hint">Requires PostgreSQL 17+. Takes smaller backups of only changed blocks since last full.</span>}
@@ -390,10 +391,10 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <div className="form-grid">
                   <div className="form-row">
                     <label>Schedule (cron)</label>
-                    <input className="input" value={spec.logical.schedule} onChange={e => setSpec(s => ({ ...s, logical: { ...s.logical, schedule: e.target.value } }))} placeholder="0 2 * * *" />
+                    <input className="input" value={spec.logical.schedule} onChange={e => setSpec(s => ({ ...s, logical: { ...s.logical, schedule: e.target.value } }))} placeholder="0 0 2 * * *" />
                     {describeCron(spec.logical.schedule)
                       ? <span className="form-hint cron-desc">{describeCron(spec.logical.schedule)}</span>
-                      : <span className="form-hint">Standard cron: minute hour day month weekday</span>}
+                      : <span className="form-hint">Cron: second minute hour day month weekday</span>}
                   </div>
                   <div className="form-row">
                     <label>Dump Format</label>
