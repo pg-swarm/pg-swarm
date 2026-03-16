@@ -185,7 +185,7 @@ func transferLease(ctx context.Context, client kubernetes.Interface, namespace, 
 	if apierrors.IsNotFound(err) {
 		// Create a new lease for the target
 		now := metav1.NewMicroTime(time.Now())
-		dur := int32(15)
+		dur := int32(5)
 		_, err := client.CoordinationV1().Leases(namespace).Create(ctx, &coordinationv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: namespace},
 			Spec: coordinationv1.LeaseSpec{

@@ -638,15 +638,15 @@ The failover sidecar (`cmd/failover-sidecar`) runs as a container alongside each
 
 Each sidecar contends for a Lease resource (`{cluster}-leader`) in the cluster namespace:
 
-- **Lease duration**: 15 seconds
-- **Renewal**: On each tick (every 5 seconds by default), the current holder renews `renewTime`
+- **Lease duration**: 5 seconds
+- **Renewal**: On each tick (every 1 second by default), the current holder renews `renewTime`
 - **Acquisition**: If the lease is expired or doesn't exist, a replica can acquire it and promote
 - **Optimistic locking**: Uses `resourceVersion` to prevent race conditions
 
 ### 8.2 Tick Loop
 
 ```
- Sidecar Tick (every 5s)
+ Sidecar Tick (every 1s)
     │
     ├─ Connect to local PG (localhost:5432)
     ├─ SELECT pg_is_in_recovery()
@@ -666,8 +666,14 @@ Each sidecar contends for a Lease resource (`{cluster}-leader`) in the cluster n
     │
     └─ If REPLICA (in recovery):
         ├─ Label pod as "replica"
-        ├─ Check if leader lease expired
-        └─ If expired → acquire lease → pg_promote() → label as "primary"
+        ├─ Check WAL receiver health
+        ├─ Check primary reachability (1s TCP connect to RW service)
+        │   ├─ Reachable → reset count, skip lease check (fast path)
+        │   └─ Unreachable → increment count
+        │       ├─ count < 3 → return (not enough evidence)
+        │       └─ count >= 3 → check lease
+        │           ├─ Expired → acquire lease → pg_promote() → label "primary"
+        │           └─ Not expired → log warning (network partition)
 ```
 
 ### 8.3 SQL Fencing (`internal/shared/pgfence`)
@@ -726,7 +732,8 @@ The failover sidecar requires these Kubernetes permissions:
 | `CLUSTER_NAME` | Config | Lease name derivation |
 | `POSTGRES_PASSWORD` | Secret | Connect to local PG |
 | `REPLICATION_PASSWORD` | Secret | Set primary_conninfo on demotion |
-| `HEALTH_CHECK_INTERVAL` | Config | Tick interval in seconds (default: 5) |
+| `HEALTH_CHECK_INTERVAL` | Config | Tick interval in seconds (default: 1) |
+| `PRIMARY_HOST` | Config | RW service DNS for direct primary reachability check |
 
 ---
 

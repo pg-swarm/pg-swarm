@@ -683,10 +683,10 @@ func TestManifests_FailoverDefaultImage(t *testing.T) {
 	if sidecar.Image != "ghcr.io/pg-swarm/pg-swarm-failover:latest" {
 		t.Errorf("default sidecar image = %q, want ghcr.io/pg-swarm/pg-swarm-failover:latest", sidecar.Image)
 	}
-	// Default interval should be 5
+	// Default interval should be 1 (fast-path failover)
 	for _, ev := range sidecar.Env {
-		if ev.Name == "HEALTH_CHECK_INTERVAL" && ev.Value != "5" {
-			t.Errorf("default HEALTH_CHECK_INTERVAL = %q, want 5", ev.Value)
+		if ev.Name == "HEALTH_CHECK_INTERVAL" && ev.Value != "1" {
+			t.Errorf("default HEALTH_CHECK_INTERVAL = %q, want 1", ev.Value)
 		}
 	}
 }
