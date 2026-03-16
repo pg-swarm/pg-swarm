@@ -4,11 +4,11 @@ import { useToast } from '../context/ToastContext';
 import { api, deriveSatState, timeAgo } from '../api';
 import { SatBadge } from '../components/Badge';
 import {
-  Check, X, Tag, Plus, Save, Satellite, Terminal, AlertTriangle
+  Check, X, Tag, Plus, Save, Satellite, Terminal, AlertTriangle, Layers
 } from 'lucide-react';
 
 export default function Satellites() {
-  const { satellites, refresh } = useData();
+  const { satellites, storageTiers, refresh } = useData();
   const toast = useToast();
 
   useEffect(() => { document.title = 'Satellites - PG-Swarm'; }, []);
@@ -17,6 +17,10 @@ export default function Satellites() {
   const [labelVal, setLabelVal] = useState('');
   const [pendingLabels, setPendingLabels] = useState({});
   const [replaceConfirm, setReplaceConfirm] = useState(null); // { id, old }
+  const [tierModal, setTierModal] = useState(null); // full satellite object
+  const [pendingTiers, setPendingTiers] = useState({});
+  const [tierKey, setTierKey] = useState('');
+  const [tierVal, setTierVal] = useState('');
 
   async function approve(id, replace = false) {
     try {
@@ -73,6 +77,39 @@ export default function Satellites() {
       refresh();
     } catch (e) {
       toast('Failed to update labels: ' + e.message, true);
+    }
+  }
+
+  function startEditTiers(sat) {
+    setTierModal(sat);
+    setPendingTiers({ ...(sat.tier_mappings || {}) });
+    setTierKey('');
+    setTierVal('');
+  }
+
+  function addTier() {
+    if (!tierKey.trim()) return;
+    setPendingTiers(prev => ({ ...prev, [tierKey.trim()]: tierVal.trim() }));
+    setTierKey('');
+    setTierVal('');
+  }
+
+  function removeTier(key) {
+    setPendingTiers(prev => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
+
+  async function saveTiers() {
+    try {
+      await api.updateSatelliteTierMappings(tierModal.id, pendingTiers);
+      toast('Tier mappings updated');
+      setTierModal(null);
+      refresh();
+    } catch (e) {
+      toast('Failed to update tier mappings: ' + e.message, true);
     }
   }
 
@@ -163,6 +200,7 @@ export default function Satellites() {
                           <Terminal size={11} /> Logs
                         </button>
                         <button className="btn btn-sm" onClick={() => startEditLabels(s)}><Tag size={11} /> Labels</button>
+                        <button className="btn btn-sm" onClick={() => startEditTiers(s)}><Layers size={11} /> Tiers</button>
                       </>
                     )}
                   </div>
@@ -172,6 +210,66 @@ export default function Satellites() {
           })}
         </tbody>
       </table>
+      )}
+
+      {tierModal && (
+        <div className="confirm-overlay" onClick={() => setTierModal(null)}>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+            <div className="confirm-header">
+              <h3><Layers size={18} /> Tier Mappings — {tierModal.hostname}</h3>
+              <button className="modal-close" onClick={() => setTierModal(null)}><X size={18} /></button>
+            </div>
+            <div className="confirm-body">
+              <p className="sm muted" style={{ margin: '0 0 12px' }}>Map admin-defined storage tiers to this satellite's concrete storage classes. Profiles reference tiers; the mapping is resolved at deployment time.</p>
+
+              {Object.keys(pendingTiers).length > 0 && (
+                <table style={{ width: '100%', marginBottom: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>Tier</th>
+                      <th>Storage Class</th>
+                      <th style={{ width: 40 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(pendingTiers).map(([k, v]) => (
+                      <tr key={k}>
+                        <td className="mono">{k}</td>
+                        <td className="mono">{v}</td>
+                        <td>
+                          <button className="btn btn-sm btn-reject" onClick={() => removeTier(k)} style={{ padding: '2px 4px' }}><X size={10} /></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {Object.keys(pendingTiers).length === 0 && (
+                <p className="muted" style={{ textAlign: 'center', padding: '12px 0' }}>No mappings configured</p>
+              )}
+
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <select className="input" value={tierKey} onChange={e => setTierKey(e.target.value)} style={{ flex: 1 }}>
+                  <option value="">select tier...</option>
+                  {(storageTiers || []).filter(t => !(t.name in pendingTiers)).map(t => (
+                    <option key={t.name} value={t.name}>{t.name}{t.description ? ' — ' + t.description : ''}</option>
+                  ))}
+                </select>
+                <select className="input" value={tierVal} onChange={e => setTierVal(e.target.value)} style={{ flex: 1 }}>
+                  <option value="">select class...</option>
+                  {(tierModal.storage_classes || []).map(sc => (
+                    <option key={sc.name} value={sc.name}>{sc.name}{sc.provisioner ? ' — ' + sc.provisioner : ''}</option>
+                  ))}
+                </select>
+                <button className="btn btn-sm" onClick={addTier}><Plus size={12} /> Add</button>
+              </div>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-sm" onClick={() => setTierModal(null)}>Cancel</button>
+              <button className="btn-sm btn-approve" onClick={saveTiers}><Save size={11} /> Save</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {replaceConfirm && (

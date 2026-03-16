@@ -134,6 +134,11 @@ func (m *Monitor) checkAll(ctx context.Context) {
 				})
 			}
 		}
+		// Trigger pending base backups when cluster first becomes RUNNING
+		if r.report.State == pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING &&
+			(!existed || prev != pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING) {
+			m.operator.TriggerPendingBackups(ctx, r.mc.Namespace, r.mc.ClusterName)
+		}
 		m.lastStates[key] = r.report.State
 	}
 

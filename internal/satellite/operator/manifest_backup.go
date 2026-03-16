@@ -24,6 +24,22 @@ func backupEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 }
 
 
+// triggerPendingBaseBackups triggers immediate Jobs for base-backup CronJobs
+// that don't yet have an -initial Job. Safe to call repeatedly (idempotent).
+func triggerPendingBaseBackups(ctx context.Context, client kubernetes.Interface, cfg *pgswarmv1.ClusterConfig) {
+	for _, backup := range cfg.Backups {
+		cj := buildBaseBackupCronJob(cfg, backup)
+		if cj == nil {
+			continue
+		}
+		// Only trigger if the CronJob actually exists (was created during reconcile)
+		if _, err := client.BatchV1().CronJobs(cj.Namespace).Get(ctx, cj.Name, metav1.GetOptions{}); err != nil {
+			continue
+		}
+		triggerImmediateJob(ctx, client, cj)
+	}
+}
+
 // backupImageForRule returns the container image for a backup CronJob.
 func backupImageForRule(backup *pgswarmv1.BackupConfig) string {
 	if backup != nil && backup.BackupImage != "" {
@@ -841,19 +857,28 @@ func reconcileBackupCronJobs(ctx context.Context, client kubernetes.Interface, c
 		}
 	}
 
+	// Check StatefulSet readiness once before the loop. If the cluster is
+	// already running, we trigger an immediate base backup for newly created
+	// CronJobs so the cluster doesn't sit unprotected until the cron fires.
+	clusterReady := isStatefulSetReady(ctx, client, cfg.Namespace, cfg.ClusterName)
+
 	for _, backup := range cfg.Backups {
 		if cj := buildBaseBackupCronJob(cfg, backup); cj != nil {
-			if err := createOrUpdateCronJob(ctx, client, cj); err != nil {
+			created, err := createOrUpdateCronJob(ctx, client, cj)
+			if err != nil {
 				return fmt.Errorf("base backup cronjob (rule %s): %w", ruleShortID(backup.BackupProfileId), err)
+			}
+			if created && clusterReady {
+				triggerImmediateJob(ctx, client, cj)
 			}
 		}
 		if cj := buildIncrementalBackupCronJob(cfg, backup); cj != nil {
-			if err := createOrUpdateCronJob(ctx, client, cj); err != nil {
+			if _, err := createOrUpdateCronJob(ctx, client, cj); err != nil {
 				return fmt.Errorf("incremental backup cronjob (rule %s): %w", ruleShortID(backup.BackupProfileId), err)
 			}
 		}
 		if cj := buildLogicalBackupCronJob(cfg, backup); cj != nil {
-			if err := createOrUpdateCronJob(ctx, client, cj); err != nil {
+			if _, err := createOrUpdateCronJob(ctx, client, cj); err != nil {
 				return fmt.Errorf("logical backup cronjob (rule %s): %w", ruleShortID(backup.BackupProfileId), err)
 			}
 		}
@@ -929,28 +954,39 @@ func triggerImmediateJob(ctx context.Context, client kubernetes.Interface, cj *b
 }
 
 // createOrUpdateCronJob creates a CronJob if it doesn't exist, or updates it.
-func createOrUpdateCronJob(ctx context.Context, client kubernetes.Interface, desired *batchv1.CronJob) error {
+// Returns (created, error) where created=true means the CronJob was newly created.
+func createOrUpdateCronJob(ctx context.Context, client kubernetes.Interface, desired *batchv1.CronJob) (bool, error) {
 	existing, err := client.BatchV1().CronJobs(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = client.BatchV1().CronJobs(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
-		if err == nil {
-			// Trigger an immediate run for non-backup CronJobs only.
-			// Backup CronJobs skip this because PG may not be ready yet
-			// (e.g. during initial cluster creation). The readiness check
-			// in the backup script handles waiting on scheduled runs.
-			if _, isBackup := desired.Labels["pg-swarm/backup-type"]; !isBackup {
-				triggerImmediateJob(ctx, client, desired)
-			}
+		if err != nil {
+			return false, err
 		}
-		return err
+		// Trigger an immediate run for non-backup CronJobs.
+		// Backup CronJobs are handled by the caller (reconcileBackupCronJobs)
+		// which checks StatefulSet readiness first.
+		if _, isBackup := desired.Labels["pg-swarm/backup-type"]; !isBackup {
+			triggerImmediateJob(ctx, client, desired)
+		}
+		return true, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	existing.Spec = desired.Spec
 	existing.Labels = desired.Labels
 	_, err = client.BatchV1().CronJobs(desired.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
-	return err
+	return false, err
+}
+
+// isStatefulSetReady returns true if the cluster's StatefulSet has at least one ready replica.
+func isStatefulSetReady(ctx context.Context, client kubernetes.Interface, ns, clusterName string) bool {
+	stsName := clusterName
+	sts, err := client.AppsV1().StatefulSets(ns).Get(ctx, stsName, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return sts.Status.ReadyReplicas >= 1
 }
 
 // buildRestoreJob creates a K8s Job to perform a PITR or logical restore.

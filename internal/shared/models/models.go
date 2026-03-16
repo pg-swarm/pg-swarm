@@ -45,6 +45,7 @@ type Satellite struct {
 	Region         string             `json:"region" db:"region"`
 	Labels         map[string]string  `json:"labels" db:"labels"`
 	StorageClasses []StorageClassInfo `json:"storage_classes" db:"storage_classes"`
+	TierMappings   map[string]string  `json:"tier_mappings" db:"tier_mappings"`
 	State          SatelliteState     `json:"state" db:"state"`
 	AuthTokenHash  string             `json:"-" db:"auth_token_hash"`
 	TempTokenHash  string             `json:"-" db:"temp_token_hash"`
@@ -240,6 +241,16 @@ type PostgresVariant struct {
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
 
+// StorageTier is an admin-defined abstract storage tier (e.g. "fast", "replicated").
+// Satellites map their concrete storage classes to these tiers.
+type StorageTier struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	Name        string    `json:"name" db:"name"`
+	Description string    `json:"description" db:"description"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
 type ClusterHealth struct {
 	SatelliteID uuid.UUID       `json:"satellite_id" db:"satellite_id"`
 	ClusterName string          `json:"cluster_name" db:"cluster_name"`
@@ -348,9 +359,6 @@ type RetentionSpec struct {
 func ValidateBackupProfileSpec(spec *BackupProfileSpec) error {
 	if spec.Physical == nil && spec.Logical == nil {
 		return fmt.Errorf("backup profile must define either physical or logical backup")
-	}
-	if spec.Physical != nil && spec.Logical != nil {
-		return fmt.Errorf("backup profile must define either physical or logical backup, not both")
 	}
 	if spec.Physical != nil {
 		if spec.Physical.BaseSchedule == "" {

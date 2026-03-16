@@ -11,6 +11,7 @@ import {
   postgresVersions,
   postgresVariants,
   backupProfiles,
+  storageTiers,
   backups,
   restores,
   generateLogs,
@@ -40,6 +41,7 @@ export default function mockApiPlugin() {
     postgresVersions: [...postgresVersions],
     postgresVariants: [...postgresVariants],
     backupProfiles: [...backupProfiles],
+    storageTiers: [...storageTiers],
   };
 
   return {
@@ -75,6 +77,12 @@ export default function mockApiPlugin() {
         }
         if (path.match(/^\/satellites\/[^/]+\/refresh-storage-classes$/) && method === 'POST') {
           return json(res, { ok: true });
+        }
+        if (path.match(/^\/satellites\/[^/]+\/tier-mappings$/) && method === 'PUT') {
+          const id = path.split('/')[2];
+          const sat = state.satellites.find((s) => s.id === id);
+          body(req).then((b) => { if (sat) sat.tier_mappings = b.tier_mappings || {}; json(res, sat || {}); });
+          return;
         }
         if (path.match(/^\/satellites\/[^/]+\/logs$/) && method === 'GET') {
           const id = path.split('/')[2];
@@ -320,6 +328,33 @@ export default function mockApiPlugin() {
         if (path.match(/^\/backups\/[^/]+$/) && method === 'GET') {
           const id = path.split('/')[2];
           return json(res, backups.find((b) => b.id === id) || { error: 'not found' });
+        }
+
+        // ---- Storage Tiers ----
+        if (path === '/storage-tiers' && method === 'GET') {
+          return json(res, state.storageTiers);
+        }
+        if (path === '/storage-tiers' && method === 'POST') {
+          body(req).then((b) => {
+            const t = { id: 'tier-' + Date.now(), created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...b };
+            state.storageTiers.push(t);
+            json(res, t, 201);
+          });
+          return;
+        }
+        if (path.match(/^\/storage-tiers\/[^/]+$/) && method === 'PUT') {
+          const id = path.split('/')[2];
+          body(req).then((b) => {
+            const idx = state.storageTiers.findIndex((t) => t.id === id);
+            if (idx >= 0) { Object.assign(state.storageTiers[idx], b, { updated_at: new Date().toISOString() }); json(res, state.storageTiers[idx]); }
+            else json(res, { error: 'not found' }, 404);
+          });
+          return;
+        }
+        if (path.match(/^\/storage-tiers\/[^/]+$/) && method === 'DELETE') {
+          const id = path.split('/')[2];
+          state.storageTiers = state.storageTiers.filter((t) => t.id !== id);
+          return json(res, { ok: true });
         }
 
         // Fallback
