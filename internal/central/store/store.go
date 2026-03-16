@@ -22,6 +22,8 @@ type Store interface {
 	UpdateSatelliteLabels(ctx context.Context, id uuid.UUID, labels map[string]string) error
 	UpdateSatelliteStorageClasses(ctx context.Context, id uuid.UUID, classes []models.StorageClassInfo) error
 	ListSatellitesByLabelSelector(ctx context.Context, selector map[string]string) ([]*models.Satellite, error)
+	GetActiveSatelliteByK8sCluster(ctx context.Context, k8sClusterName string) (*models.Satellite, error)
+	ReassignClusterConfigs(ctx context.Context, oldSatelliteID, newSatelliteID uuid.UUID) (int, error)
 
 	// Cluster Configs
 	CreateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error

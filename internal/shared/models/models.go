@@ -16,6 +16,7 @@ const (
 	SatelliteStateApproved     SatelliteState = "approved"
 	SatelliteStateConnected    SatelliteState = "connected"
 	SatelliteStateDisconnected SatelliteState = "disconnected"
+	SatelliteStateReplaced     SatelliteState = "replaced"
 )
 
 type ClusterState string

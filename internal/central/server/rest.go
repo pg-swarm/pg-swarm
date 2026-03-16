@@ -163,13 +163,19 @@ func (s *RESTServer) approveSatellite(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
 	}
 
-	authToken, err := s.registry.Approve(c.Context(), id)
+	replacedID, authToken, err := s.registry.Approve(c.Context(), id)
 	if err != nil {
 		log.Error().Err(err).Str("satellite_id", id.String()).Msg("failed to approve satellite")
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	return c.JSON(fiber.Map{"auth_token": authToken})
+	result := fiber.Map{"auth_token": authToken}
+	if replacedID != nil {
+		result["replaced_satellite_id"] = replacedID.String()
+		// Disconnect the old satellite's stream if it's still connected
+		s.streams.Remove(*replacedID)
+	}
+	return c.JSON(result)
 }
 
 func (s *RESTServer) rejectSatellite(c *fiber.Ctx) error {
