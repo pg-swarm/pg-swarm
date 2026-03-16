@@ -1,15 +1,15 @@
 import {
   CheckCircle2, AlertCircle, XCircle, Clock, Pause, Loader, Trash2,
-  Wifi, WifiOff
+  Wifi, WifiOff, RefreshCw
 } from 'lucide-react';
 
 const SAT_ICONS = {
   connected: CheckCircle2, approved: Clock, pending: Clock,
-  disconnected: WifiOff, offline: XCircle,
+  disconnected: WifiOff, offline: XCircle, replaced: RefreshCw,
 };
 const SAT_COLORS = {
   connected: 'green', approved: 'amber', pending: 'amber',
-  disconnected: 'red', offline: 'red',
+  disconnected: 'red', offline: 'red', replaced: 'gray',
 };
 
 const CLUSTER_ICONS = {

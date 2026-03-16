@@ -234,8 +234,12 @@ spec:
                           else
                               echo "pg_rewind failed — falling back to full re-basebackup"
                               rm -rf "$PGDATA"/*
+                              # Mark as needs-basebackup so a failed pg_basebackup retries
+                              # on next restart instead of hitting initdb (ordinal 0).
+                              touch "$PGDATA/.pg-swarm-needs-basebackup"
                               PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
                                   -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
+                              rm -f "$PGDATA/.pg-swarm-needs-basebackup"
                               cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
                               cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
                           fi
@@ -254,7 +258,16 @@ spec:
               exit 0
           fi
 
-          if [ "$ORDINAL" = "0" ]; then
+          # Check if this pod was a demoted primary that needs re-basebackup (not initdb).
+          # The marker is left by the pg_rewind fallback path above when pg_basebackup fails.
+          NEEDS_BASEBACKUP=false
+          if [ -f "$PGDATA/.pg-swarm-needs-basebackup" ]; then
+              echo "Found needs-basebackup marker — previous re-basebackup failed, retrying"
+              NEEDS_BASEBACKUP=true
+              rm -rf "$PGDATA"/*
+          fi
+
+          if [ "$NEEDS_BASEBACKUP" = "false" ] && [ "$ORDINAL" = "0" ]; then
               echo "Initializing primary (ordinal 0)"
               initdb -D "$PGDATA" --auth-local=trust --auth-host=md5
 
@@ -262,6 +275,7 @@ spec:
               pg_ctl -D "$PGDATA" start -w -o "-c listen_addresses='localhost'"
               psql -U postgres -c "ALTER USER postgres PASSWORD '$POSTGRES_PASSWORD';"
               psql -U postgres -c "CREATE ROLE repl_user WITH REPLICATION LOGIN PASSWORD '$REPLICATION_PASSWORD';"
+              psql -U postgres -c "CREATE ROLE backup_user WITH REPLICATION LOGIN PASSWORD '$BACKUP_PASSWORD' IN ROLE pg_read_all_data;"
               psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
 
               pg_ctl -D "$PGDATA" stop -w
@@ -299,6 +313,11 @@ spec:
           valueFrom:
             secretKeyRef:
               key: replication-password
+              name: my-pg-s3-secret
+        - name: BACKUP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: backup-password
               name: my-pg-s3-secret
         image: postgres:17-alpine
         name: pg-init

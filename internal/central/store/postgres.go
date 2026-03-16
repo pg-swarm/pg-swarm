@@ -238,7 +238,7 @@ func (s *PostgresStore) GetSatelliteByToken(ctx context.Context, tokenHash strin
 
 // ListSatellites returns all satellites ordered by creation time.
 func (s *PostgresStore) ListSatellites(ctx context.Context) ([]*models.Satellite, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+satCols+` FROM satellites ORDER BY created_at DESC`)
+	rows, err := s.pool.Query(ctx, `SELECT `+satCols+` FROM satellites WHERE state != 'replaced' ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list satellites: %w", err)
 	}
@@ -454,25 +454,26 @@ func (s *PostgresStore) ListClusterConfigs(ctx context.Context) ([]*models.Clust
 }
 
 // UpdateClusterConfig updates a cluster configuration and bumps its config version.
+// The bumped config_version is written back to cfg so callers see the new value.
 func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error {
 	if cfg.Config == nil {
 		cfg.Config = json.RawMessage("{}")
 	}
 	cfg.UpdatedAt = time.Now()
 
-	tag, err := s.pool.Exec(ctx,
+	var newVersion int64
+	err := s.pool.QueryRow(ctx,
 		`UPDATE cluster_configs SET name = $1, namespace = $2, satellite_id = $3,
 		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, state = $7, paused = $8, updated_at = $9
-		 WHERE id = $10`,
+		 WHERE id = $10
+		 RETURNING config_version`,
 		cfg.Name, cfg.Namespace, cfg.SatelliteID,
 		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.State, cfg.Paused, cfg.UpdatedAt, cfg.ID,
-	)
+	).Scan(&newVersion)
 	if err != nil {
 		return fmt.Errorf("update cluster config: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("cluster config %s not found", cfg.ID)
-	}
+	cfg.ConfigVersion = newVersion
 	return nil
 }
 
