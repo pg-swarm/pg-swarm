@@ -1,6 +1,6 @@
 # Maintainers
 
-This file lists the maintainers of the pg-swarm project. Maintainers have write access to the repository and are responsible for reviewing and merging pull requests, triaging issues, and guiding the project's technical direction.
+This file lists the maintainers of the pg-swarm project. Maintainers have the authority to approve and merge pull requests, make releases, and guide the project's technical direction.
 
 ## Current Maintainers
 
@@ -14,13 +14,15 @@ New maintainers are nominated by existing maintainers based on sustained, high-q
 
 - Consistent contributions over at least 3 months
 - Deep understanding of the codebase and architecture
-- Demonstrated good judgement in code reviews
-- Alignment with the project's goals and values
+- Demonstrated good judgment in code reviews
+- Commitment to the project's goals and community
 
 Nominations are discussed privately among existing maintainers and require unanimous approval.
 
-## Emeritus Maintainers
+## Maintainer Responsibilities
 
-Maintainers who are no longer actively contributing may move to emeritus status. Emeritus maintainers are recognized for their past contributions but do not have active merge permissions.
-
-*None yet.*
+- Review and merge pull requests in a timely manner
+- Triage issues and provide guidance to contributors
+- Participate in architectural decisions
+- Ensure releases are stable and well-tested
+- Uphold the Code of Conduct
