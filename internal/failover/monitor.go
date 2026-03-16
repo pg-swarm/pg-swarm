@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	leaseDuration = 15 * time.Second
+	defaultLeaseDuration = 5 * time.Second
 
 	// rewindGracePeriod is how long we wait with WAL receiver down before
 	// attempting pg_rewind / re-basebackup. This gives PG time to reconnect
@@ -41,9 +41,12 @@ type Config struct {
 	Namespace           string
 	ClusterName         string
 	Interval            time.Duration
-	PGConnString        string // e.g. "host=localhost user=postgres password=xxx dbname=postgres"
+	PGConnString        string        // e.g. "host=localhost user=postgres password=xxx dbname=postgres"
 	RestConfig          *rest.Config
-	ReplicationPassword string // for primary_conninfo when demoting
+	ReplicationPassword string        // for primary_conninfo when demoting
+	PrimaryHost         string        // RW service DNS for reachability check
+	PGPassword          string        // superuser password for reachability check
+	LeaseDuration       time.Duration // configurable, default 5s
 }
 
 // Monitor watches the local PostgreSQL instance and manages leader election.
@@ -51,6 +54,7 @@ type Monitor struct {
 	cfg        Config
 	client     kubernetes.Interface
 	leaseName  string
+	leaseDur   time.Duration
 	fenceFunc  func(ctx context.Context, db pgfence.PGExecer) error // nil = pgfence.FencePrimary
 	demoteFunc func(ctx context.Context) error                      // nil = real demotePrimary
 	rewindFunc func(ctx context.Context) error                      // nil = real rewindOrReinit
@@ -59,14 +63,24 @@ type Monitor struct {
 	// inactive on a replica. Zero means the receiver is active (or we haven't
 	// checked yet). After rewindGracePeriod, we attempt pg_rewind / re-basebackup.
 	walReceiverDownSince time.Time
+
+	// primaryUnreachableCount tracks consecutive failed reachability checks.
+	primaryUnreachableCount int
+	// primaryCheckFunc overrides isPrimaryReachable for testing (nil = real check).
+	primaryCheckFunc func(ctx context.Context) bool
 }
 
 // NewMonitor creates a new failover monitor.
 func NewMonitor(cfg Config, client kubernetes.Interface) *Monitor {
+	ld := cfg.LeaseDuration
+	if ld <= 0 {
+		ld = defaultLeaseDuration
+	}
 	return &Monitor{
 		cfg:       cfg,
 		client:    client,
 		leaseName: fmt.Sprintf("%s-leader", cfg.ClusterName),
+		leaseDur:  ld,
 	}
 }
 
@@ -234,14 +248,57 @@ pg_ctl -D "$PGDATA" stop -m fast`,
 	return nil
 }
 
+// isPrimaryReachable checks whether the primary is reachable via a fast
+// TCP+auth connection attempt. Returns true if a connection succeeds.
+func (m *Monitor) isPrimaryReachable(ctx context.Context) bool {
+	if m.primaryCheckFunc != nil {
+		return m.primaryCheckFunc(ctx)
+	}
+	if m.cfg.PrimaryHost == "" {
+		return true // no primary host configured — skip reachability check
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(checkCtx, fmt.Sprintf(
+		"host=%s port=5432 user=postgres password=%s dbname=postgres connect_timeout=1",
+		m.cfg.PrimaryHost, m.cfg.PGPassword))
+	if err != nil {
+		return false
+	}
+	conn.Close(checkCtx)
+	return true
+}
+
 // handleReplica labels the pod as replica, checks WAL receiver health,
 // and initiates failover if the leader lease has expired.
+//
+// Fast-path: if the primary is reachable, we skip the lease check entirely
+// (happy path — no K8s API call needed). If the primary is unreachable for
+// 3+ consecutive ticks AND the lease is expired, we promote.
 func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	m.labelPod(ctx, roleReplica)
 
 	// Check if WAL receiver is actively streaming from the primary.
-	m.checkWalReceiver(ctx, conn)
+	if conn != nil {
+		m.checkWalReceiver(ctx, conn)
+	}
 
+	// Fast-path reachability check: if the primary responds, skip lease check.
+	if m.isPrimaryReachable(ctx) {
+		m.primaryUnreachableCount = 0
+		return
+	}
+
+	m.primaryUnreachableCount++
+	log.Warn().
+		Int("count", m.primaryUnreachableCount).
+		Msg("primary unreachable")
+
+	if m.primaryUnreachableCount < 3 {
+		return // not enough evidence yet
+	}
+
+	// Primary has been unreachable for 3+ ticks — check the lease.
 	expired, err := m.isLeaseExpired(ctx)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to check leader lease")
@@ -249,10 +306,11 @@ func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	}
 
 	if !expired {
+		log.Warn().Msg("primary unreachable but lease still valid — possible network partition to this replica")
 		return
 	}
 
-	log.Info().Msg("leader lease expired — attempting failover")
+	log.Info().Msg("leader lease expired and primary unreachable — attempting failover")
 	acquired, err := m.acquireOrRenew(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to acquire lease for failover")
@@ -270,6 +328,7 @@ func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	}
 
 	m.labelPod(ctx, rolePrimary)
+	m.primaryUnreachableCount = 0
 	m.walReceiverDownSince = time.Time{} // reset on promotion
 	log.Info().Msg("promotion successful — now primary")
 }
@@ -412,9 +471,11 @@ func (m *Monitor) doRewind(ctx context.Context) {
 	}
 }
 
-// rewindOrReinit uses K8s exec to run pg_rewind against the current primary.
-// If pg_rewind fails (e.g. diverged too far), falls back to a full re-basebackup.
-// In both cases PG is stopped and K8s restarts the container.
+// rewindOrReinit sets up standby.signal and primary_conninfo, then stops PG.
+// The wrapper loop in the main container detects the exit and calls
+// pg_swarm_recover() which handles the actual pg_rewind / re-basebackup
+// before restarting PG. This avoids a race between the exec script and the
+// wrapper both trying to modify PGDATA concurrently.
 func (m *Monitor) rewindOrReinit(ctx context.Context) error {
 	if m.cfg.RestConfig == nil {
 		return fmt.Errorf("rest.Config not set — cannot exec into container")
@@ -425,55 +486,19 @@ func (m *Monitor) rewindOrReinit(ctx context.Context) error {
 
 	pgdata := "/var/lib/postgresql/data/pgdata"
 
-	// Try pg_rewind first — it's fast and preserves most of PGDATA.
-	// Falls back to wiping PGDATA and running pg_basebackup if rewind fails.
-	// NOTE: no `set -e` — we need the fallback to run if pg_rewind fails.
-	// pg_rewind uses the postgres superuser because it needs pg_read_binary_file(),
-	// pg_ls_dir(), and pg_stat_file() which require superuser privileges.
+	// Set standby.signal and primary_conninfo so the wrapper's pg_swarm_recover
+	// can detect timeline divergence and run pg_rewind. Then stop PG so the
+	// wrapper loop wakes up and handles recovery.
 	//
-	// Passwords are read from container env vars (POSTGRES_PASSWORD,
-	// REPLICATION_PASSWORD) set in the StatefulSet manifest, avoiding shell
-	// injection via interpolated values.
-	script := fmt.Sprintf(`
+	// Passwords are read from container env vars (REPLICATION_PASSWORD) set in
+	// the StatefulSet manifest, avoiding shell injection via interpolated values.
+	script := fmt.Sprintf(`set -e
 PGDATA="%s"
-PRIMARY_HOST="%s"
-POD_NAME="%s"
-
-echo "Stopping PostgreSQL for recovery..."
-pg_ctl -D "$PGDATA" stop -m fast -w 2>/dev/null || true
-
-echo "Attempting pg_rewind..."
-if PGPASSWORD="$POSTGRES_PASSWORD" pg_rewind \
-    -D "$PGDATA" \
-    --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$POSTGRES_PASSWORD dbname=postgres" \
-    --progress 2>&1; then
-    echo "pg_rewind succeeded"
-else
-    echo "pg_rewind failed — falling back to full re-basebackup"
-
-    rm -rf "$PGDATA"/*
-
-    PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
-        -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
-
-    if [ $? -ne 0 ]; then
-        echo "FATAL: re-basebackup also failed"
-        exit 1
-    fi
-
-    # Restore config files from mounted configmap
-    cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf" 2>/dev/null || true
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf" 2>/dev/null || true
-fi
-
-# Ensure standby.signal and primary_conninfo are set correctly
 touch "$PGDATA/standby.signal"
 sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
-echo "primary_conninfo = 'host=$PRIMARY_HOST port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=$POD_NAME'" >> "$PGDATA/postgresql.auto.conf"
-
-echo "Recovery complete — PG will restart as standby"
-# Do NOT start PG here — K8s will restart the container
-`, pgdata, primaryHost, m.cfg.PodName)
+echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
+pg_ctl -D "$PGDATA" stop -m fast`,
+		pgdata, primaryHost, m.cfg.PodName)
 
 	req := m.client.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -503,8 +528,7 @@ echo "Recovery complete — PG will restart as standby"
 	log.Info().
 		Str("pod", m.cfg.PodName).
 		Str("primary_host", primaryHost).
-		Str("output", stdout.String()).
-		Msg("rewind/re-basebackup completed — PG will restart as standby")
+		Msg("PG stopped for recovery — wrapper will handle pg_rewind and restart")
 
 	return nil
 }
@@ -590,7 +614,7 @@ func (m *Monitor) acquireOrRenew(ctx context.Context) (bool, error) {
 // if the lease already exists (another pod created it first).
 func (m *Monitor) createLease(ctx context.Context) (bool, error) {
 	now := metav1.NewMicroTime(time.Now())
-	dur := int32(leaseDuration.Seconds())
+	dur := int32(m.leaseDur.Seconds())
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      m.leaseName,

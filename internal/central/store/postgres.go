@@ -238,7 +238,7 @@ func (s *PostgresStore) GetSatelliteByToken(ctx context.Context, tokenHash strin
 
 // ListSatellites returns all satellites ordered by creation time.
 func (s *PostgresStore) ListSatellites(ctx context.Context) ([]*models.Satellite, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+satCols+` FROM satellites ORDER BY created_at DESC`)
+	rows, err := s.pool.Query(ctx, `SELECT `+satCols+` FROM satellites WHERE state != 'replaced' ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list satellites: %w", err)
 	}
@@ -344,7 +344,7 @@ func (s *PostgresStore) ListSatellitesByLabelSelector(ctx context.Context, selec
 		return nil, fmt.Errorf("marshal label selector: %w", err)
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+satCols+` FROM satellites WHERE labels @> $1::jsonb ORDER BY created_at DESC`, selectorJSON)
+		`SELECT `+satCols+` FROM satellites WHERE labels @> $1::jsonb AND state != 'replaced' ORDER BY created_at DESC`, selectorJSON)
 	if err != nil {
 		return nil, fmt.Errorf("list satellites by label selector: %w", err)
 	}
@@ -359,6 +359,34 @@ func (s *PostgresStore) ListSatellitesByLabelSelector(ctx context.Context, selec
 		result = append(result, sat)
 	}
 	return result, rows.Err()
+}
+
+// GetActiveSatelliteByK8sCluster returns the active (approved/connected) satellite
+// for a given K8s cluster name, or nil if none exists.
+func (s *PostgresStore) GetActiveSatelliteByK8sCluster(ctx context.Context, k8sClusterName string) (*models.Satellite, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+satCols+` FROM satellites
+		 WHERE k8s_cluster_name = $1 AND state IN ('approved', 'connected')
+		 LIMIT 1`, k8sClusterName)
+	sat, err := scanSatellite(row)
+	if err != nil {
+		return nil, err
+	}
+	return sat, nil
+}
+
+// ReassignClusterConfigs transfers all cluster configs from one satellite to another,
+// bumping config_version so the new satellite picks them up.
+func (s *PostgresStore) ReassignClusterConfigs(ctx context.Context, oldSatelliteID, newSatelliteID uuid.UUID) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE cluster_configs
+		 SET satellite_id = $1, config_version = config_version + 1, updated_at = NOW()
+		 WHERE satellite_id = $2`,
+		newSatelliteID, oldSatelliteID)
+	if err != nil {
+		return 0, fmt.Errorf("reassign cluster configs: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // ---------- Cluster Configs ----------
@@ -426,25 +454,26 @@ func (s *PostgresStore) ListClusterConfigs(ctx context.Context) ([]*models.Clust
 }
 
 // UpdateClusterConfig updates a cluster configuration and bumps its config version.
+// The bumped config_version is written back to cfg so callers see the new value.
 func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error {
 	if cfg.Config == nil {
 		cfg.Config = json.RawMessage("{}")
 	}
 	cfg.UpdatedAt = time.Now()
 
-	tag, err := s.pool.Exec(ctx,
+	var newVersion int64
+	err := s.pool.QueryRow(ctx,
 		`UPDATE cluster_configs SET name = $1, namespace = $2, satellite_id = $3,
 		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, state = $7, paused = $8, updated_at = $9
-		 WHERE id = $10`,
+		 WHERE id = $10
+		 RETURNING config_version`,
 		cfg.Name, cfg.Namespace, cfg.SatelliteID,
 		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.State, cfg.Paused, cfg.UpdatedAt, cfg.ID,
-	)
+	).Scan(&newVersion)
 	if err != nil {
 		return fmt.Errorf("update cluster config: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("cluster config %s not found", cfg.ID)
-	}
+	cfg.ConfigVersion = newVersion
 	return nil
 }
 
@@ -484,6 +513,26 @@ func (s *PostgresStore) GetClusterConfigsBySatellite(ctx context.Context, satell
 		`SELECT `+cfgCols+` FROM cluster_configs WHERE satellite_id = $1 ORDER BY created_at DESC`, satelliteID)
 	if err != nil {
 		return nil, fmt.Errorf("get cluster configs by satellite: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.ClusterConfig
+	for rows.Next() {
+		cfg, err := scanClusterConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan cluster config row: %w", err)
+		}
+		result = append(result, cfg)
+	}
+	return result, rows.Err()
+}
+
+// GetClusterConfigsByProfile returns all cluster configurations linked to a profile (directly or via deployment rules).
+func (s *PostgresStore) GetClusterConfigsByProfile(ctx context.Context, profileID uuid.UUID) ([]*models.ClusterConfig, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+cfgCols+` FROM cluster_configs WHERE profile_id = $1 ORDER BY created_at DESC`, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("get cluster configs by profile: %w", err)
 	}
 	defer rows.Close()
 

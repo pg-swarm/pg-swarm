@@ -22,6 +22,8 @@ type Store interface {
 	UpdateSatelliteLabels(ctx context.Context, id uuid.UUID, labels map[string]string) error
 	UpdateSatelliteStorageClasses(ctx context.Context, id uuid.UUID, classes []models.StorageClassInfo) error
 	ListSatellitesByLabelSelector(ctx context.Context, selector map[string]string) ([]*models.Satellite, error)
+	GetActiveSatelliteByK8sCluster(ctx context.Context, k8sClusterName string) (*models.Satellite, error)
+	ReassignClusterConfigs(ctx context.Context, oldSatelliteID, newSatelliteID uuid.UUID) (int, error)
 
 	// Cluster Configs
 	CreateClusterConfig(ctx context.Context, cfg *models.ClusterConfig) error
@@ -31,6 +33,7 @@ type Store interface {
 	DeleteClusterConfig(ctx context.Context, id uuid.UUID) error
 	SetClusterPaused(ctx context.Context, id uuid.UUID, paused bool) (*models.ClusterConfig, error)
 	GetClusterConfigsBySatellite(ctx context.Context, satelliteID uuid.UUID) ([]*models.ClusterConfig, error)
+	GetClusterConfigsByProfile(ctx context.Context, profileID uuid.UUID) ([]*models.ClusterConfig, error)
 
 	// Profiles
 	CreateProfile(ctx context.Context, profile *models.ClusterProfile) error

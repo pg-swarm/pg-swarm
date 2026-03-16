@@ -5,6 +5,8 @@ data:
     local all all trust
     host all all 0.0.0.0/0 md5
     host replication repl_user 0.0.0.0/0 md5
+    host replication backup_user 0.0.0.0/0 md5
+    host replication postgres 0.0.0.0/0 md5
     host all app_user 10.0.0.0/8 md5
   postgresql.conf: |
     archive_command = 'test ! -f /wal-archive/%f && cp %p /wal-archive/%f'

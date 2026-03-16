@@ -96,9 +96,9 @@ A single Go binary deployed per edge Kubernetes cluster. Maintains a persistent 
 
 Runs as a container alongside each postgres pod in the StatefulSet. Operates autonomously — no dependency on the satellite or central for automatic failover.
 
-- **`internal/failover/monitor.go`** — Tick loop (5s default):
+- **`internal/failover/monitor.go`** — Tick loop (1s default):
   - **Primary path**: Acquire/renew Kubernetes Coordination Lease, label pod, detect split-brain (fence + demote)
-  - **Replica path**: Label pod, monitor WAL receiver health, detect timeline divergence, trigger `pg_rewind` / re-basebackup for recovery, attempt promotion if leader lease expires
+  - **Replica path**: Label pod, monitor WAL receiver health, check primary reachability (TCP connect to RW service), detect timeline divergence, trigger `pg_rewind` / re-basebackup for recovery, attempt promotion if leader lease expires
 - **`internal/shared/pgfence/`** — SQL fencing (`ALTER SYSTEM SET default_transaction_read_only`, reload, kill client connections) and unfencing. Idempotent and shared between sidecar and switchover handler.
 
 ### Profiles and Deployment Rules
@@ -233,7 +233,8 @@ make k8s-status                # Show all pgswarm-system resources
 | `CLUSTER_NAME` | Config | Derives lease name (`{cluster}-leader`) |
 | `POSTGRES_PASSWORD` | Secret | Connect to local PG |
 | `REPLICATION_PASSWORD` | Secret | Set `primary_conninfo` on demotion/recovery |
-| `HEALTH_CHECK_INTERVAL` | Config | Tick interval in seconds (default: 5) |
+| `HEALTH_CHECK_INTERVAL` | Config | Tick interval in seconds (default: 1) |
+| `PRIMARY_HOST` | Config | RW service DNS for direct primary reachability check |
 
 ---
 

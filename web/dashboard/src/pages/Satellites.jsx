@@ -4,7 +4,7 @@ import { useToast } from '../context/ToastContext';
 import { api, deriveSatState, timeAgo } from '../api';
 import { SatBadge } from '../components/Badge';
 import {
-  Check, X, Tag, Plus, Save, Satellite, Terminal
+  Check, X, Tag, Plus, Save, Satellite, Terminal, AlertTriangle
 } from 'lucide-react';
 
 export default function Satellites() {
@@ -16,13 +16,19 @@ export default function Satellites() {
   const [labelKey, setLabelKey] = useState('');
   const [labelVal, setLabelVal] = useState('');
   const [pendingLabels, setPendingLabels] = useState({});
+  const [replaceConfirm, setReplaceConfirm] = useState(null); // { id, old }
 
-  async function approve(id) {
+  async function approve(id, replace = false) {
     try {
-      await api.approve(id);
-      toast('Satellite approved');
+      await api.approve(id, replace);
+      toast(replace ? 'Satellite approved (replaced previous)' : 'Satellite approved');
+      setReplaceConfirm(null);
       refresh();
     } catch (e) {
+      if (e.status === 409 && e.body?.conflicting_satellite) {
+        setReplaceConfirm({ id, old: e.body.conflicting_satellite });
+        return;
+      }
       toast('Approve failed: ' + e.message, true);
     }
   }
@@ -104,6 +110,10 @@ export default function Satellites() {
           {satellites.map(s => {
             const state = deriveSatState(s);
             const isEditingThis = editingLabels === s.id;
+            const wouldReplace = state === 'pending' && satellites.some(
+              o => o.id !== s.id && o.k8s_cluster_name === s.k8s_cluster_name &&
+                   (o.state === 'approved' || o.state === 'connected' || deriveSatState(o) === 'offline')
+            );
             return (
               <tr key={s.id}>
                 <td className="mono sm">{s.hostname}</td>
@@ -138,6 +148,11 @@ export default function Satellites() {
                   <div className="actions">
                     {state === 'pending' && (
                       <>
+                        {wouldReplace && (
+                          <span className="badge badge-amber" title="Approving will replace the existing satellite on this cluster">
+                            <AlertTriangle size={11} /> replaces existing
+                          </span>
+                        )}
                         <button className="btn btn-approve" onClick={() => approve(s.id)}><Check size={13} /> Approve</button>
                         <button className="btn btn-reject" onClick={() => reject(s.id)}><X size={13} /> Reject</button>
                       </>
@@ -157,6 +172,25 @@ export default function Satellites() {
           })}
         </tbody>
       </table>
+      )}
+
+      {replaceConfirm && (
+        <div className="confirm-overlay" onClick={() => setReplaceConfirm(null)}>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()}>
+            <div className="confirm-header">
+              <h3><AlertTriangle size={18} style={{ color: 'var(--amber)' }} /> Replace Satellite</h3>
+              <button className="modal-close" onClick={() => setReplaceConfirm(null)}><X size={18} /></button>
+            </div>
+            <div className="confirm-body">
+              <p>This will replace the existing satellite <strong>{replaceConfirm.old.hostname}</strong> on cluster <strong>{replaceConfirm.old.k8s_cluster_name}</strong>.</p>
+              <p>All cluster configs will be transferred to the new satellite and the old one will be deactivated.</p>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-sm" onClick={() => setReplaceConfirm(null)}>Cancel</button>
+              <button className="btn-sm btn-danger" onClick={() => approve(replaceConfirm.id, true)}>Replace Satellite</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

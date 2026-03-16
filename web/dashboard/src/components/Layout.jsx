@@ -44,7 +44,7 @@ export default function Layout() {
     <>
       <header className="topbar">
         <div className="brand">
-          <img src="/favicon.svg" alt="pg-swarm" width="26" height="26" />
+          <img src="/favicon.svg" alt="pg-swarm" width="34" height="34" />
           PG-Swarm
         </div>
         <div className="topbar-right">
