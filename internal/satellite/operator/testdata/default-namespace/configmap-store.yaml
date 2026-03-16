@@ -2,30 +2,30 @@ apiVersion: v1
 data:
   config.json: |-
     {
-      "clusterName": "orphan-pg",
-      "namespace": "pg-clusters",
-      "replicas": 3,
-      "postgres": {
-        "version": "17",
-        "image": "postgres:17-alpine"
+      "clusterName":  "orphan-pg",
+      "namespace":  "pg-clusters",
+      "replicas":  3,
+      "postgres":  {
+        "version":  "17",
+        "image":  "postgres:17-alpine"
       },
-      "storage": {
-        "size": "10Gi"
+      "storage":  {
+        "size":  "10Gi"
       },
-      "resources": {
-        "cpuRequest": "250m",
-        "cpuLimit": "1",
-        "memoryRequest": "512Mi",
-        "memoryLimit": "1Gi"
+      "resources":  {
+        "cpuRequest":  "250m",
+        "cpuLimit":  "1",
+        "memoryRequest":  "512Mi",
+        "memoryLimit":  "1Gi"
       },
-      "pgParams": {
-        "shared_buffers": "256MB",
-        "work_mem": "16MB"
+      "pgParams":  {
+        "shared_buffers":  "256MB",
+        "work_mem":  "16MB"
       },
-      "hbaRules": [
+      "hbaRules":  [
         "host all app_user 10.0.0.0/8 md5"
       ],
-      "configVersion": "1"
+      "configVersion":  "1"
     }
 kind: ConfigMap
 metadata:

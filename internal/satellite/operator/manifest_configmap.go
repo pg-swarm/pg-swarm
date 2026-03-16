@@ -32,6 +32,8 @@ var mandatoryHbaRules = []string{
 	"local all all trust",
 	"host all all 0.0.0.0/0 md5",
 	"host replication repl_user 0.0.0.0/0 md5",
+	"host replication backup_user 0.0.0.0/0 md5",
+	"host replication postgres 0.0.0.0/0 md5",
 }
 
 // buildConfigMap creates the ConfigMap containing postgresql.conf and pg_hba.conf.

@@ -59,6 +59,16 @@ func (s *RESTServer) setupRoutes() {
 		Root:       http.FS(web.StaticFS),
 		PathPrefix: "static/assets",
 	}))
+	// Serve favicon from embedded static root
+	s.app.Get("/favicon.svg", func(c *fiber.Ctx) error {
+		data, err := web.StaticFS.ReadFile("static/favicon.svg")
+		if err != nil {
+			return c.SendStatus(fiber.StatusNotFound)
+		}
+		c.Set("Content-Type", "image/svg+xml")
+		return c.Send(data)
+	})
+
 	// SPA catch-all: serve index.html for all non-API routes (BrowserRouter)
 	s.app.Use(func(c *fiber.Ctx) error {
 		path := c.Path()
@@ -163,9 +173,20 @@ func (s *RESTServer) approveSatellite(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
 	}
 
-	replacedID, authToken, err := s.registry.Approve(c.Context(), id)
+	replace := c.Query("replace") == "true"
+
+	replacedID, authToken, err := s.registry.Approve(c.Context(), id, replace)
 	if err != nil {
 		log.Error().Err(err).Str("satellite_id", id.String()).Msg("failed to approve satellite")
+		// Return 409 for cluster conflicts so the UI can show a confirmation dialog
+		if !replace {
+			if conflict, _ := s.registry.ConflictingSatellite(c.Context(), id); conflict != nil {
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"error":                  err.Error(),
+					"conflicting_satellite":  conflict,
+				})
+			}
+		}
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 

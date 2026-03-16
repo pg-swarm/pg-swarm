@@ -7,7 +7,10 @@ async function request(path, opts = {}) {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || res.statusText);
+    const err = new Error(body.error || res.statusText);
+    err.status = res.status;
+    err.body = body;
+    throw err;
   }
   return res.json();
 }
@@ -17,7 +20,7 @@ export const api = {
   clusters:    ()       => request('/clusters'),
   health:      ()       => request('/health'),
   events:      (n)      => request('/events?limit=' + (n || 50)),
-  approve:     (id)     => request('/satellites/' + id + '/approve', { method: 'POST' }),
+  approve:     (id, replace) => request('/satellites/' + id + '/approve' + (replace ? '?replace=true' : ''), { method: 'POST' }),
   reject:      (id)     => request('/satellites/' + id + '/reject',  { method: 'POST' }),
   profiles:    ()       => request('/profiles'),
   createProfile: (data) => request('/profiles', { method: 'POST', body: JSON.stringify(data) }),
@@ -74,6 +77,7 @@ const HEARTBEAT_TIMEOUT_S = 60;
 
 export function deriveSatState(sat) {
   if (sat.state === 'pending') return 'pending';
+  if (sat.state === 'replaced') return 'replaced';
   if (!sat.last_heartbeat) return 'offline';
   const age = (Date.now() - new Date(sat.last_heartbeat).getTime()) / 1000;
   return age > HEARTBEAT_TIMEOUT_S ? 'offline' : sat.state;
