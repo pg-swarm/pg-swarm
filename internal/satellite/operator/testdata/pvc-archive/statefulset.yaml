@@ -214,8 +214,6 @@ spec:
         - mountPath: /etc/pg-config
           name: config
           readOnly: true
-        - mountPath: /wal-archive
-          name: wal-archive
       initContainers:
       - command:
         - bash
@@ -334,9 +332,6 @@ spec:
               # Copy config
               cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
               cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
-              # Ensure wal-archive directory is ready
-              mkdir -p /wal-archive
-              chown postgres:postgres /wal-archive
           else
               echo "Initializing replica (ordinal $ORDINAL)"
               # PRIMARY_HOST is set at the top of the script (RW service follows pg-swarm.io/role=primary).
@@ -348,8 +343,6 @@ spec:
                   -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
               cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
               cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
-              # Inject restore_command for archive recovery
-              echo "restore_command = 'cp /wal-archive/%f %p'" >> "$PGDATA/postgresql.auto.conf"
           fi
         env:
         - name: POD_NAME
@@ -381,8 +374,6 @@ spec:
           name: data
         - mountPath: /etc/pg-config
           name: config
-        - mountPath: /wal-archive
-          name: wal-archive
       securityContext:
         fsGroup: 70
         runAsGroup: 70
@@ -408,20 +399,6 @@ spec:
       resources:
         requests:
           storage: 10Gi
-    status: {}
-  - metadata:
-      labels:
-        app.kubernetes.io/managed-by: pg-swarm
-        app.kubernetes.io/name: postgresql
-        pg-swarm.io/cluster: my-pg-wal
-      name: wal-archive
-    spec:
-      accessModes:
-      - ReadWriteOnce
-      resources:
-        requests:
-          storage: 50Gi
-      storageClassName: fast-ssd
     status: {}
 status:
   availableReplicas: 0

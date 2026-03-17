@@ -8,6 +8,9 @@ Local development and single-host deployment using Docker and Docker Compose.
 |------|-------------|
 | `Dockerfile.central` | Multi-stage build for the central control plane |
 | `Dockerfile.satellite` | Multi-stage build for the satellite agent |
+| `Dockerfile.failover-sidecar` | Multi-stage build for the failover sidecar |
+| `Dockerfile.backup-sidecar` | Multi-stage build for the backup sidecar (Go binary + PG client tools + cloud CLIs) |
+| `Dockerfile.backup` | Legacy backup CronJob image (deprecated — replaced by backup-sidecar) |
 | `docker-compose.yml` | Full stack: PostgreSQL + central + satellite |
 
 ## Dockerfiles

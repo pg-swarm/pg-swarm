@@ -5,7 +5,7 @@ INSERT INTO cluster_profiles (id, name, description, config) VALUES (
     'dev',
     'Lightweight single-replica PostgreSQL 17 Alpine for development and testing',
     '{
-        "replicas": 1,
+        "replicas": 3,
         "postgres": {
             "version": "17",
             "variant": "alpine"

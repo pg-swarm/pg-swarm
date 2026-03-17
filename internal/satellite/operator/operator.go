@@ -23,6 +23,7 @@ type Operator struct {
 	k8sClusterName       string // used in config-storage ConfigMap naming
 	defaultNamespace     string // fallback when ClusterConfig.Namespace is empty
 	defaultFailoverImage string // fallback failover sidecar image
+	satelliteID          string // satellite identity for backup sidecar
 	mu                   sync.RWMutex
 	desired              map[string]*pgswarmv1.ClusterConfig // key: "ns/cluster"
 	applied              map[string]int64                    // key -> last applied config version
@@ -31,18 +32,24 @@ type Operator struct {
 // New creates a new Operator backed by the given Kubernetes client.
 // k8sClusterName is used for config-storage ConfigMap naming (pg-swarm-<k8s>-<pg>).
 // defaultNamespace is used when a ClusterConfig has no namespace set.
-func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string) *Operator {
+// satelliteID is passed to the backup sidecar for destination folder naming.
+func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string, satelliteID ...string) *Operator {
 	if defaultNamespace == "" {
 		defaultNamespace = "default"
 	}
 	if defaultFailoverImage == "" {
 		defaultFailoverImage = "ghcr.io/pg-swarm/pg-swarm-failover:latest"
 	}
+	satID := ""
+	if len(satelliteID) > 0 {
+		satID = satelliteID[0]
+	}
 	return &Operator{
 		client:               client,
 		k8sClusterName:       k8sClusterName,
 		defaultNamespace:     defaultNamespace,
 		defaultFailoverImage: defaultFailoverImage,
+		satelliteID:          satID,
 		desired:              make(map[string]*pgswarmv1.ClusterConfig),
 		applied:              make(map[string]int64),
 	}
@@ -185,9 +192,9 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 		log.Warn().Err(err).Str("resource", "configmap/"+cfgStoreName).Msg("delete failed")
 	}
 
-	// Delete backup CronJobs and credential Secret
+	// Delete backup resources (credential secrets, RBAC, status ConfigMap)
 	log.Trace().Msg("HandleDelete cleaning up backup resources")
-	cleanupBackupCronJobs(ctx, o.client, ns, name)
+	cleanupBackupResources(ctx, o.client, ns, name)
 
 	// Remove finalizers from PVCs and delete them
 	removeFinalizedPVCs(ctx, o.client, ns, name)
@@ -201,17 +208,11 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 	return nil
 }
 
-// TriggerPendingBackups triggers immediate base backup Jobs for any backup
-// CronJobs that haven't run yet. Called by the health monitor when a cluster
-// first transitions to RUNNING.
+// TriggerPendingBackups is a no-op in the sidecar architecture.
+// The backup sidecar automatically triggers an initial base backup on startup.
+// Retained for interface compatibility with the health monitor.
 func (o *Operator) TriggerPendingBackups(ctx context.Context, ns, clusterName string) {
-	o.mu.RLock()
-	cfg := o.desired[clusterKey(ns, clusterName)]
-	o.mu.RUnlock()
-	if cfg == nil || !backupEnabled(cfg) {
-		return
-	}
-	triggerPendingBaseBackups(ctx, o.client, cfg)
+	// No-op: sidecar handles initial backup automatically
 }
 
 // ManagedCluster is a snapshot of a cluster managed by this operator.
@@ -350,9 +351,9 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		}
 	}
 
-	// 7. StatefulSet
+	// 7. StatefulSet (pass satelliteID for backup sidecar)
 	log.Trace().Msg("reconcile: ensuring statefulset")
-	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage)
+	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage, o.satelliteID)
 	if err := createOrUpdateStatefulSet(ctx, o.client, sts); err != nil {
 		return fmt.Errorf("statefulset: %w", err)
 	}
@@ -369,9 +370,12 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to label pods (will retry on next reconcile)")
 	}
 
-	// 10. Backup CronJobs
+	// 10. Backup sidecar RBAC and credential secrets
 	if backupEnabled(cfg) {
-		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup credential secrets")
+		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
+		if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
+			return fmt.Errorf("backup RBAC: %w", err)
+		}
 		for _, backup := range cfg.Backups {
 			backupSecret := buildBackupCredentialSecret(cfg, backup)
 			if backupSecret != nil {
@@ -380,15 +384,10 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 				}
 			}
 		}
-
-		log.Trace().Msg("reconcile: reconciling backup cronjobs")
-		if err := reconcileBackupCronJobs(ctx, o.client, cfg); err != nil {
-			return fmt.Errorf("backup cronjobs: %w", err)
-		}
 	} else {
 		// Cleanup backup resources if backup was detached
-		log.Trace().Msg("reconcile: cleaning up backup cronjobs (backup disabled)")
-		cleanupBackupCronJobs(ctx, o.client, cfg.Namespace, cfg.ClusterName)
+		log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")
+		cleanupBackupResources(ctx, o.client, cfg.Namespace, cfg.ClusterName)
 	}
 
 	return nil

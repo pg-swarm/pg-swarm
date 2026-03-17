@@ -47,36 +47,28 @@ export default function ClusterDetail() {
 
   const refresh = useCallback(async () => {
     try {
-      const [c, s, h, e, dr] = await Promise.all([
+      const [c, s, h, e, dr, b, r] = await Promise.all([
         api.clusters(), api.satellites(), api.health(), api.events(50), api.deploymentRules(),
+        id ? api.clusterBackups(id).catch(() => []) : Promise.resolve([]),
+        id ? api.clusterRestores(id).catch(() => []) : Promise.resolve([]),
       ]);
       setClusters(c || []);
       setSatellites(s || []);
       setHealth(h || []);
       setEvents(e || []);
       setDeploymentRules(dr || []);
+      setBackups(b || []);
+      setRestores(r || []);
     } catch (err) {
       console.error('ClusterDetail refresh failed:', err);
     }
-  }, []);
+  }, [id]);
 
   useEffect(() => {
     refresh();
     const timer = setInterval(refresh, 10000);
     return () => clearInterval(timer);
   }, [refresh]);
-
-  // Load backups + restores once we have the cluster id
-  useEffect(() => {
-    if (!id) return;
-    Promise.all([
-      api.clusterBackups(id).catch(() => []),
-      api.clusterRestores(id).catch(() => []),
-    ]).then(([b, r]) => {
-      setBackups(b || []);
-      setRestores(r || []);
-    });
-  }, [id]);
 
   // Set document title when cluster data loads
   useEffect(() => {
@@ -162,7 +154,8 @@ export default function ClusterDetail() {
   const tags = [];
   if (cluster.paused) tags.push('paused');
   if (s.failover?.enabled) tags.push('failover');
-  if (s.archive?.mode) tags.push('archive:' + s.archive.mode);
+  if (s.backups?.length) tags.push('backup sidecar');
+  else if (s.archive?.mode) tags.push('archive:' + s.archive.mode);
   if (s.databases?.length) tags.push(s.databases.length + ' db' + (s.databases.length > 1 ? 's' : ''));
 
   return (
@@ -398,8 +391,8 @@ export default function ClusterDetail() {
                             return (
                               <tr key={b.id}>
                                 <td>
-                                  <span className={'cd-type-badge cd-type-' + b.type}>
-                                    {b.type}
+                                  <span className={'cd-type-badge cd-type-' + b.backup_type}>
+                                    {b.backup_type}
                                   </span>
                                 </td>
                                 <td>
