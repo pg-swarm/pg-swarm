@@ -15,7 +15,7 @@ import (
 // shared emptyDir volumes to fetch WAL segments from the backup sidecar.
 // It checks for a pre-fetched file, then signals the sidecar via a .request file
 // and polls for up to 30s. Works with any postgres image (no curl/wget needed).
-const walRestoreCommand = `test -f /wal-restore/%f && cp /wal-restore/%f %p && exit 0; echo %f > /wal-restore/.request; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do sleep 1; test -f /wal-restore/%f && cp /wal-restore/%f %p && rm -f /wal-restore/%f && exit 0; test -f /wal-restore/.error && rm -f /wal-restore/.error && exit 1; done; exit 1`
+const walRestoreCommand = `test -f /wal-restore/%f && cp /wal-restore/%f %p && rm -f /wal-restore/%f && exit 0; echo %f > /wal-restore/.request; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do sleep 1; test -f /wal-restore/%f && cp /wal-restore/%f %p && rm -f /wal-restore/%f && exit 0; test -f /wal-restore/.error && rm -f /wal-restore/.error && exit 1; done; exit 1`
 
 // mandatoryPgParams are HA-required PostgreSQL parameters that are always set.
 // User pg_params can override these.
@@ -66,22 +66,14 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 	}
 
 	// Archive settings (before user params so user can override)
-	if archive != nil && archive.Mode != "" {
+	if archive != nil && archive.Mode == "custom" {
 		merged["archive_mode"] = "on"
 		timeout := archive.ArchiveTimeoutSeconds
 		if timeout <= 0 {
 			timeout = 60
 		}
 		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
-
-		switch archive.Mode {
-		case "custom":
-			merged["archive_command"] = fmt.Sprintf("'%s'", archive.ArchiveCommand)
-		default:
-			// Sidecar handles WAL archiving via shared emptyDir volumes
-			merged["archive_command"] = "'cp %p /wal-staging/%f'"
-			merged["restore_command"] = "'" + walRestoreCommand + "'"
-		}
+		merged["archive_command"] = fmt.Sprintf("'%s'", archive.ArchiveCommand)
 	} else if len(backups) > 0 {
 		// Backup profiles configured — sidecar handles WAL archiving via shared emptyDir volumes
 		merged["archive_mode"] = "on"
@@ -93,7 +85,7 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 			}
 		}
 		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
-		merged["archive_command"] = "'cp %p /wal-staging/%f'"
+		merged["archive_command"] = "'cp %p /wal-staging/.tmp.%f && mv /wal-staging/.tmp.%f /wal-staging/%f'"
 		merged["restore_command"] = "'" + walRestoreCommand + "'"
 	} else {
 		merged["archive_mode"] = "off"

@@ -154,10 +154,6 @@ func ValidateArchiveSpec(a *ArchiveSpec) error {
 		return nil
 	}
 	switch a.Mode {
-	case "pvc":
-		if a.ArchiveStorage == nil || a.ArchiveStorage.Size == "" {
-			return fmt.Errorf("archive mode \"pvc\" requires archive_storage.size")
-		}
 	case "custom":
 		if a.ArchiveCommand == "" {
 			return fmt.Errorf("archive mode \"custom\" requires archive_command")
@@ -165,7 +161,7 @@ func ValidateArchiveSpec(a *ArchiveSpec) error {
 	case "":
 		return nil // disabled
 	default:
-		return fmt.Errorf("unknown archive mode %q (must be \"pvc\" or \"custom\")", a.Mode)
+		return fmt.Errorf("unknown archive mode %q (must be \"custom\")", a.Mode)
 	}
 	if a.ArchiveTimeoutSeconds < 0 {
 		return fmt.Errorf("archive_timeout_seconds must be >= 0")

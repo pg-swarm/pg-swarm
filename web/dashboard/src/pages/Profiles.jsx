@@ -699,21 +699,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
                 </div>
               )}
             </div>
-            {spec.archive?.mode === 'pvc' && (
-              <div className="volume-section">
-                <h5>WAL Archive Volume</h5>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>Size</label>
-                    <input className="input" value={spec.archive?.archive_storage?.size || ''} onChange={e => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), size: e.target.value } } }))} />
-                  </div>
-                  <div className="form-row">
-                    <label>Storage Tier</label>
-                    <StorageClassSelect value={spec.archive?.archive_storage?.storage_class || ''} storageTiers={storageTiers} onChange={v => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), storage_class: v } } }))} />
-                  </div>
-                </div>
-              </div>
-            )}
           </section>
         )}
 
@@ -1030,9 +1015,6 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOn
               <ReportRow label="Data" value={`${spec.storage.size}${spec.storage.storage_class ? ` (${spec.storage.storage_class})` : ''}`} />
               {spec.wal_storage && (
                 <ReportRow label="WAL" value={`${spec.wal_storage.size}${spec.wal_storage.storage_class ? ` (${spec.wal_storage.storage_class})` : ''}`} />
-              )}
-              {spec.archive?.mode === 'pvc' && spec.archive?.archive_storage?.size && (
-                <ReportRow label="WAL Archive" value={`${spec.archive.archive_storage.size}${spec.archive.archive_storage.storage_class ? ` (${spec.archive.archive_storage.storage_class})` : ''}`} />
               )}
             </div>
           </div>

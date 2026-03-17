@@ -1346,11 +1346,11 @@ func (x *DatabaseSpec) GetPassword() string {
 
 type ArchiveSpec struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
-	Mode                  string                 `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`                                                                   // "pvc" or "custom"; empty = disabled
+	Mode                  string                 `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`                                                                   // "custom"; empty = disabled. WAL archiving via backup sidecar is configured through BackupConfig.
 	ArchiveCommand        string                 `protobuf:"bytes,2,opt,name=archive_command,json=archiveCommand,proto3" json:"archive_command,omitempty"`                         // required for "custom"
 	RestoreCommand        string                 `protobuf:"bytes,3,opt,name=restore_command,json=restoreCommand,proto3" json:"restore_command,omitempty"`                         // optional for "custom"
 	ArchiveTimeoutSeconds int32                  `protobuf:"varint,4,opt,name=archive_timeout_seconds,json=archiveTimeoutSeconds,proto3" json:"archive_timeout_seconds,omitempty"` // default 60
-	ArchiveStorage        *ArchiveStorageSpec    `protobuf:"bytes,5,opt,name=archive_storage,json=archiveStorage,proto3" json:"archive_storage,omitempty"`                         // for "pvc" mode
+	ArchiveStorage        *ArchiveStorageSpec    `protobuf:"bytes,5,opt,name=archive_storage,json=archiveStorage,proto3" json:"archive_storage,omitempty"`                         // deprecated — PVC archive mode removed
 	CredentialsSecret     *SecretRef             `protobuf:"bytes,6,opt,name=credentials_secret,json=credentialsSecret,proto3" json:"credentials_secret,omitempty"`                // for "custom" mode
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
@@ -1428,6 +1428,8 @@ func (x *ArchiveSpec) GetCredentialsSecret() *SecretRef {
 	return nil
 }
 
+// Deprecated: PVC archive mode has been removed. This message is retained
+// for proto wire compatibility but is no longer used.
 type ArchiveStorageSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Size          string                 `protobuf:"bytes,1,opt,name=size,proto3" json:"size,omitempty"`
