@@ -252,8 +252,8 @@ func buildBaseBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.Back
 	ruleShort := ruleShortID(backup.BackupProfileId)
 	secretName := resourceName(cfg.ClusterName, "secret")
 	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
-	labels["pg-swarm/backup-type"] = "base"
-	labels["pg-swarm/backup-profile"] = ruleShort
+	labels[LabelBackupType] = "base"
+	labels[LabelBackupProfile] = ruleShort
 
 	env := backupEnvVars(cfg, backup, secretName)
 	script := baseBackupScript(backup.Destination)
@@ -306,8 +306,8 @@ func buildLogicalBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.B
 	ruleShort := ruleShortID(backup.BackupProfileId)
 	secretName := resourceName(cfg.ClusterName, "secret")
 	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
-	labels["pg-swarm/backup-type"] = "logical"
-	labels["pg-swarm/backup-profile"] = ruleShort
+	labels[LabelBackupType] = "logical"
+	labels[LabelBackupProfile] = ruleShort
 
 	env := backupEnvVars(cfg, backup, secretName)
 	script := logicalBackupScript(backup)
@@ -722,8 +722,8 @@ func buildIncrementalBackupCronJob(cfg *pgswarmv1.ClusterConfig, backup *pgswarm
 	ruleShort := ruleShortID(backup.BackupProfileId)
 	secretName := resourceName(cfg.ClusterName, "secret")
 	labels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
-	labels["pg-swarm/backup-type"] = "incremental"
-	labels["pg-swarm/backup-profile"] = ruleShort
+	labels[LabelBackupType] = "incremental"
+	labels[LabelBackupProfile] = ruleShort
 
 	env := backupEnvVars(cfg, backup, secretName)
 	script := incrementalBackupScript(backup.Destination)
@@ -894,7 +894,7 @@ func cleanupBackupCronJobs(ctx context.Context, client kubernetes.Interface, ns,
 	cjList, err := client.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err == nil {
 		for _, cj := range cjList.Items {
-			if _, ok := cj.Labels["pg-swarm/backup-type"]; ok {
+			if _, ok := cj.Labels[LabelBackupType]; ok {
 				_ = client.BatchV1().CronJobs(ns).Delete(ctx, cj.Name, metav1.DeleteOptions{})
 				// Also delete the initial Job if it exists
 				_ = client.BatchV1().Jobs(ns).Delete(ctx, cj.Name+"-initial", metav1.DeleteOptions{PropagationPolicy: &propagation})
@@ -965,7 +965,7 @@ func createOrUpdateCronJob(ctx context.Context, client kubernetes.Interface, des
 		// Trigger an immediate run for non-backup CronJobs.
 		// Backup CronJobs are handled by the caller (reconcileBackupCronJobs)
 		// which checks StatefulSet readiness first.
-		if _, isBackup := desired.Labels["pg-swarm/backup-type"]; !isBackup {
+		if _, isBackup := desired.Labels[LabelBackupType]; !isBackup {
 			triggerImmediateJob(ctx, client, desired)
 		}
 		return true, nil

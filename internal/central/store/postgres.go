@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
+	"github.com/rs/zerolog/log"
 )
 
 // PostgresStore implements the Store interface using a PostgreSQL connection pool.
@@ -570,11 +571,11 @@ func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.Clu
 	var newVersion int64
 	err := s.pool.QueryRow(ctx,
 		`UPDATE cluster_configs SET name = $1, namespace = $2, satellite_id = $3,
-		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, state = $7, paused = $8, updated_at = $9
-		 WHERE id = $10
+		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, paused = $7, updated_at = $8
+		 WHERE id = $9
 		 RETURNING config_version`,
 		cfg.Name, cfg.Namespace, cfg.SatelliteID,
-		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.State, cfg.Paused, cfg.UpdatedAt, cfg.ID,
+		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.Paused, cfg.UpdatedAt, cfg.ID,
 	).Scan(&newVersion)
 	if err != nil {
 		return fmt.Errorf("update cluster config: %w", err)
@@ -730,6 +731,14 @@ func (s *PostgresStore) UpdateProfile(ctx context.Context, p *models.ClusterProf
 		return fmt.Errorf("profile %s not found or is locked", p.ID)
 	}
 	return nil
+}
+
+// TouchProfile bumps the updated_at timestamp on a cluster profile without
+// changing any other fields. Used when an attached backup profile changes.
+func (s *PostgresStore) TouchProfile(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE cluster_profiles SET updated_at = NOW() WHERE id = $1`, id)
+	return err
 }
 
 // DeleteProfile removes a cluster profile if it is not locked.
@@ -1072,13 +1081,16 @@ func (s *PostgresStore) DeletePostgresVariant(ctx context.Context, id uuid.UUID)
 // UpdateClusterConfigState sets the cluster config state based on health reports.
 // It only updates if the current state is not paused or deleting (user-controlled states).
 func (s *PostgresStore) UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error {
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE cluster_configs SET state = $1, updated_at = NOW()
 		 WHERE satellite_id = $2 AND name = $3 AND state NOT IN ('paused', 'deleting')`,
 		state, satelliteID, clusterName,
 	)
 	if err != nil {
 		return fmt.Errorf("update cluster config state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		log.Warn().Str("satellite_id", satelliteID.String()).Str("cluster", clusterName).Str("state", string(state)).Msg("state update matched no rows")
 	}
 	return nil
 }

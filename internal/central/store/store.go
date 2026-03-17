@@ -50,6 +50,7 @@ type Store interface {
 	UpdateProfile(ctx context.Context, profile *models.ClusterProfile) error
 	DeleteProfile(ctx context.Context, id uuid.UUID) error
 	LockProfile(ctx context.Context, id uuid.UUID) error
+	TouchProfile(ctx context.Context, id uuid.UUID) error
 
 	// Deployment Rules
 	CreateDeploymentRule(ctx context.Context, rule *models.DeploymentRule) error

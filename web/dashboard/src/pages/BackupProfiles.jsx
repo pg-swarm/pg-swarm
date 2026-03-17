@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
-import { Info } from 'lucide-react';
+import { Info, X } from 'lucide-react';
 
 const TABS = [
   { id: 'general', label: 'General' },
@@ -174,6 +174,7 @@ export default function BackupProfiles() {
       refresh();
     } catch (e) {
       toast('Save failed: ' + e.message, true);
+      throw e;
     }
   }
 
@@ -185,10 +186,6 @@ export default function BackupProfiles() {
     } catch (e) {
       toast('Delete failed: ' + e.message, true);
     }
-  }
-
-  if (editing) {
-    return <BackupProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} />;
   }
 
   return (
@@ -241,6 +238,10 @@ export default function BackupProfiles() {
           );
         })}
       </div>
+
+      {editing && (
+        <BackupProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} />
+      )}
     </>
   );
 }
@@ -283,39 +284,45 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
     setSpec(s => ({ ...s, destination: dest }));
   }
 
+  const [saving, setSaving] = useState(false);
+
   function handleSave() {
     setShowConfirm(true);
   }
 
-  function confirmSave() {
-    setShowConfirm(false);
-    onSave();
+  async function confirmSave() {
+    setSaving(true);
+    try {
+      await onSave();
+      setShowConfirm(false);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
-    <div className="profile-form">
-      <div className="card-head-bar">
-        <span className="card-head-title">{state.isNew ? 'Create Backup Rule' : 'Edit Backup Rule'}</span>
-        <div className="actions">
-          <button className="btn btn-approve" onClick={handleSave}>Save</button>
-          <button className="btn btn-reject" onClick={onCancel}>Cancel</button>
+    <div className="confirm-overlay" onClick={onCancel}>
+      <div className="confirm-modal backup-profile-modal" onClick={e => e.stopPropagation()}>
+        <div className="confirm-header">
+          <h3>{state.isNew ? 'Create Backup Rule' : 'Edit Backup Rule'}</h3>
+          <button className="modal-close" onClick={onCancel}><X size={18} /></button>
         </div>
-      </div>
 
-      <div className="tab-bar">
-        {TABS.map(tab => (
-          <button
-            key={tab.id}
-            className={'tab-item' + (activeTab === tab.id ? ' active' : '')}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+        <div className="confirm-body">
+          <div className="tab-bar">
+            {TABS.map(tab => (
+              <button
+                key={tab.id}
+                className={'tab-item' + (activeTab === tab.id ? ' active' : '')}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
 
-      <div className="tab-content">
-        {activeTab === 'general' && (
+          <div className="tab-content">
+            {activeTab === 'general' && (
           <section className="form-section">
             <h4>Backup Rule</h4>
             <div className="form-grid">
@@ -600,20 +607,32 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
             </div>
           </section>
         )}
-      </div>
-
-      {showConfirm && (
-        <div className="confirm-overlay" onClick={() => setShowConfirm(false)}>
-          <div className="confirm-dialog" onClick={e => e.stopPropagation()}>
-            <h3>{state.isNew ? 'Create' : 'Update'} Backup Rule</h3>
-            <p>This will {state.isNew ? 'create' : 'update'} the backup rule <strong>{state.name}</strong>. If attached to profiles, all linked clusters will be re-pushed with the new backup configuration.</p>
-            <div className="confirm-actions">
-              <button className="btn btn-approve" onClick={confirmSave}>Confirm</button>
-              <button className="btn btn-reject" onClick={() => setShowConfirm(false)}>Cancel</button>
-            </div>
           </div>
         </div>
-      )}
+
+        <div className="confirm-footer">
+          <button className="btn" onClick={onCancel}>Cancel</button>
+          <button className="btn btn-approve" onClick={handleSave}>Save</button>
+        </div>
+
+        {showConfirm && (
+          <div className="confirm-overlay" onClick={() => setShowConfirm(false)}>
+            <div className="confirm-modal" onClick={e => e.stopPropagation()}>
+              <div className="confirm-header">
+                <h3>{state.isNew ? 'Create' : 'Update'} Backup Rule</h3>
+                <button className="modal-close" onClick={() => setShowConfirm(false)}><X size={18} /></button>
+              </div>
+              <div className="confirm-body">
+                <p>This will {state.isNew ? 'create' : 'update'} the backup rule <strong>{state.name}</strong>. If attached to profiles, all linked clusters will be re-pushed with the new backup configuration.</p>
+              </div>
+              <div className="confirm-footer">
+                <button className="btn" onClick={() => setShowConfirm(false)} disabled={saving}>Cancel</button>
+                <button className="btn btn-approve" onClick={confirmSave} disabled={saving}>{saving ? 'Saving…' : 'Confirm'}</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

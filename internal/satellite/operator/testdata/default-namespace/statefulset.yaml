@@ -27,6 +27,7 @@ spec:
         - |
           #!/bin/bash
           PRIMARY_HOST="orphan-pg-rw.pg-clusters.svc.cluster.local"
+          ORDINAL=${POD_NAME##*-}
 
           # --- Timeline recovery function ---
           pg_swarm_recover() {
@@ -74,12 +75,23 @@ spec:
                   --progress 2>&1; then
                   echo "pg-swarm: pg_rewind succeeded"
               else
-                  echo "pg-swarm: pg_rewind failed — full re-basebackup"
-                  rm -rf "$PGDATA"/*
-                  PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
-                      -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
-                  cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-                  cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                  echo "pg-swarm: pg_rewind failed — checking if primary is available for re-basebackup"
+                  if ! pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then
+                      echo "pg-swarm: primary not reachable — skipping destructive recovery to preserve data"
+                      return
+                  fi
+                  MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+                  touch "$MARKER"
+                  find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+                  if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                      -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+                      rm -f "$MARKER"
+                      cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                      cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                  else
+                      echo "pg-swarm: pg_basebackup failed — will retry on next loop iteration"
+                      return
+                  fi
               fi
 
               touch "$PGDATA/standby.signal"
@@ -97,6 +109,38 @@ spec:
           while true; do
               # Check and fix timeline divergence before starting PG
               pg_swarm_recover
+
+              # Guard: if PGDATA has files but no PG_VERSION, it is corrupt (e.g. a
+              # previous pg_basebackup failed partway through). Clean up and either
+              # re-basebackup (replicas) or let docker-entrypoint.sh initdb (primary).
+              if [ -d "$PGDATA" ] && [ -n "$(ls -A "$PGDATA" 2>/dev/null)" ] && [ ! -s "$PGDATA/PG_VERSION" ]; then
+                  echo "pg-swarm: corrupt PGDATA (no PG_VERSION) — cleaning up"
+                  find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+                  if [ "$ORDINAL" != "0" ]; then
+                      # Replica: wait for primary and re-basebackup
+                      echo "pg-swarm: waiting for primary to re-basebackup..."
+                      BASEBACKUP_OK=false
+                      for i in $(seq 1 60); do
+                          if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
+                              if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                                  -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+                                  cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                                  cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                                  BASEBACKUP_OK=true
+                                  break
+                              fi
+                          fi
+                          sleep 5
+                      done
+                      if [ "$BASEBACKUP_OK" = "false" ]; then
+                          echo "pg-swarm: re-basebackup failed — retrying next iteration"
+                          sleep 5
+                          continue
+                      fi
+                  fi
+                  # For ordinal 0 (primary), fall through to docker-entrypoint.sh which
+                  # will run initdb on the now-empty directory.
+              fi
 
               # Start PG in the background so we can catch its exit
               docker-entrypoint.sh postgres &

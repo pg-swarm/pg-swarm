@@ -9,6 +9,9 @@ const (
 	LabelRole      = "pg-swarm.io/role"
 	LabelProfile   = "pg-swarm.io/profile"
 
+	LabelBackupType    = "pg-swarm/backup-type"
+	LabelBackupProfile = "pg-swarm/backup-profile"
+
 	ManagedByValue = "pg-swarm"
 	AppNameValue   = "postgresql"
 
