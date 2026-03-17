@@ -120,20 +120,6 @@ func baseCfg() *pgswarmv1.ClusterConfig {
 	}
 }
 
-func pvcArchiveCfg() *pgswarmv1.ClusterConfig {
-	cfg := baseCfg()
-	cfg.ClusterName = "my-pg-wal"
-	cfg.Archive = &pgswarmv1.ArchiveSpec{
-		Mode:                  "pvc",
-		ArchiveTimeoutSeconds: 120,
-		ArchiveStorage: &pgswarmv1.ArchiveStorageSpec{
-			Size:         "50Gi",
-			StorageClass: "fast-ssd",
-		},
-	}
-	return cfg
-}
-
 func customArchiveCfg() *pgswarmv1.ClusterConfig {
 	cfg := baseCfg()
 	cfg.ClusterName = "my-pg-s3"
@@ -197,50 +183,6 @@ func TestManifests_NoArchive(t *testing.T) {
 	hl := buildHeadlessService(cfg)
 	if hl.Spec.ClusterIP != corev1.ClusterIPNone {
 		t.Errorf("headless service should have ClusterIP=None, got %q", hl.Spec.ClusterIP)
-	}
-}
-
-func TestManifests_PVCArchive(t *testing.T) {
-	cfg := pvcArchiveCfg()
-	writeAll(t, "pvc-archive", cfg)
-
-	// ConfigMap: archive_mode = on, sidecar-based archive_command, timeout
-	cm := buildConfigMap(cfg)
-	pgConf := cm.Data["postgresql.conf"]
-	if !strings.Contains(pgConf, "archive_mode = on") {
-		t.Error("expected archive_mode = on")
-	}
-	// PVC archive mode uses file-based WAL staging via shared emptyDir
-	if !strings.Contains(pgConf, "cp %p /wal-staging/%f") {
-		t.Error("expected file-based archive_command in postgresql.conf")
-	}
-	if !strings.Contains(pgConf, "/wal-restore/.request") {
-		t.Error("expected file-based restore_command in postgresql.conf")
-	}
-	if !strings.Contains(pgConf, "archive_timeout = 120") {
-		t.Error("expected archive_timeout = 120")
-	}
-
-	// StatefulSet: only 1 VCT (data) — wal-archive VCT removed in sidecar architecture
-	secret := buildSecret(cfg)
-	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
-	if n := len(sts.Spec.VolumeClaimTemplates); n != 1 {
-		t.Fatalf("expected 1 VCT (data only, wal-archive removed), got %d", n)
-	}
-
-	// No wal-archive mounts on containers (sidecar handles WAL)
-	init := sts.Spec.Template.Spec.InitContainers[0]
-	if hasVolumeMount(init, "wal-archive") {
-		t.Error("init container should not have wal-archive mount (sidecar handles WAL)")
-	}
-	main := sts.Spec.Template.Spec.Containers[0]
-	if hasVolumeMount(main, "wal-archive") {
-		t.Error("main container should not have wal-archive mount (sidecar handles WAL)")
-	}
-
-	// No EnvFrom credentials (PVC mode doesn't need them)
-	if hasEnvFrom(main, "aws-credentials") {
-		t.Error("PVC mode should not have credential EnvFrom")
 	}
 }
 
@@ -465,10 +407,8 @@ func TestManifests_ArchiveDefaultTimeout(t *testing.T) {
 	cfg := baseCfg()
 	cfg.ClusterName = "pg-timeout"
 	cfg.Archive = &pgswarmv1.ArchiveSpec{
-		Mode: "pvc",
-		ArchiveStorage: &pgswarmv1.ArchiveStorageSpec{
-			Size: "5Gi",
-		},
+		Mode:           "custom",
+		ArchiveCommand: "test-archive %p %f",
 		// ArchiveTimeoutSeconds intentionally 0
 	}
 
@@ -932,8 +872,8 @@ func TestManifests_BackupArchiveCommand(t *testing.T) {
 	if !strings.Contains(pgConf, "archive_mode = on") {
 		t.Error("expected archive_mode = on when backups configured")
 	}
-	if !strings.Contains(pgConf, "cp %p /wal-staging/%f") {
-		t.Error("expected file-based archive_command")
+	if !strings.Contains(pgConf, "cp %p /wal-staging/.tmp.%f && mv /wal-staging/.tmp.%f /wal-staging/%f") {
+		t.Error("expected atomic file-based archive_command")
 	}
 	if !strings.Contains(pgConf, "/wal-restore/.request") {
 		t.Error("expected file-based restore_command")

@@ -698,14 +698,6 @@ func resolveStorageTiers(rawConfig json.RawMessage, tierMappings map[string]stri
 		}
 	}
 
-	if spec.Archive != nil && spec.Archive.ArchiveStorage != nil {
-		if resolved, err := resolve(spec.Archive.ArchiveStorage.StorageClass); err != nil {
-			missing = append(missing, err.Error())
-		} else {
-			spec.Archive.ArchiveStorage.StorageClass = resolved
-		}
-	}
-
 	if len(missing) > 0 {
 		return rawConfig, fmt.Errorf("missing tier mappings: %s", strings.Join(missing, ", "))
 	}
@@ -1502,12 +1494,6 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 			ArchiveCommand:        spec.Archive.ArchiveCommand,
 			RestoreCommand:        spec.Archive.RestoreCommand,
 			ArchiveTimeoutSeconds: spec.Archive.ArchiveTimeoutSeconds,
-		}
-		if spec.Archive.ArchiveStorage != nil {
-			protoConfig.Archive.ArchiveStorage = &pgswarmv1.ArchiveStorageSpec{
-				Size:         spec.Archive.ArchiveStorage.Size,
-				StorageClass: spec.Archive.ArchiveStorage.StorageClass,
-			}
 		}
 		if spec.Archive.CredentialsSecret != nil {
 			protoConfig.Archive.CredentialsSecret = &pgswarmv1.SecretRef{

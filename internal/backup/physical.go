@@ -245,6 +245,8 @@ func uploadGzipped(ctx context.Context, dest interface {
 }
 
 // downloadAndDecompress downloads a gzipped file and decompresses it.
+// Writes to a temp file first, then renames atomically so that concurrent
+// readers (e.g. restore_command polling with test -f) never see a partial file.
 func downloadAndDecompress(ctx context.Context, dest interface {
 	Download(ctx context.Context, remotePath string, w io.Writer) error
 }, remotePath, localPath string) error {
@@ -260,14 +262,20 @@ func downloadAndDecompress(ctx context.Context, dest interface {
 	}
 	defer gr.Close()
 
-	f, err := os.Create(localPath)
+	tmpPath := localPath + ".tmp"
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	_, err = io.Copy(f, gr)
-	return err
+	if _, err := io.Copy(f, gr); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	f.Close()
+
+	return os.Rename(tmpPath, localPath)
 }
 
 // notifyPrimary sends a backup completion notification to the primary sidecar.

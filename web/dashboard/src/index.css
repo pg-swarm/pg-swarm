@@ -439,6 +439,21 @@ tbody tr:hover { background: var(--green-light); }
   background: var(--green-bg);
   color: var(--green);
 }
+.tab-badge-error {
+  background: var(--red);
+  color: var(--white);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 8px;
+  line-height: 1.4;
+}
+.tab-item:not(.active) .tab-badge-error {
+  background: var(--red-bg);
+  color: var(--red);
+}
+.input-error { border-color: var(--red); }
+.form-error { font-size: 11px; color: var(--red); margin-top: 2px; }
 .tab-content { min-height: 300px; }
 
 /* ── PG Config Categories ─────────────────────────── */

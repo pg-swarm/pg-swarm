@@ -122,7 +122,7 @@ export const profiles = [
       replicas: 3,
       resources: { cpu_request: '500m', cpu_limit: '2', memory_request: '1Gi', memory_limit: '4Gi' },
       failover: { enabled: true, health_check_interval_seconds: 5 },
-      archive: { mode: 'pvc', archive_storage: { size: '100Gi' } },
+      archive: { mode: 'custom', archive_command: 'aws s3 cp %p s3://backups/wal/%f', restore_command: 'aws s3 cp s3://backups/wal/%f %p' },
       pg_params: { shared_buffers: '1GB', work_mem: '64MB', max_connections: '200' },
       databases: [
         { name: 'appdb', user: 'app_user', password: '***' },

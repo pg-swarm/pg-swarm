@@ -33,6 +33,7 @@ func archiveEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.Archive != nil && cfg.Archive.Mode != ""
 }
 
+
 // walStorageEnabled returns true if a separate WAL storage volume is configured.
 func walStorageEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.WalStorage != nil && cfg.WalStorage.Size != ""
@@ -152,7 +153,10 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		if !failoverEnabled(cfg) {
 			sts.Spec.Template.Spec.ServiceAccountName = backupServiceAccountName(cfg.ClusterName)
 		}
-		// Shared emptyDir volumes for WAL staging (archive) and WAL restore (fetch)
+	}
+
+	// Shared emptyDir volumes for WAL staging (archive) and WAL restore (fetch).
+	if backupEnabled(cfg) {
 		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes,
 			corev1.Volume{
 				Name:         "wal-staging",
