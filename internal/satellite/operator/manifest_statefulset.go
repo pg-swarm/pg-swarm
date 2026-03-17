@@ -65,7 +65,7 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 }
 
 // buildStatefulSet creates the StatefulSet for the PostgreSQL cluster.
-func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) *appsv1.StatefulSet {
+func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string, satelliteID ...string) *appsv1.StatefulSet {
 	selLabels := selectorLabels(cfg.ClusterName)
 	allLabels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
@@ -129,11 +129,6 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalVCT(cfg))
 	}
 
-	// PVC archive mode: add wal-archive VolumeClaimTemplate
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" && cfg.Archive.ArchiveStorage != nil {
-		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalArchiveVCT(cfg))
-	}
-
 	// Failover sidecar
 	if failoverEnabled(cfg) {
 		sts.Spec.Template.Spec.Containers = append(
@@ -143,33 +138,34 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		sts.Spec.Template.Spec.ServiceAccountName = failoverServiceAccountName(cfg.ClusterName)
 	}
 
-	return sts
-}
-
-// buildWalArchiveVCT creates the PersistentVolumeClaim template for the WAL archive volume.
-func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
-	objMeta := metav1.ObjectMeta{
-		Name:   "wal-archive",
-		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
-	}
-	if cfg.DeletionProtection {
-		objMeta.Finalizers = []string{FinalizerPGSwarm}
-	}
-	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: objMeta,
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: resource.MustParse(cfg.Archive.ArchiveStorage.Size),
-				},
+	// Backup sidecar
+	if backupEnabled(cfg) {
+		satID := ""
+		if len(satelliteID) > 0 {
+			satID = satelliteID[0]
+		}
+		sts.Spec.Template.Spec.Containers = append(
+			sts.Spec.Template.Spec.Containers,
+			buildBackupSidecar(cfg, secretName, satID),
+		)
+		// If failover is not enabled but backup is, we still need a service account
+		if !failoverEnabled(cfg) {
+			sts.Spec.Template.Spec.ServiceAccountName = backupServiceAccountName(cfg.ClusterName)
+		}
+		// Shared emptyDir volumes for WAL staging (archive) and WAL restore (fetch)
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes,
+			corev1.Volume{
+				Name:         "wal-staging",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			},
-		},
+			corev1.Volume{
+				Name:         "wal-restore",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+		)
 	}
-	if cfg.Archive.ArchiveStorage.StorageClass != "" {
-		pvc.Spec.StorageClassName = &cfg.Archive.ArchiveStorage.StorageClass
-	}
-	return pvc
+
+	return sts
 }
 
 // buildVCT creates the PersistentVolumeClaim template for the main data volume.
@@ -223,22 +219,14 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 
 	// Build archive-specific script blocks
 	var primaryArchiveBlock, replicaRestoreBlock string
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" {
-		primaryArchiveBlock = `
-    # Ensure wal-archive directory is ready
-    mkdir -p /wal-archive
-    chown postgres:postgres /wal-archive`
-	}
 
 	// Determine restore_command for replicas
 	restoreCmd := ""
-	if archiveEnabled(cfg) {
-		switch cfg.Archive.Mode {
-		case "pvc":
-			restoreCmd = "cp /wal-archive/%f %p"
-		case "custom":
-			restoreCmd = cfg.Archive.RestoreCommand
-		}
+	if backupEnabled(cfg) {
+		// Sidecar handles WAL fetch via shared emptyDir volume
+		restoreCmd = walRestoreCommand
+	} else if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" {
+		restoreCmd = cfg.Archive.RestoreCommand
 	}
 	if restoreCmd != "" {
 		replicaRestoreBlock = fmt.Sprintf(`
@@ -474,11 +462,11 @@ fi
 		})
 	}
 
-	// Mount wal-archive volume on init container for PVC mode
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" {
+	// Mount wal-restore on init container (needed for recovery during init)
+	if backupEnabled(cfg) {
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-			Name:      "wal-archive",
-			MountPath: "/wal-archive",
+			Name:      "wal-restore",
+			MountPath: "/wal-restore",
 		})
 	}
 
@@ -724,12 +712,12 @@ done
 		})
 	}
 
-	// PVC archive mode: mount wal-archive volume
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" {
-		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-			Name:      "wal-archive",
-			MountPath: "/wal-archive",
-		})
+	// Shared emptyDir mounts for file-based WAL archive/restore
+	if backupEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts,
+			corev1.VolumeMount{Name: "wal-staging", MountPath: "/wal-staging"},
+			corev1.VolumeMount{Name: "wal-restore", MountPath: "/wal-restore"},
+		)
 	}
 
 	// Custom archive mode with credentials: mount secret as env vars

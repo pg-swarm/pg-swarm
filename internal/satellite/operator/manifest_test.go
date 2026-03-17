@@ -204,54 +204,38 @@ func TestManifests_PVCArchive(t *testing.T) {
 	cfg := pvcArchiveCfg()
 	writeAll(t, "pvc-archive", cfg)
 
-	// ConfigMap: archive_mode = on, pvc archive_command, timeout
+	// ConfigMap: archive_mode = on, sidecar-based archive_command, timeout
 	cm := buildConfigMap(cfg)
 	pgConf := cm.Data["postgresql.conf"]
 	if !strings.Contains(pgConf, "archive_mode = on") {
 		t.Error("expected archive_mode = on")
 	}
-	if !strings.Contains(pgConf, "test ! -f /wal-archive/%f && cp %p /wal-archive/%f") {
-		t.Error("expected PVC archive_command in postgresql.conf")
+	// PVC archive mode uses file-based WAL staging via shared emptyDir
+	if !strings.Contains(pgConf, "cp %p /wal-staging/%f") {
+		t.Error("expected file-based archive_command in postgresql.conf")
+	}
+	if !strings.Contains(pgConf, "/wal-restore/.request") {
+		t.Error("expected file-based restore_command in postgresql.conf")
 	}
 	if !strings.Contains(pgConf, "archive_timeout = 120") {
 		t.Error("expected archive_timeout = 120")
 	}
 
-	// StatefulSet: 2 VCTs (data + wal-archive)
+	// StatefulSet: only 1 VCT (data) — wal-archive VCT removed in sidecar architecture
 	secret := buildSecret(cfg)
 	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
-	if n := len(sts.Spec.VolumeClaimTemplates); n != 2 {
-		t.Fatalf("expected 2 VCTs, got %d", n)
-	}
-	walVCT := sts.Spec.VolumeClaimTemplates[1]
-	if walVCT.Name != "wal-archive" {
-		t.Errorf("expected second VCT name 'wal-archive', got %q", walVCT.Name)
-	}
-	walSize := walVCT.Spec.Resources.Requests[corev1.ResourceStorage]
-	if walSize.String() != "50Gi" {
-		t.Errorf("expected wal-archive size 50Gi, got %s", walSize.String())
-	}
-	if walVCT.Spec.StorageClassName == nil || *walVCT.Spec.StorageClassName != "fast-ssd" {
-		t.Error("expected wal-archive storageClassName = fast-ssd")
+	if n := len(sts.Spec.VolumeClaimTemplates); n != 1 {
+		t.Fatalf("expected 1 VCT (data only, wal-archive removed), got %d", n)
 	}
 
-	// Both init and main containers must mount /wal-archive
+	// No wal-archive mounts on containers (sidecar handles WAL)
 	init := sts.Spec.Template.Spec.InitContainers[0]
-	if !hasVolumeMount(init, "wal-archive") {
-		t.Error("init container missing wal-archive mount")
+	if hasVolumeMount(init, "wal-archive") {
+		t.Error("init container should not have wal-archive mount (sidecar handles WAL)")
 	}
 	main := sts.Spec.Template.Spec.Containers[0]
-	if !hasVolumeMount(main, "wal-archive") {
-		t.Error("main container missing wal-archive mount")
-	}
-
-	// Init script should have mkdir for primary and restore_command for replicas
-	initScript := init.Command[2] // bash -c <script>
-	if !strings.Contains(initScript, "mkdir -p /wal-archive") {
-		t.Error("init script missing 'mkdir -p /wal-archive' for primary")
-	}
-	if !strings.Contains(initScript, "restore_command = 'cp /wal-archive/%f %p'") {
-		t.Error("init script missing restore_command for replicas")
+	if hasVolumeMount(main, "wal-archive") {
+		t.Error("main container should not have wal-archive mount (sidecar handles WAL)")
 	}
 
 	// No EnvFrom credentials (PVC mode doesn't need them)
@@ -803,5 +787,236 @@ func TestManifests_SecretPasswords(t *testing.T) {
 	}
 	if su == repl {
 		t.Error("superuser and replication passwords should differ")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Backup sidecar tests
+// ---------------------------------------------------------------------------
+
+func backupCfg() *pgswarmv1.ClusterConfig {
+	cfg := baseCfg()
+	cfg.ClusterName = "backup-pg"
+	cfg.Failover = &pgswarmv1.FailoverSpec{Enabled: true}
+	cfg.Backups = []*pgswarmv1.BackupConfig{
+		{
+			BackupProfileId: "abcdef1234567890",
+			Physical: &pgswarmv1.PhysicalBackupConfig{
+				BaseSchedule:        "0 2 * * *",
+				IncrementalSchedule: "0 */6 * * *",
+				WalArchiveEnabled:   true,
+			},
+			Logical: &pgswarmv1.LogicalBackupConfig{
+				Schedule:  "0 3 * * *",
+				Databases: []string{"mydb"},
+			},
+			Destination: &pgswarmv1.BackupDestination{
+				Type: "s3",
+				S3: &pgswarmv1.S3Destination{
+					Bucket:    "my-backups",
+					Region:    "us-east-1",
+					PathPrefix: "pg/",
+				},
+			},
+			Retention: &pgswarmv1.BackupRetention{
+				BaseBackupCount: 5,
+				WalRetentionDays: 14,
+			},
+		},
+	}
+	return cfg
+}
+
+func TestManifests_BackupSidecarInjected(t *testing.T) {
+	cfg := backupCfg()
+	secret := buildSecret(cfg)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest", "sat-123")
+
+	// Should have 3 containers: postgres + failover + backup
+	containers := sts.Spec.Template.Spec.Containers
+	if len(containers) != 3 {
+		t.Fatalf("expected 3 containers (postgres, failover, backup), got %d", len(containers))
+	}
+
+	backup := containers[2]
+	if backup.Name != "backup" {
+		t.Errorf("backup sidecar name = %q, want backup", backup.Name)
+	}
+	if backup.Image != "ghcr.io/pg-swarm/pg-swarm-backup-sidecar:latest" {
+		t.Errorf("backup sidecar image = %q, want default sidecar image", backup.Image)
+	}
+
+	// Check port
+	if len(backup.Ports) != 1 || backup.Ports[0].ContainerPort != 8442 {
+		t.Error("backup sidecar should expose port 8442")
+	}
+
+	// Backup sidecar must have wal-staging and wal-restore volume mounts
+	if !hasVolumeMount(backup, "wal-staging") {
+		t.Error("backup sidecar missing wal-staging volume mount")
+	}
+	if !hasVolumeMount(backup, "wal-restore") {
+		t.Error("backup sidecar missing wal-restore volume mount")
+	}
+
+	// Postgres container must also have wal-staging and wal-restore mounts
+	pgContainer := containers[0]
+	if !hasVolumeMount(pgContainer, "wal-staging") {
+		t.Error("postgres container missing wal-staging volume mount")
+	}
+	if !hasVolumeMount(pgContainer, "wal-restore") {
+		t.Error("postgres container missing wal-restore volume mount")
+	}
+
+	// Init container must have wal-restore mount (for recovery during init)
+	initC := sts.Spec.Template.Spec.InitContainers[0]
+	if !hasVolumeMount(initC, "wal-restore") {
+		t.Error("init container missing wal-restore volume mount")
+	}
+
+	// Pod template should have wal-staging and wal-restore emptyDir volumes
+	volumes := sts.Spec.Template.Spec.Volumes
+	hasWalStaging := false
+	hasWalRestore := false
+	for _, v := range volumes {
+		if v.Name == "wal-staging" && v.EmptyDir != nil {
+			hasWalStaging = true
+		}
+		if v.Name == "wal-restore" && v.EmptyDir != nil {
+			hasWalRestore = true
+		}
+	}
+	if !hasWalStaging {
+		t.Error("pod template missing wal-staging emptyDir volume")
+	}
+	if !hasWalRestore {
+		t.Error("pod template missing wal-restore emptyDir volume")
+	}
+
+	// Check required env vars
+	for _, name := range []string{"SATELLITE_ID", "CLUSTER_NAME", "POD_NAME", "NAMESPACE", "DEST_TYPE", "PGUSER", "PGPASSWORD", "BASE_SCHEDULE", "INCR_SCHEDULE", "LOGICAL_SCHEDULE"} {
+		if !hasEnvVar(backup, name) {
+			t.Errorf("backup sidecar missing env var %s", name)
+		}
+	}
+
+	// Check SATELLITE_ID value
+	for _, ev := range backup.Env {
+		if ev.Name == "SATELLITE_ID" && ev.Value != "sat-123" {
+			t.Errorf("SATELLITE_ID = %q, want sat-123", ev.Value)
+		}
+		if ev.Name == "PGHOST" && ev.Value != "localhost" {
+			t.Errorf("PGHOST = %q, want localhost (sidecar connects locally)", ev.Value)
+		}
+	}
+}
+
+func TestManifests_BackupSidecarNotInjectedWithoutBackup(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Failover = &pgswarmv1.FailoverSpec{Enabled: true}
+	secret := buildSecret(cfg)
+	sts := buildStatefulSet(cfg, secret.Name, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
+
+	// Should have 2 containers: postgres + failover (no backup)
+	if len(sts.Spec.Template.Spec.Containers) != 2 {
+		t.Errorf("expected 2 containers without backup config, got %d", len(sts.Spec.Template.Spec.Containers))
+	}
+}
+
+func TestManifests_BackupArchiveCommand(t *testing.T) {
+	cfg := backupCfg()
+	cm := buildConfigMap(cfg)
+	pgConf := cm.Data["postgresql.conf"]
+
+	// Backup profiles should auto-configure WAL archiving via shared emptyDir
+	if !strings.Contains(pgConf, "archive_mode = on") {
+		t.Error("expected archive_mode = on when backups configured")
+	}
+	if !strings.Contains(pgConf, "cp %p /wal-staging/%f") {
+		t.Error("expected file-based archive_command")
+	}
+	if !strings.Contains(pgConf, "/wal-restore/.request") {
+		t.Error("expected file-based restore_command")
+	}
+	// Incremental schedule should enable summarize_wal
+	if !strings.Contains(pgConf, "summarize_wal = on") {
+		t.Error("expected summarize_wal = on for incremental backups")
+	}
+}
+
+func TestManifests_BackupCredentialSecret(t *testing.T) {
+	cfg := backupCfg()
+	backup := cfg.Backups[0]
+	backup.Destination.S3.AccessKeyId = "AKID"
+	backup.Destination.S3.SecretAccessKey = "SECRET"
+
+	secret := buildBackupCredentialSecret(cfg, backup)
+	if secret == nil {
+		t.Fatal("expected credential secret")
+	}
+	if secret.StringData["aws-access-key-id"] != "AKID" {
+		t.Error("expected aws-access-key-id=AKID")
+	}
+	if secret.StringData["aws-secret-access-key"] != "SECRET" {
+		t.Error("expected aws-secret-access-key=SECRET")
+	}
+}
+
+func TestManifests_BackupRBAC(t *testing.T) {
+	cfg := backupCfg()
+
+	sa := buildBackupServiceAccount(cfg)
+	if sa.Name != "backup-pg-backup" {
+		t.Errorf("SA name = %q, want backup-pg-backup", sa.Name)
+	}
+
+	role := buildBackupRole(cfg)
+	if len(role.Rules) != 2 {
+		t.Errorf("expected 2 RBAC rules (leases + configmaps), got %d", len(role.Rules))
+	}
+
+	rb := buildBackupRoleBinding(cfg)
+	if rb.RoleRef.Name != sa.Name {
+		t.Errorf("rolebinding roleRef = %q, want %s", rb.RoleRef.Name, sa.Name)
+	}
+}
+
+func TestManifests_BackupEnvVarsS3(t *testing.T) {
+	cfg := backupCfg()
+	backup := cfg.Backups[0]
+	secretName := "backup-pg-secret"
+
+	env := backupSidecarEnvVars(cfg, backup, secretName, "sat-456")
+
+	envMap := make(map[string]string)
+	for _, e := range env {
+		if e.Value != "" {
+			envMap[e.Name] = e.Value
+		}
+	}
+
+	if envMap["SATELLITE_ID"] != "sat-456" {
+		t.Error("missing or wrong SATELLITE_ID")
+	}
+	if envMap["S3_BUCKET"] != "my-backups" {
+		t.Error("missing S3_BUCKET")
+	}
+	if envMap["S3_REGION"] != "us-east-1" {
+		t.Error("missing S3_REGION")
+	}
+	if envMap["BASE_SCHEDULE"] != "0 2 * * *" {
+		t.Error("missing BASE_SCHEDULE")
+	}
+	if envMap["INCR_SCHEDULE"] != "0 */6 * * *" {
+		t.Error("missing INCR_SCHEDULE")
+	}
+	if envMap["LOGICAL_SCHEDULE"] != "0 3 * * *" {
+		t.Error("missing LOGICAL_SCHEDULE")
+	}
+	if envMap["RETENTION_SETS"] != "5" {
+		t.Errorf("RETENTION_SETS = %q, want 5", envMap["RETENTION_SETS"])
+	}
+	if envMap["RETENTION_DAYS"] != "14" {
+		t.Errorf("RETENTION_DAYS = %q, want 14", envMap["RETENTION_DAYS"])
 	}
 }
