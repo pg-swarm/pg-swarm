@@ -199,7 +199,7 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	defer cancel()
 
 	pods, err := m.client.CoreV1().Pods(mc.Namespace).List(checkCtx, metav1.ListOptions{
-		LabelSelector: "pg-swarm.io/cluster=" + mc.ClusterName,
+		LabelSelector: operator.LabelCluster + "=" + mc.ClusterName + ",!" + operator.LabelBackupType,
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("cluster", mc.ClusterName).Msg("failed to list pods for health check")

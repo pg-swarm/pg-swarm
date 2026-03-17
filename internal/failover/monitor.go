@@ -30,6 +30,17 @@ const (
 	// on its own after a normal primary switchover.
 	rewindGracePeriod = 30 * time.Second
 
+	// crashLoopThreshold is how many consecutive local PG connection failures
+	// before we consider the primary to be crash-looping and stop renewing the
+	// leader lease so that a secondary can take over.
+	crashLoopThreshold = 3
+
+	// stableUpThreshold is how many consecutive healthy ticks a crash-looping
+	// primary must achieve before we consider it recovered and resume lease
+	// renewal. This prevents a single transient startup from resetting the
+	// crash-loop detection.
+	stableUpThreshold = 3
+
 	labelRole    = "pg-swarm.io/role"
 	rolePrimary  = "primary"
 	roleReplica  = "replica"
@@ -68,6 +79,15 @@ type Monitor struct {
 	primaryUnreachableCount int
 	// primaryCheckFunc overrides isPrimaryReachable for testing (nil = real check).
 	primaryCheckFunc func(ctx context.Context) bool
+
+	// localPGDownCount tracks consecutive failures to connect to the local PG
+	// instance. Used to detect a crash-looping primary so we can stop renewing
+	// the leader lease and allow a secondary to take over.
+	localPGDownCount int
+	// consecutiveHealthyTicks tracks how many ticks in a row the local PG has
+	// been reachable as primary after a crash-loop. We require stableUpThreshold
+	// consecutive healthy ticks before resuming lease renewal.
+	consecutiveHealthyTicks int
 }
 
 // NewMonitor creates a new failover monitor.
@@ -111,13 +131,17 @@ func (m *Monitor) Run(ctx context.Context) error {
 func (m *Monitor) tick(ctx context.Context) {
 	conn, err := pgx.Connect(ctx, m.cfg.PGConnString)
 	if err != nil {
-		log.Warn().Err(err).Msg("cannot connect to local PostgreSQL")
+		m.localPGDownCount++
+		m.consecutiveHealthyTicks = 0
+		log.Warn().Err(err).Int("down_count", m.localPGDownCount).Msg("cannot connect to local PostgreSQL")
 		return
 	}
 	defer conn.Close(ctx)
 
 	var isInRecovery bool
 	if err := conn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&isInRecovery); err != nil {
+		m.localPGDownCount++
+		m.consecutiveHealthyTicks = 0
 		log.Warn().Err(err).Msg("pg_is_in_recovery() failed")
 		return
 	}
@@ -125,6 +149,9 @@ func (m *Monitor) tick(ctx context.Context) {
 	if !isInRecovery {
 		m.handlePrimary(ctx, conn)
 	} else {
+		// Replicas reset crash-loop tracking — it only applies to primaries.
+		m.localPGDownCount = 0
+		m.consecutiveHealthyTicks = 0
 		m.handleReplica(ctx, conn)
 	}
 }
@@ -133,6 +160,22 @@ func (m *Monitor) tick(ctx context.Context) {
 // If another pod holds the lease (split-brain) or the lease cannot be
 // verified, PG is fenced to prevent writes.
 func (m *Monitor) handlePrimary(ctx context.Context, conn *pgx.Conn) {
+	m.consecutiveHealthyTicks++
+
+	// Crash-loop detection: if PG was recently down multiple times, don't
+	// renew the lease until it has been stable for stableUpThreshold ticks.
+	// This allows the lease to expire so a secondary can promote.
+	if m.localPGDownCount >= crashLoopThreshold && m.consecutiveHealthyTicks < stableUpThreshold {
+		log.Error().
+			Int("down_count", m.localPGDownCount).
+			Int("healthy_ticks", m.consecutiveHealthyTicks).
+			Msg("primary is crash-looping — skipping lease renewal to allow failover")
+		return
+	}
+	if m.consecutiveHealthyTicks >= stableUpThreshold {
+		m.localPGDownCount = 0
+	}
+
 	acquired, err := m.acquireOrRenew(ctx)
 	if err != nil {
 		// Cannot verify lease ownership — fence as a safety measure.
@@ -371,6 +414,10 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn *pgx.Conn) {
 	// Check for timeline divergence — this is fatal and will never self-heal.
 	// The replica's timeline won't match the new primary's after a promotion.
 	if m.hasTimelineDivergence(ctx, conn) {
+		if !m.isPrimaryReachable(ctx) {
+			log.Warn().Msg("timeline divergence detected but primary unreachable — skipping destructive recovery")
+			return
+		}
 		log.Warn().Msg("timeline divergence detected — triggering immediate recovery")
 		m.doRewind(ctx)
 		m.walReceiverDownSince = time.Time{}
@@ -391,6 +438,13 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn *pgx.Conn) {
 			Dur("down_for", downFor).
 			Dur("grace_period", rewindGracePeriod).
 			Msg("WAL receiver still down — waiting before recovery")
+		return
+	}
+
+	if !m.isPrimaryReachable(ctx) {
+		log.Warn().
+			Dur("down_for", downFor).
+			Msg("WAL receiver down beyond grace period but primary unreachable — skipping destructive recovery")
 		return
 	}
 

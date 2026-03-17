@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/google/uuid"
@@ -28,6 +29,7 @@ type RESTServer struct {
 	streams   *StreamManager
 	logBuffer *LogBuffer
 	app       *fiber.App
+	wsHub     *WSHub
 }
 
 // NewRESTServer creates a new RESTServer.
@@ -39,6 +41,8 @@ func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager, lb 
 		logBuffer: lb,
 		app:       fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
 	}
+	srv.wsHub = newWSHub(srv)
+	go srv.wsHub.Run()
 	srv.setupRoutes()
 	return srv
 }
@@ -85,6 +89,19 @@ func (s *RESTServer) setupRoutes() {
 	})
 
 	api := s.app.Group("/api/v1")
+
+	// WebSocket — real-time state push (dashboard connects here first, falls back to REST polling)
+	api.Use("/ws", upgradeMiddleware)
+	api.Get("/ws", websocket.New(s.wsHub.handleWS))
+
+	// Notify WebSocket clients after successful mutations.
+	api.Use(func(c *fiber.Ctx) error {
+		err := c.Next()
+		if err == nil && c.Method() != fiber.MethodGet && c.Response().StatusCode() < 400 {
+			s.wsHub.Notify()
+		}
+		return err
+	})
 
 	// Satellites
 	api.Get("/satellites", s.listSatellites)
@@ -317,6 +334,17 @@ func (s *RESTServer) updateClusterConfig(c *fiber.Ctx) error {
 	}
 
 	cfg.ID = id
+
+	// Preserve server-managed fields that the client should not overwrite.
+	existing, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		log.Error().Err(err).Str("config_id", id.String()).Msg("failed to get existing cluster config for update")
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "cluster config not found"})
+	}
+	cfg.State = existing.State
+	cfg.SatelliteID = existing.SatelliteID
+	cfg.ProfileID = existing.ProfileID
+	cfg.DeploymentRuleID = existing.DeploymentRuleID
 
 	if err := s.store.UpdateClusterConfig(c.Context(), &cfg); err != nil {
 		log.Error().Err(err).Str("config_id", id.String()).Msg("failed to update cluster config")
@@ -1793,7 +1821,9 @@ func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uui
 }
 
 // rePushClustersForBackupProfile re-pushes configs for all clusters linked to
-// profiles that have the given backup profile attached.
+// profiles that have the given backup profile attached, and bumps updated_at on
+// each affected cluster profile so the change is visible without inspecting the
+// backup profile directly.
 func (s *RESTServer) rePushClustersForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) {
 	profileIDs, err := s.store.ListProfileIDsForBackupProfile(ctx, backupProfileID)
 	if err != nil {
@@ -1801,6 +1831,9 @@ func (s *RESTServer) rePushClustersForBackupProfile(ctx context.Context, backupP
 		return
 	}
 	for _, pid := range profileIDs {
+		if err := s.store.TouchProfile(ctx, pid); err != nil {
+			log.Error().Err(err).Str("profile_id", pid.String()).Msg("failed to touch cluster profile after backup profile update")
+		}
 		s.rePushClustersForProfile(ctx, pid)
 	}
 }

@@ -1,0 +1,34 @@
+-- Default dev cluster profile: lightweight single-replica PG 17 Alpine for local development.
+
+INSERT INTO cluster_profiles (id, name, description, config) VALUES (
+    'c0000000-0000-0000-0000-000000000001',
+    'dev',
+    'Lightweight single-replica PostgreSQL 17 Alpine for development and testing',
+    '{
+        "replicas": 1,
+        "postgres": {
+            "version": "17",
+            "variant": "alpine"
+        },
+        "storage": {
+            "size": "1Gi"
+        },
+        "wal_storage": {
+            "size": "1Gi"
+        },
+        "resources": {
+            "cpu_request": "100m",
+            "cpu_limit": "500m",
+            "memory_request": "256Mi",
+            "memory_limit": "512Mi"
+        },
+        "deletion_protection": false,
+        "databases": [
+            {
+                "name": "test",
+                "user": "test",
+                "password": "test"
+            }
+        ]
+    }'
+) ON CONFLICT (name) DO NOTHING;
