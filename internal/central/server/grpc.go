@@ -492,6 +492,30 @@ func (sm *StreamManager) PushSetLogLevel(satelliteID uuid.UUID, level string) er
 	}
 }
 
+// PushDelete sends a cluster deletion command to the specified satellite.
+func (sm *StreamManager) PushDelete(satelliteID uuid.UUID, del *pgswarmv1.DeleteCluster) error {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	stream, ok := sm.streams[satelliteID]
+	if !ok {
+		return fmt.Errorf("satellite %s not connected", satelliteID)
+	}
+
+	msg := &pgswarmv1.CentralMessage{
+		Payload: &pgswarmv1.CentralMessage_DeleteCluster{
+			DeleteCluster: del,
+		},
+	}
+
+	select {
+	case stream.SendCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("satellite %s send channel full", satelliteID)
+	}
+}
+
 // PushRestoreCommand sends a restore command to the specified satellite.
 func (sm *StreamManager) PushRestoreCommand(satelliteID uuid.UUID, cmd *pgswarmv1.RestoreCommand) error {
 	sm.mu.RLock()

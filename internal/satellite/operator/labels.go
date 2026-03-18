@@ -9,6 +9,8 @@ const (
 	LabelRole      = "pg-swarm.io/role"
 	LabelProfile   = "pg-swarm.io/profile"
 
+	LabelTombstone = "pg-swarm.io/tombstone"
+
 	LabelBackupType    = "pg-swarm/backup-type"
 	LabelBackupProfile = "pg-swarm/backup-profile"
 

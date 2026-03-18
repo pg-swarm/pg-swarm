@@ -49,6 +49,7 @@ type Store interface {
 	ListProfiles(ctx context.Context) ([]*models.ClusterProfile, error)
 	UpdateProfile(ctx context.Context, profile *models.ClusterProfile) error
 	DeleteProfile(ctx context.Context, id uuid.UUID) error
+	ForceDeleteProfile(ctx context.Context, id uuid.UUID) error
 	LockProfile(ctx context.Context, id uuid.UUID) error
 	TouchProfile(ctx context.Context, id uuid.UUID) error
 

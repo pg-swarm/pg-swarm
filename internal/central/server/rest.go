@@ -144,6 +144,7 @@ func (s *RESTServer) setupRoutes() {
 	api.Get("/profiles/:id", s.getProfile)
 	api.Put("/profiles/:id", s.updateProfile)
 	api.Delete("/profiles/:id", s.deleteProfile)
+	api.Get("/profiles/:id/cascade-preview", s.cascadePreview)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
 
 	// Backup Profiles
@@ -364,9 +365,23 @@ func (s *RESTServer) deleteClusterConfig(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid config id"})
 	}
 
+	// Fetch config before deleting so we can notify the satellite
+	cfg, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "cluster config not found"})
+	}
+
 	if err := s.store.DeleteClusterConfig(c.Context(), id); err != nil {
 		log.Error().Err(err).Str("config_id", id.String()).Msg("failed to delete cluster config")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete cluster config"})
+	}
+
+	// Notify satellite to tear down resources
+	if cfg.SatelliteID != nil {
+		del := &pgswarmv1.DeleteCluster{ClusterName: cfg.Name, Namespace: cfg.Namespace}
+		if err := s.streams.PushDelete(*cfg.SatelliteID, del); err != nil {
+			log.Warn().Err(err).Str("config_id", id.String()).Msg("failed to push delete to satellite (may be offline)")
+		}
 	}
 
 	log.Info().Str("config_id", id.String()).Msg("cluster config deleted")
@@ -1200,11 +1215,90 @@ func (s *RESTServer) deleteProfile(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
 	}
-	if err := s.store.DeleteProfile(c.Context(), id); err != nil {
+
+	cascade := c.Query("cascade") == "true"
+	ctx := c.Context()
+
+	if cascade {
+		// 1. Delete all clusters linked to this profile (and notify satellites)
+		clusters, err := s.store.GetClusterConfigsByProfile(ctx, id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list profile clusters"})
+		}
+		for _, cfg := range clusters {
+			if cfg.SatelliteID != nil {
+				del := &pgswarmv1.DeleteCluster{ClusterName: cfg.Name, Namespace: cfg.Namespace}
+				if pushErr := s.streams.PushDelete(*cfg.SatelliteID, del); pushErr != nil {
+					log.Warn().Err(pushErr).Str("cluster", cfg.Name).Msg("cascade: failed to push delete to satellite")
+				}
+			}
+			if delErr := s.store.DeleteClusterConfig(ctx, cfg.ID); delErr != nil {
+				log.Error().Err(delErr).Str("cluster_id", cfg.ID.String()).Msg("cascade: failed to delete cluster config")
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete cluster " + cfg.Name})
+			}
+		}
+
+		// 2. Delete deployment rules linked to this profile
+		rules, err := s.store.GetDeploymentRulesByProfile(ctx, id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list profile deployment rules"})
+		}
+		for _, rule := range rules {
+			if delErr := s.store.DeleteDeploymentRule(ctx, rule.ID); delErr != nil {
+				log.Error().Err(delErr).Str("rule_id", rule.ID.String()).Msg("cascade: failed to delete deployment rule")
+			}
+		}
+
+		// 3. Force-delete the profile (bypasses lock check)
+		if err := s.store.ForceDeleteProfile(ctx, id); err != nil {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+		}
+		log.Info().Str("profile_id", id.String()).Int("clusters_deleted", len(clusters)).Int("rules_deleted", len(rules)).Msg("profile cascade deleted")
+		return c.JSON(fiber.Map{"status": "deleted", "clusters_deleted": len(clusters), "rules_deleted": len(rules)})
+	}
+
+	// Non-cascade: only works on unlocked profiles with no FK dependents
+	if err := s.store.DeleteProfile(ctx, id); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 	log.Info().Str("profile_id", id.String()).Msg("profile deleted")
 	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (s *RESTServer) cascadePreview(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+
+	clusters, err := s.store.GetClusterConfigsByProfile(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list profile clusters"})
+	}
+
+	type preview struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
+		Satellite string `json:"satellite"`
+	}
+	items := make([]preview, 0, len(clusters))
+	for _, cfg := range clusters {
+		satName := ""
+		if cfg.SatelliteID != nil {
+			sat, err := s.store.GetSatellite(c.Context(), *cfg.SatelliteID)
+			if err == nil {
+				satName = sat.Hostname
+			}
+		}
+		items = append(items, preview{
+			ID:        cfg.ID.String(),
+			Name:      cfg.Name,
+			Namespace: cfg.Namespace,
+			Satellite: satName,
+		})
+	}
+	return c.JSON(items)
 }
 
 func (s *RESTServer) cloneProfile(c *fiber.Ctx) error {

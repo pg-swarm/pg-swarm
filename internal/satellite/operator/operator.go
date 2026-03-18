@@ -82,6 +82,13 @@ func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
 	o.resolveNamespace(cfg)
 	key := clusterKey(cfg.Namespace, cfg.ClusterName)
 
+	// Remove any tombstone from a previous deletion — cluster is being re-configured
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := deleteTombstone(ctx, o.client, cfg.Namespace, cfg.ClusterName); err != nil {
+		log.Warn().Err(err).Str("cluster", key).Msg("failed to delete tombstone on re-config")
+	}
+
 	o.mu.RLock()
 	appliedVersion := o.applied[key]
 	o.mu.RUnlock()
@@ -198,6 +205,14 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 
 	// Remove finalizers from PVCs and delete them
 	removeFinalizedPVCs(ctx, o.client, ns, name)
+
+	// Create tombstone marker so orphan detection knows this was intentional
+	o.mu.RLock()
+	ver := o.applied[key]
+	o.mu.RUnlock()
+	if err := createTombstone(ctx, o.client, ns, name, ver); err != nil {
+		log.Warn().Err(err).Str("cluster", key).Msg("failed to create tombstone")
+	}
 
 	o.mu.Lock()
 	delete(o.desired, key)
@@ -370,6 +385,12 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to label pods (will retry on next reconcile)")
 	}
 
+	// When failover is disabled, no sidecar will label pods later — we must
+	// wait for pods to appear and label them ourselves.
+	if !failoverEnabled(cfg) {
+		go o.ensurePodLabels(cfg.Namespace, cfg.ClusterName, cfg.Replicas)
+	}
+
 	// 10. Backup sidecar RBAC and credential secrets
 	if backupEnabled(cfg) {
 		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
@@ -391,4 +412,97 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	}
 
 	return nil
+}
+
+// CheckOrphans scans for StatefulSets managed by pg-swarm that are not in the
+// desired map. If a tombstone exists the cluster was intentionally deleted; if
+// not, it is logged as an orphan.
+func (o *Operator) CheckOrphans(ctx context.Context) {
+	nsList, err := o.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Warn().Err(err).Msg("orphan-check: failed to list namespaces")
+		return
+	}
+
+	o.mu.RLock()
+	desired := make(map[string]struct{}, len(o.desired))
+	for k := range o.desired {
+		desired[k] = struct{}{}
+	}
+	o.mu.RUnlock()
+
+	for _, ns := range nsList.Items {
+		stsList, err := o.client.AppsV1().StatefulSets(ns.Name).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s=%s", LabelManagedBy, ManagedByValue),
+		})
+		if err != nil {
+			log.Warn().Err(err).Str("namespace", ns.Name).Msg("orphan-check: failed to list statefulsets")
+			continue
+		}
+		for _, sts := range stsList.Items {
+			clusterName := sts.Labels[LabelCluster]
+			if clusterName == "" {
+				continue
+			}
+			key := clusterKey(ns.Name, clusterName)
+			if _, ok := desired[key]; ok {
+				continue
+			}
+			tombstoned, err := hasTombstone(ctx, o.client, ns.Name, clusterName)
+			if err != nil {
+				log.Warn().Err(err).Str("cluster", key).Msg("orphan-check: failed to check tombstone")
+				continue
+			}
+			if tombstoned {
+				log.Info().Str("cluster", key).Msg("orphan-check: cluster has tombstone (intentionally deleted)")
+			} else {
+				log.Warn().Str("cluster", key).Msg("orphan-check: orphaned cluster detected (no desired config, no tombstone)")
+			}
+		}
+	}
+}
+
+// StartOrphanChecker runs CheckOrphans periodically until the context is cancelled.
+func (o *Operator) StartOrphanChecker(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			o.CheckOrphans(ctx)
+		}
+	}
+}
+
+// ensurePodLabels polls until all expected pods have a role label.
+// Used when failover is disabled and no sidecar will label them.
+func (o *Operator) ensurePodLabels(namespace, clusterName string, replicas int32) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Warn().Str("cluster", clusterName).Msg("timed out waiting to label pods")
+			return
+		case <-ticker.C:
+			if err := labelPods(ctx, o.client, namespace, clusterName); err != nil {
+				log.Trace().Err(err).Msg("ensurePodLabels: retry")
+				continue
+			}
+			// Check if all pods are labeled
+			pods, err := o.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("%s=%s,%s", LabelCluster, clusterName, LabelRole),
+			})
+			if err == nil && int32(len(pods.Items)) >= replicas {
+				log.Info().Str("cluster", clusterName).Int("labeled", len(pods.Items)).Msg("all pods labeled")
+				return
+			}
+		}
+	}
 }

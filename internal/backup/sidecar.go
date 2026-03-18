@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite" // SQLite driver registration
+	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver registration
+	_ "modernc.org/sqlite"             // SQLite driver registration
 
 	"github.com/pg-swarm/pg-swarm/internal/backup/destination"
 	"github.com/rs/zerolog/log"
@@ -40,21 +41,21 @@ func (r Role) String() string {
 
 // Config holds the sidecar configuration, populated from environment variables.
 type Config struct {
-	SatelliteID  string
-	ClusterName  string
-	PodName      string
-	Namespace    string
-	DestType     string
-	BaseSchedule string
-	IncrSchedule string
+	SatelliteID   string
+	ClusterName   string
+	PodName       string
+	Namespace     string
+	DestType      string
+	BaseSchedule  string
+	IncrSchedule  string
 	LogicSchedule string
 	RetentionSets int
 	RetentionDays int
-	PGUser       string
-	PGPassword   string
-	PGHost       string
-	PGPort       string
-	ListenAddr   string
+	PGUser        string
+	PGPassword    string
+	PGHost        string
+	PGPort        string
+	ListenAddr    string
 }
 
 // ConfigFromEnv reads sidecar configuration from environment variables.
@@ -80,34 +81,34 @@ func ConfigFromEnv() Config {
 		listenAddr = ":8442"
 	}
 	return Config{
-		SatelliteID:  os.Getenv("SATELLITE_ID"),
-		ClusterName:  os.Getenv("CLUSTER_NAME"),
-		PodName:      os.Getenv("POD_NAME"),
-		Namespace:    os.Getenv("NAMESPACE"),
-		DestType:     os.Getenv("DEST_TYPE"),
-		BaseSchedule: os.Getenv("BASE_SCHEDULE"),
-		IncrSchedule: os.Getenv("INCR_SCHEDULE"),
+		SatelliteID:   os.Getenv("SATELLITE_ID"),
+		ClusterName:   os.Getenv("CLUSTER_NAME"),
+		PodName:       os.Getenv("POD_NAME"),
+		Namespace:     os.Getenv("NAMESPACE"),
+		DestType:      os.Getenv("DEST_TYPE"),
+		BaseSchedule:  os.Getenv("BASE_SCHEDULE"),
+		IncrSchedule:  os.Getenv("INCR_SCHEDULE"),
 		LogicSchedule: os.Getenv("LOGICAL_SCHEDULE"),
 		RetentionSets: retSets,
 		RetentionDays: retDays,
-		PGUser:       os.Getenv("PGUSER"),
-		PGPassword:   os.Getenv("PGPASSWORD"),
-		PGHost:       pgHost,
-		PGPort:       pgPort,
-		ListenAddr:   listenAddr,
+		PGUser:        os.Getenv("PGUSER"),
+		PGPassword:    os.Getenv("PGPASSWORD"),
+		PGHost:        pgHost,
+		PGPort:        pgPort,
+		ListenAddr:    listenAddr,
 	}
 }
 
 // Sidecar is the main backup sidecar process.
 type Sidecar struct {
-	cfg      Config
-	dest     destination.Destination
-	meta     *MetadataDB
-	role     Role
-	mu       sync.RWMutex
-	api      *APIServer
-	sched    *Scheduler
-	ret      *RetentionWorker
+	cfg        Config
+	dest       destination.Destination
+	meta       *MetadataDB
+	role       Role
+	mu         sync.RWMutex
+	api        *APIServer
+	sched      *Scheduler
+	ret        *RetentionWorker
 	reporter   *Reporter
 	notifier   *Notifier
 	cancel     context.CancelFunc

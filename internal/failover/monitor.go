@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
-	corev1 "k8s.io/api/core/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,9 +41,9 @@ const (
 	// crash-loop detection.
 	stableUpThreshold = 3
 
-	labelRole    = "pg-swarm.io/role"
-	rolePrimary  = "primary"
-	roleReplica  = "replica"
+	labelRole   = "pg-swarm.io/role"
+	rolePrimary = "primary"
+	roleReplica = "replica"
 )
 
 // Config holds the failover monitor configuration.
@@ -52,7 +52,7 @@ type Config struct {
 	Namespace           string
 	ClusterName         string
 	Interval            time.Duration
-	PGConnString        string        // e.g. "host=localhost user=postgres password=xxx dbname=postgres"
+	PGConnString        string // e.g. "host=localhost user=postgres password=xxx dbname=postgres"
 	RestConfig          *rest.Config
 	ReplicationPassword string        // for primary_conninfo when demoting
 	PrimaryHost         string        // RW service DNS for reachability check
@@ -74,6 +74,7 @@ type Monitor struct {
 	// inactive on a replica. Zero means the receiver is active (or we haven't
 	// checked yet). After rewindGracePeriod, we attempt pg_rewind / re-basebackup.
 	walReceiverDownSince time.Time
+	lastReplayLSN        string
 
 	// primaryUnreachableCount tracks consecutive failed reachability checks.
 	primaryUnreachableCount int
@@ -398,11 +399,17 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn pgfence.PGExecer) {
 		return
 	}
 
+	var replayLSN string
+	if err := conn.QueryRow(ctx, "SELECT pg_last_wal_replay_lsn()").Scan(&replayLSN); err != nil {
+		replayLSN = ""
+	}
+
 	if active {
 		if !m.walReceiverDownSince.IsZero() {
 			log.Info().Msg("WAL receiver reconnected — replication restored")
 		}
 		m.walReceiverDownSince = time.Time{}
+		m.lastReplayLSN = replayLSN
 		return
 	}
 
@@ -427,6 +434,7 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn pgfence.PGExecer) {
 		log.Warn().Msg("timeline divergence detected — triggering immediate recovery")
 		m.doRewind(ctx)
 		m.walReceiverDownSince = time.Time{}
+		m.lastReplayLSN = ""
 		return
 	}
 
@@ -434,7 +442,17 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn pgfence.PGExecer) {
 	now := time.Now()
 	if m.walReceiverDownSince.IsZero() {
 		m.walReceiverDownSince = now
+		m.lastReplayLSN = replayLSN
 		log.Warn().Msg("WAL receiver not streaming — starting grace period")
+		return
+	}
+
+	// If replay LSN advanced while WAL receiver is down, archive recovery is making progress!
+	// Reset the timer so we don't interrupt it.
+	if replayLSN != "" && replayLSN != m.lastReplayLSN {
+		log.Debug().Msg("WAL receiver down but replay LSN advancing (archive recovery active) — resetting grace period")
+		m.walReceiverDownSince = now
+		m.lastReplayLSN = replayLSN
 		return
 	}
 
@@ -458,8 +476,14 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn pgfence.PGExecer) {
 		Dur("down_for", downFor).
 		Msg("WAL receiver down beyond grace period — attempting pg_rewind / re-basebackup")
 
-	m.doRewind(ctx)
+	if m.hasWalGap(ctx, conn, replayLSN) {
+		log.Warn().Msg("WAL gap detected — forcing full re-basebackup")
+		m.doReBasebackup(ctx)
+	} else {
+		m.doRewind(ctx)
+	}
 	m.walReceiverDownSince = time.Time{} // reset so we wait again if it fails
+	m.lastReplayLSN = ""
 }
 
 // hasTimelineDivergence checks if this replica's timeline differs from the
@@ -518,6 +542,81 @@ func (m *Monitor) hasTimelineDivergence(ctx context.Context, conn pgfence.PGExec
 	}
 
 	return false
+}
+
+// hasWalGap checks if this replica's required WAL segment is missing from the primary.
+func (m *Monitor) hasWalGap(ctx context.Context, conn pgfence.PGExecer, replayLSN string) bool {
+	if replayLSN == "" {
+		return false
+	}
+
+	primaryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	pConn, err := pgx.Connect(primaryCtx, fmt.Sprintf(
+		"host=%s port=5432 user=postgres password=%s dbname=postgres connect_timeout=2",
+		m.cfg.PrimaryHost, m.cfg.PGPassword))
+	if err != nil {
+		return false
+	}
+	defer pConn.Close(primaryCtx)
+
+	var walFile string
+	err = pConn.QueryRow(primaryCtx, "SELECT pg_walfile_name($1)", replayLSN).Scan(&walFile)
+	if err != nil {
+		return false
+	}
+
+	var exists bool
+	err = pConn.QueryRow(primaryCtx, "SELECT EXISTS(SELECT 1 FROM pg_ls_waldir() WHERE name = $1)", walFile).Scan(&exists)
+	if err != nil {
+		return false
+	}
+
+	// If the file exists on primary, no gap (replica can stream it).
+	return !exists
+}
+
+// doReBasebackup creates the needs-basebackup marker and stops PG so the wrapper handles it.
+func (m *Monitor) doReBasebackup(ctx context.Context) {
+	if m.cfg.RestConfig == nil {
+		log.Error().Msg("rest.Config not set — cannot exec into container for basebackup")
+		return
+	}
+
+	pgdata := "/var/lib/postgresql/data/pgdata"
+	marker := "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+	script := fmt.Sprintf(`set -e
+touch "%s"
+pg_ctl -D "%s" stop -m fast`, marker, pgdata)
+
+	req := m.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(m.cfg.PodName).
+		Namespace(m.cfg.Namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "postgres",
+			Command:   []string{"bash", "-c", script},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(m.cfg.RestConfig, "POST", req.URL())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to create exec for basebackup")
+		return
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}); err != nil {
+		log.Error().Err(err).Str("stdout", stdout.String()).Str("stderr", stderr.String()).Msg("failed to exec basebackup script")
+		return
+	}
+
+	log.Info().Str("pod", m.cfg.PodName).Msg("PG stopped for WAL gap recovery — wrapper will handle re-basebackup")
 }
 
 // doRewind calls the rewind function (real or injected for tests).
@@ -664,4 +763,3 @@ func leaseExpired(lease *coordinationv1.Lease) bool {
 	expiry := lease.Spec.RenewTime.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second)
 	return time.Now().After(expiry)
 }
-

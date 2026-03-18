@@ -86,7 +86,6 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		}
 		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
 		merged["archive_command"] = "'cp %p /wal-staging/.tmp.%f && mv /wal-staging/.tmp.%f /wal-staging/%f'"
-		merged["restore_command"] = "'" + walRestoreCommand + "'"
 	} else {
 		merged["archive_mode"] = "off"
 	}

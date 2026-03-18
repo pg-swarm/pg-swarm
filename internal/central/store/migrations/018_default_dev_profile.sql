@@ -29,6 +29,19 @@ INSERT INTO cluster_profiles (id, name, description, config) VALUES (
                 "user": "test",
                 "password": "test"
             }
-        ]
+        ],
+        "pg_params": {
+            "log_statement": "all",
+            "log_min_duration_statement": "0",
+            "shared_buffers": "128MB",
+            "work_mem": "8MB"
+        },
+        "hba_rules": [
+            "host all all 0.0.0.0/0 md5"
+        ],
+        "failover": {
+            "enabled": true,
+            "health_check_interval_seconds": 5
+        }
     }'
 ) ON CONFLICT (name) DO NOTHING;

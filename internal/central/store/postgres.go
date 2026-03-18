@@ -754,6 +754,20 @@ func (s *PostgresStore) DeleteProfile(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// ForceDeleteProfile removes a cluster profile regardless of lock state.
+// Used by cascade deletion where the caller has already cleaned up dependents.
+func (s *PostgresStore) ForceDeleteProfile(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM cluster_profiles WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("force delete profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("profile %s not found", id)
+	}
+	return nil
+}
+
 // LockProfile marks a profile as locked, preventing further edits or deletion.
 func (s *PostgresStore) LockProfile(ctx context.Context, id uuid.UUID) error {
 	tag, err := s.pool.Exec(ctx,
