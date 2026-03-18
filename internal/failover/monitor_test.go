@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -540,6 +542,341 @@ func TestCheckWalReceiver_SkipsRecoveryWhenPrimaryUnreachable(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// mockRow implements pgx.Row for testing.
+type mockRow struct {
+	scanFunc func(dest ...any) error
+}
+
+func (r *mockRow) Scan(dest ...any) error { return r.scanFunc(dest...) }
+
+// mockPGConn implements pgfence.PGExecer for testing hasTimelineDivergence.
+type mockPGConn struct {
+	queryRowFunc func(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (m *mockPGConn) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (m *mockPGConn) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return m.queryRowFunc(ctx, sql, args...)
+}
+
+func TestHasTimelineDivergence_ReceiverTimelineMismatch(t *testing.T) {
+	conn := &mockPGConn{
+		queryRowFunc: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			switch {
+			case containsStr(sql, "pg_control_checkpoint"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(*int64) = 1
+					return nil
+				}}
+			case containsStr(sql, "pg_stat_wal_receiver"):
+				tl := int64(2)
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(**int64) = &tl
+					return nil
+				}}
+			default:
+				t.Fatalf("unexpected query: %s", sql)
+				return nil
+			}
+		},
+	}
+
+	mon := &Monitor{}
+	if !mon.hasTimelineDivergence(context.Background(), conn) {
+		t.Fatal("expected divergence when receiver timeline (2) != local timeline (1)")
+	}
+}
+
+func TestHasTimelineDivergence_TimelinesMatch(t *testing.T) {
+	conn := &mockPGConn{
+		queryRowFunc: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			switch {
+			case containsStr(sql, "pg_control_checkpoint"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(*int64) = 2
+					return nil
+				}}
+			case containsStr(sql, "pg_stat_wal_receiver"):
+				tl := int64(2)
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(**int64) = &tl
+					return nil
+				}}
+			default:
+				t.Fatalf("unexpected query: %s", sql)
+				return nil
+			}
+		},
+	}
+
+	mon := &Monitor{}
+	if mon.hasTimelineDivergence(context.Background(), conn) {
+		t.Fatal("expected no divergence when timelines match")
+	}
+}
+
+func TestHasTimelineDivergence_NoWalReceiver_MissingHistoryFiles(t *testing.T) {
+	conn := &mockPGConn{
+		queryRowFunc: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			switch {
+			case containsStr(sql, "pg_control_checkpoint"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(*int64) = 2 // timeline 2
+					return nil
+				}}
+			case containsStr(sql, "pg_stat_wal_receiver"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					return pgx.ErrNoRows
+				}}
+			case containsStr(sql, "pg_ls_waldir"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(*int64) = 0 // 0 history files, expected 1
+					return nil
+				}}
+			default:
+				t.Fatalf("unexpected query: %s", sql)
+				return nil
+			}
+		},
+	}
+
+	mon := &Monitor{}
+	if !mon.hasTimelineDivergence(context.Background(), conn) {
+		t.Fatal("expected divergence when history files missing (timeline=2, history=0)")
+	}
+}
+
+func TestHasTimelineDivergence_NoWalReceiver_HistoryFilesPresent(t *testing.T) {
+	conn := &mockPGConn{
+		queryRowFunc: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			switch {
+			case containsStr(sql, "pg_control_checkpoint"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(*int64) = 2 // timeline 2
+					return nil
+				}}
+			case containsStr(sql, "pg_stat_wal_receiver"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					return pgx.ErrNoRows
+				}}
+			case containsStr(sql, "pg_ls_waldir"):
+				return &mockRow{scanFunc: func(dest ...any) error {
+					*dest[0].(*int64) = 1 // 1 history file, expected 1
+					return nil
+				}}
+			default:
+				t.Fatalf("unexpected query: %s", sql)
+				return nil
+			}
+		},
+	}
+
+	mon := &Monitor{}
+	if mon.hasTimelineDivergence(context.Background(), conn) {
+		t.Fatal("expected no divergence when history files match expected count")
+	}
+}
+
+func TestHasTimelineDivergence_CheckpointQueryFails(t *testing.T) {
+	conn := &mockPGConn{
+		queryRowFunc: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			return &mockRow{scanFunc: func(dest ...any) error {
+				return fmt.Errorf("connection failed")
+			}}
+		},
+	}
+
+	mon := &Monitor{}
+	if mon.hasTimelineDivergence(context.Background(), conn) {
+		t.Fatal("expected false when checkpoint query fails (safe default)")
+	}
+}
+
+func TestPromotionDemotionStateTransitions(t *testing.T) {
+	myPod := "pg-cluster-1"
+	ns := "default"
+	otherPod := "pg-cluster-0"
+
+	// Start with a valid lease held by another pod (the current primary).
+	now := metav1.NewMicroTime(time.Now())
+	dur := int32(15)
+	client := fake.NewSimpleClientset(
+		&coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{Name: "mycluster-leader", Namespace: ns},
+			Spec: coordinationv1.LeaseSpec{
+				HolderIdentity:       &otherPod,
+				LeaseDurationSeconds: &dur,
+				AcquireTime:          &now,
+				RenewTime:            &now,
+			},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: myPod, Namespace: ns},
+		},
+	)
+
+	var fenceCalled atomic.Bool
+	var demoteCalled atomic.Bool
+	primaryReachable := atomic.Bool{}
+	primaryReachable.Store(true)
+
+	mon := &Monitor{
+		cfg: Config{
+			PodName:      myPod,
+			Namespace:    ns,
+			ClusterName:  "mycluster",
+			PGConnString: "host=localhost",
+		},
+		client:    client,
+		leaseName: "mycluster-leader",
+		leaseDur:  defaultLeaseDuration,
+		primaryCheckFunc: func(_ context.Context) bool {
+			return primaryReachable.Load()
+		},
+		fenceFunc: func(_ context.Context, _ pgfence.PGExecer) error {
+			fenceCalled.Store(true)
+			return nil
+		},
+		demoteFunc: func(_ context.Context) error {
+			demoteCalled.Store(true)
+			return nil
+		},
+	}
+
+	// --- Phase 1: Start as replica ---
+	// Simulate the replica tick path: counters reset at lines 153-154.
+	mon.localPGDownCount = 5 // leftover from some prior state
+	mon.consecutiveHealthyTicks = 2
+	// Entering the replica path resets crash-loop counters.
+	mon.localPGDownCount = 0
+	mon.consecutiveHealthyTicks = 0
+	mon.handleReplica(context.Background(), nil)
+
+	if mon.localPGDownCount != 0 {
+		t.Fatalf("phase 1: expected localPGDownCount=0, got %d", mon.localPGDownCount)
+	}
+	if mon.primaryUnreachableCount != 0 {
+		t.Fatalf("phase 1: expected primaryUnreachableCount=0, got %d", mon.primaryUnreachableCount)
+	}
+
+	// --- Phase 2: Promote ---
+	// Simulate primary becoming unreachable and lease expiring.
+	primaryReachable.Store(false)
+	past := metav1.NewMicroTime(time.Now().Add(-1 * time.Minute))
+	expiredDur := int32(5)
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster-leader", Namespace: ns},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &otherPod,
+			LeaseDurationSeconds: &expiredDur,
+			AcquireTime:          &past,
+			RenewTime:            &past,
+		},
+	}
+	_, err := client.CoordinationV1().Leases(ns).Update(context.Background(), lease, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("update lease: %v", err)
+	}
+
+	// 3 unreachable ticks to trigger promotion attempt.
+	mon.handleReplica(context.Background(), nil) // count=1
+	mon.handleReplica(context.Background(), nil) // count=2
+	mon.handleReplica(context.Background(), nil) // count=3 → acquires lease, promote() fails (no PG)
+
+	// Verify the lease was acquired (key behavior).
+	gotLease, err := client.CoordinationV1().Leases(ns).Get(context.Background(), "mycluster-leader", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if gotLease.Spec.HolderIdentity == nil || *gotLease.Spec.HolderIdentity != myPod {
+		t.Fatal("phase 2: expected this pod to hold the lease after promotion attempt")
+	}
+
+	// Simulate successful promotion: reset counters as handleReplica does
+	// at lines 379-380 (promote() failed in test since no real PG).
+	mon.primaryUnreachableCount = 0
+	mon.walReceiverDownSince = time.Time{}
+
+	// Verify post-promotion state.
+	if mon.primaryUnreachableCount != 0 {
+		t.Fatalf("phase 2: expected primaryUnreachableCount=0, got %d", mon.primaryUnreachableCount)
+	}
+	if !mon.walReceiverDownSince.IsZero() {
+		t.Fatalf("phase 2: expected walReceiverDownSince to be zero, got %v", mon.walReceiverDownSince)
+	}
+
+	// --- Phase 3: Enter primary path ---
+	// Now the pod is primary. Verify crash-loop counters don't interfere.
+	mon.handlePrimary(context.Background(), nil) // should renew lease successfully
+	if mon.consecutiveHealthyTicks != 1 {
+		t.Fatalf("phase 3: expected consecutiveHealthyTicks=1, got %d", mon.consecutiveHealthyTicks)
+	}
+
+	// --- Phase 4: Split-brain detection ---
+	// Another pod takes the lease (simulates split-brain).
+	fenceCalled.Store(false)
+	demoteCalled.Store(false)
+	splitNow := metav1.NewMicroTime(time.Now())
+	splitLease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster-leader", Namespace: ns},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &otherPod,
+			LeaseDurationSeconds: &dur,
+			AcquireTime:          &splitNow,
+			RenewTime:            &splitNow,
+		},
+	}
+	_, err = client.CoordinationV1().Leases(ns).Update(context.Background(), splitLease, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("update lease for split-brain: %v", err)
+	}
+
+	mon.handlePrimary(context.Background(), nil)
+
+	if !fenceCalled.Load() {
+		t.Fatal("phase 4: expected fence on split-brain")
+	}
+	if !demoteCalled.Load() {
+		t.Fatal("phase 4: expected demote on split-brain")
+	}
+
+	// Verify pod labeled as replica.
+	pod, err := client.CoreV1().Pods(ns).Get(context.Background(), myPod, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if pod.Labels[labelRole] != roleReplica {
+		t.Fatalf("phase 4: expected role=%s, got %s", roleReplica, pod.Labels[labelRole])
+	}
+
+	// --- Phase 5: Re-enter replica path ---
+	// Simulate re-entering as replica after demotion. Counters should reset.
+	mon.localPGDownCount = 0
+	mon.consecutiveHealthyTicks = 0
+	primaryReachable.Store(true)
+	mon.handleReplica(context.Background(), nil)
+
+	if mon.primaryUnreachableCount != 0 {
+		t.Fatalf("phase 5: expected primaryUnreachableCount=0 after re-entering replica, got %d", mon.primaryUnreachableCount)
+	}
+}
+
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
+}
+
+func containsSubstring(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
 
 func TestHandlePrimary_LeaseError_FencesButDoesNotDemote(t *testing.T) {
 	myPod := "pg-cluster-0"

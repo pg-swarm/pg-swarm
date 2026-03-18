@@ -231,29 +231,30 @@ func (m *Monitor) doDemote(ctx context.Context) {
 	}
 }
 
-// demotePrimary uses K8s exec to convert the local PG instance to a standby.
-// It creates standby.signal, sets primary_conninfo pointing at the RW service,
-// and stops PG. K8s will restart the container and PG comes up as a standby.
+// execStandbyConversion uses K8s exec to convert the local PG instance to a
+// standby. It creates standby.signal, sets primary_conninfo pointing at the RW
+// service (which follows pg-swarm.io/role=primary), and stops PG so K8s
+// restarts it as a standby.
 //
-// Using the RW service (which selects pg-swarm.io/role=primary) instead of a
-// specific pod hostname means the standby always streams from whoever is the
-// current primary, even after subsequent failovers.
-func (m *Monitor) demotePrimary(ctx context.Context) error {
+// Used by both demotePrimary (split-brain recovery) and rewindOrReinit
+// (timeline divergence recovery) — the shell steps are identical.
+//
+// Passwords are read from the container's REPLICATION_PASSWORD env var (set in
+// the StatefulSet manifest), avoiding shell injection via Go-interpolated values.
+func (m *Monitor) execStandbyConversion(ctx context.Context, successMsg string) error {
 	if m.cfg.RestConfig == nil {
 		return fmt.Errorf("rest.Config not set — cannot exec into container")
 	}
 
-	// Point primary_conninfo at the RW service — it follows the primary label.
 	rwSvc := fmt.Sprintf("%s-rw", m.cfg.ClusterName)
 	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, m.cfg.Namespace)
 
 	pgdata := "/var/lib/postgresql/data/pgdata"
-	// Passwords are read from container env vars (REPLICATION_PASSWORD) set in
-	// the StatefulSet manifest, avoiding shell injection via interpolated values.
 	script := fmt.Sprintf(`set -e
 PGDATA="%s"
 touch "$PGDATA/standby.signal"
 sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
+sed -i '/^default_transaction_read_only/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
 echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
 pg_ctl -D "$PGDATA" stop -m fast`,
 		pgdata, primaryHost, m.cfg.PodName)
@@ -280,15 +281,20 @@ pg_ctl -D "$PGDATA" stop -m fast`,
 		Stdout: &stdout,
 		Stderr: &stderr,
 	}); err != nil {
-		return fmt.Errorf("exec demote script: %w (stderr: %s)", err, stderr.String())
+		return fmt.Errorf("exec standby conversion: %w (stdout: %s, stderr: %s)", err, stdout.String(), stderr.String())
 	}
 
 	log.Info().
 		Str("pod", m.cfg.PodName).
 		Str("primary_host", primaryHost).
-		Msg("demotion completed — PG will restart as standby")
+		Msg(successMsg)
 
 	return nil
+}
+
+// demotePrimary uses K8s exec to convert the local PG instance to a standby.
+func (m *Monitor) demotePrimary(ctx context.Context) error {
+	return m.execStandbyConversion(ctx, "demotion completed — PG will restart as standby")
 }
 
 // isPrimaryReachable checks whether the primary is reachable via a fast
@@ -383,7 +389,7 @@ func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 //
 // If the replica's timeline doesn't match the primary's (fatal divergence),
 // we skip the grace period and trigger recovery immediately.
-func (m *Monitor) checkWalReceiver(ctx context.Context, conn *pgx.Conn) {
+func (m *Monitor) checkWalReceiver(ctx context.Context, conn pgfence.PGExecer) {
 	var active bool
 	err := conn.QueryRow(ctx,
 		"SELECT EXISTS(SELECT 1 FROM pg_stat_wal_receiver WHERE status = 'streaming')").Scan(&active)
@@ -460,7 +466,7 @@ func (m *Monitor) checkWalReceiver(ctx context.Context, conn *pgx.Conn) {
 // primary's. After a promotion, the new primary moves to timeline N+1 while
 // other replicas are still on timeline N. PG logs "requested timeline X is
 // not a child of this server's history" and will never recover on its own.
-func (m *Monitor) hasTimelineDivergence(ctx context.Context, conn *pgx.Conn) bool {
+func (m *Monitor) hasTimelineDivergence(ctx context.Context, conn pgfence.PGExecer) bool {
 	// Get our current timeline from pg_control_checkpoint().
 	var localTimeline int64
 	err := conn.QueryRow(ctx,
@@ -528,63 +534,9 @@ func (m *Monitor) doRewind(ctx context.Context) {
 // rewindOrReinit sets up standby.signal and primary_conninfo, then stops PG.
 // The wrapper loop in the main container detects the exit and calls
 // pg_swarm_recover() which handles the actual pg_rewind / re-basebackup
-// before restarting PG. This avoids a race between the exec script and the
-// wrapper both trying to modify PGDATA concurrently.
+// before restarting PG.
 func (m *Monitor) rewindOrReinit(ctx context.Context) error {
-	if m.cfg.RestConfig == nil {
-		return fmt.Errorf("rest.Config not set — cannot exec into container")
-	}
-
-	rwSvc := fmt.Sprintf("%s-rw", m.cfg.ClusterName)
-	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, m.cfg.Namespace)
-
-	pgdata := "/var/lib/postgresql/data/pgdata"
-
-	// Set standby.signal and primary_conninfo so the wrapper's pg_swarm_recover
-	// can detect timeline divergence and run pg_rewind. Then stop PG so the
-	// wrapper loop wakes up and handles recovery.
-	//
-	// Passwords are read from container env vars (REPLICATION_PASSWORD) set in
-	// the StatefulSet manifest, avoiding shell injection via interpolated values.
-	script := fmt.Sprintf(`set -e
-PGDATA="%s"
-touch "$PGDATA/standby.signal"
-sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
-echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
-pg_ctl -D "$PGDATA" stop -m fast`,
-		pgdata, primaryHost, m.cfg.PodName)
-
-	req := m.client.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(m.cfg.PodName).
-		Namespace(m.cfg.Namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: "postgres",
-			Command:   []string{"bash", "-c", script},
-			Stdout:    true,
-			Stderr:    true,
-		}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(m.cfg.RestConfig, "POST", req.URL())
-	if err != nil {
-		return fmt.Errorf("create SPDY executor: %w", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}); err != nil {
-		return fmt.Errorf("exec rewind script: %w (stdout: %s, stderr: %s)", err, stdout.String(), stderr.String())
-	}
-
-	log.Info().
-		Str("pod", m.cfg.PodName).
-		Str("primary_host", primaryHost).
-		Msg("PG stopped for recovery — wrapper will handle pg_rewind and restart")
-
-	return nil
+	return m.execStandbyConversion(ctx, "PG stopped for recovery — wrapper will handle pg_rewind and restart")
 }
 
 // promote calls pg_promote() on the local PostgreSQL instance.
