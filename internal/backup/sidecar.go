@@ -108,9 +108,11 @@ type Sidecar struct {
 	api      *APIServer
 	sched    *Scheduler
 	ret      *RetentionWorker
-	reporter *Reporter
-	notifier *Notifier
-	cancel   context.CancelFunc
+	reporter   *Reporter
+	notifier   *Notifier
+	cancel     context.CancelFunc
+	roleCtx    context.Context
+	roleCancel context.CancelFunc
 }
 
 // New creates a new Sidecar.
@@ -158,24 +160,16 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	return nil
 }
 
-// detectRole queries the local PostgreSQL to determine if it's primary or replica.
+// detectRole queries the local PostgreSQL to determine if it's primary or
+// replica, retrying for up to 60s. Use this only at sidecar startup when PG
+// may still be coming up. For periodic checks use checkRole instead.
 func (s *Sidecar) detectRole(ctx context.Context) (Role, error) {
-	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=postgres sslmode=disable",
-		s.cfg.PGHost, s.cfg.PGPort, s.cfg.PGUser, s.cfg.PGPassword)
-
-	// Retry connecting for up to 60s (PG may still be starting)
-	var db *sql.DB
+	var role Role
 	var err error
 	for i := 0; i < 30; i++ {
-		db, err = sql.Open("pgx", connStr)
+		role, err = s.checkRole(ctx)
 		if err == nil {
-			err = db.PingContext(ctx)
-		}
-		if err == nil {
-			break
-		}
-		if db != nil {
-			db.Close()
+			return role, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -183,10 +177,25 @@ func (s *Sidecar) detectRole(ctx context.Context) (Role, error) {
 		case <-time.After(2 * time.Second):
 		}
 	}
+	return RoleUnknown, fmt.Errorf("connect to pg after 30 retries: %w", err)
+}
+
+// checkRole makes a single connection attempt to determine the PG role.
+// Returns an error if PG is not reachable — callers should skip the tick
+// rather than retrying in a loop.
+func (s *Sidecar) checkRole(ctx context.Context) (Role, error) {
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=postgres sslmode=disable",
+		s.cfg.PGHost, s.cfg.PGPort, s.cfg.PGUser, s.cfg.PGPassword)
+
+	db, err := sql.Open("pgx", connStr)
 	if err != nil {
-		return RoleUnknown, fmt.Errorf("connect to pg: %w", err)
+		return RoleUnknown, fmt.Errorf("open: %w", err)
 	}
 	defer db.Close()
+
+	if err := db.PingContext(ctx); err != nil {
+		return RoleUnknown, fmt.Errorf("ping: %w", err)
+	}
 
 	var inRecovery bool
 	if err := db.QueryRowContext(ctx, "SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {
@@ -199,12 +208,14 @@ func (s *Sidecar) detectRole(ctx context.Context) (Role, error) {
 }
 
 // activateRole starts the responsibilities for the given role.
+// Each activation gets its own child context, cancelled in deactivate().
 func (s *Sidecar) activateRole(ctx context.Context, role Role) error {
+	s.roleCtx, s.roleCancel = context.WithCancel(ctx)
 	switch role {
 	case RolePrimary:
-		return s.activatePrimary(ctx)
+		return s.activatePrimary(s.roleCtx)
 	case RoleReplica:
-		return s.activateReplica(ctx)
+		return s.activateReplica(s.roleCtx)
 	default:
 		return fmt.Errorf("cannot activate unknown role")
 	}
@@ -295,7 +306,7 @@ func (s *Sidecar) watchRoleChanges(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			newRole, err := s.detectRole(ctx)
+			newRole, err := s.checkRole(ctx)
 			if err != nil {
 				log.Warn().Err(err).Msg("role check failed")
 				continue
@@ -320,6 +331,11 @@ func (s *Sidecar) watchRoleChanges(ctx context.Context) {
 
 // deactivate stops current role's responsibilities.
 func (s *Sidecar) deactivate() {
+	// Cancel the role-scoped context first so WAL watcher goroutines exit.
+	if s.roleCancel != nil {
+		s.roleCancel()
+		s.roleCancel = nil
+	}
 	if s.sched != nil {
 		s.sched.Stop()
 		s.sched = nil
@@ -332,6 +348,10 @@ func (s *Sidecar) deactivate() {
 		s.ret = nil
 	}
 	if s.meta != nil {
+		remoteMeta := s.destPrefix() + "backups.db"
+		if err := uploadFile(context.Background(), s.dest, s.meta.Path(), remoteMeta); err != nil {
+			log.Warn().Err(err).Msg("failed to upload metadata before deactivation")
+		}
 		s.meta.Close()
 		s.meta = nil
 	}

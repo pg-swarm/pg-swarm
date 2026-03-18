@@ -158,7 +158,7 @@ t=1  Failover sidecar starts
      ├── Read config from env: CLUSTER_NAME, POD_NAME, POD_NAMESPACE, PRIMARY_HOST
      ├── Initialize K8s client (in-cluster config)
      │
-     ├── Enter tick loop (every HEALTH_CHECK_INTERVAL seconds, default 1s):
+     ├── Enter tick loop (every HEALTH_CHECK_INTERVAL seconds, default 5s):
      │
      │   Tick 1 (t≈2):
      │   ├── Connect to local PG (localhost:5432)
@@ -184,7 +184,7 @@ t=1  Failover sidecar starts
      │   │   │   └── Patch pod label: pg-swarm.io/role = "primary"
      │   │   │       (RW service now routes traffic to this pod)
      │   │   │
-     │   │   └── Continue ticking every 1s to renew lease
+     │   │   └── Continue ticking every 5s to renew lease
 ```
 
 ### Phase 5: Backup Sidecar (`backup`) — ONLY IF `Backups` Configured
@@ -259,7 +259,7 @@ STEADY STATE — Primary pod fully operational:
      └── Streaming replication to connected replicas
 
   Failover sidecar (if Failover.Enabled)
-     └── Every 1s: renew leader Lease in K8s API, patch label role=primary
+     └── Every 5s: renew leader Lease in K8s API, patch label role=primary
 
   Backup sidecar (if Backups configured)
      ├── WatchWALStaging: every 1s, pick up WAL from /wal-staging/
@@ -378,12 +378,12 @@ t=1  Failover sidecar starts
      │   │   │   (confirms operator's initial label)
      │   │   │
      │   │   ├── Check WAL receiver status:
-     │   │   │   └── Query: SELECT status FROM pg_stat_wal_receiver
-     │   │   │       └── "streaming" → healthy, replication active
+     │   │   │   └── Query: SELECT EXISTS(... FROM pg_stat_wal_receiver WHERE status = 'streaming')
+     │   │   │       └── true → healthy, replication active
      │   │   │
      │   │   ├── Fast-path reachability check:
-     │   │   │   └── TCP connect to PRIMARY_HOST:5432 + pg_isready
-     │   │   │       └── Succeeds in <1s → primary is alive, skip lease check
+     │   │   │   └── Full pgx auth connection to PRIMARY_HOST:5432 (1s timeout)
+     │   │   │       └── Succeeds → primary is alive, skip lease check
      │   │   │
      │   │   └── Continue ticking (monitoring for primary failure)
 ```
@@ -476,7 +476,7 @@ PRIMARY POD (ordinal 0):
   │  └── Probes: pg_isready every 5-10s                          │
   ├──────────────────────────────────────────────────────────────┤
   │  failover sidecar  (only if Failover.Enabled)                │
-  │  └── Every 1s: renew Lease, patch label role=primary         │
+  │  └── Every 5s: renew Lease, patch label role=primary         │
   ├──────────────────────────────────────────────────────────────┤
   │  backup sidecar  (only if Backups configured)                │
   │  ├── WatchWALStaging: /wal-staging/ → compress → upload → rm │
@@ -500,7 +500,7 @@ REPLICA POD (ordinal 1):
   │  └── Probes: pg_isready every 5-10s                          │
   ├──────────────────────────────────────────────────────────────┤
   │  failover sidecar  (only if Failover.Enabled)                │
-  │  ├── Every 1s: check primary reachability (fast-path TCP)    │
+  │  ├── Every 5s: check primary reachability (fast-path pgx)    │
   │  ├── Label: role=replica                                     │
   │  └── If primary unreachable 3+ ticks → check lease → promote │
   ├──────────────────────────────────────────────────────────────┤
@@ -555,14 +555,14 @@ t≈3   REPLICA'S FAILOVER SIDECAR detects primary failure:
       ├── Tick: query local PG → pg_is_in_recovery() = TRUE (still replica)
       │
       ├── REPLICA path:
-      │   ├── Fast-path check: TCP connect to PRIMARY_HOST:5432
+      │   ├── Fast-path check: pgx auth connect to PRIMARY_HOST:5432 (1s timeout)
       │   │   └── FAIL (primary unreachable)
       │   ├── primaryUnreachableCount = 1
       │
-      ├── Tick: fast-path check → FAIL
+      ├── Tick: fast-path pgx check → FAIL
       │   primaryUnreachableCount = 2
       │
-      ├── Tick: fast-path check → FAIL
+      ├── Tick: fast-path pgx check → FAIL
       │   primaryUnreachableCount = 3  (≥ threshold)
       │
       │   NOW CHECK LEADER LEASE:
@@ -578,8 +578,8 @@ t≈3   REPLICA'S FAILOVER SIDECAR detects primary failure:
       │   │
       │   ├── PROMOTE POSTGRESQL:
       │   │   ├── Connect to local PG
-      │   │   ├── Execute: SELECT pg_promote(true, 60)
-      │   │   │   (true = wait for promotion, 60s timeout)
+      │   │   ├── Execute: SELECT pg_promote()
+      │   │   │   (defaults: wait=true, timeout=60s)
       │   │   ├── PG exits recovery mode
       │   │   ├── PG advances to timeline N+1
       │   │   └── PG starts accepting writes
