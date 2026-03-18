@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -141,6 +142,7 @@ func buildBackupCredentialSecret(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1
 			}
 		}
 	case "gcs":
+		log.Trace().Str("Backup Credentials Content", dest.Gcs.ServiceAccountJson).Msg("Building GCS backup credential secret")
 		if dest.Gcs != nil && dest.Gcs.ServiceAccountJson != "" {
 			data["service-account-json"] = dest.Gcs.ServiceAccountJson
 		}
@@ -265,17 +267,11 @@ func backupSidecarEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.Backup
 		)
 	case "gcs":
 		if dest.Gcs != nil {
-			credsSecret := backupCredentialSecretName(cfg.ClusterName, ruleShort)
+			//credsSecret := backupCredentialSecretName(cfg.ClusterName, ruleShort)
 			vars = append(vars,
 				corev1.EnvVar{Name: "GCS_BUCKET", Value: dest.Gcs.Bucket},
 				corev1.EnvVar{Name: "GCS_PREFIX", Value: dest.Gcs.PathPrefix},
-				corev1.EnvVar{Name: "GOOGLE_APPLICATION_CREDENTIALS_JSON", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: credsSecret},
-						Key:                  "service-account-json",
-						Optional:             boolPtr(true),
-					},
-				}},
+				corev1.EnvVar{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/etc/gcp/service-account.json"},
 			)
 		}
 	case "sftp":
@@ -311,7 +307,7 @@ func buildBackupSidecar(cfg *pgswarmv1.ClusterConfig, secretName, satelliteID st
 	image := backupImageForRule(backup)
 	env := backupSidecarEnvVars(cfg, backup, secretName, satelliteID)
 
-	return corev1.Container{
+	c := corev1.Container{
 		Name:            "backup",
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
@@ -324,6 +320,16 @@ func buildBackupSidecar(cfg *pgswarmv1.ClusterConfig, secretName, satelliteID st
 			{Name: "wal-restore", MountPath: "/wal-restore"},
 		},
 	}
+
+	if backup.Destination != nil && backup.Destination.Type == "gcs" {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "gcp-creds",
+			MountPath: "/etc/gcp",
+			ReadOnly:  true,
+		})
+	}
+
+	return c
 }
 
 // ensureBackupRBAC creates or updates the backup RBAC resources (ServiceAccount, Role, RoleBinding).

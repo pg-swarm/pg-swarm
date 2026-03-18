@@ -156,6 +156,9 @@ export default function Profiles() {
   const [viewing, setViewing] = useState(null);
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
+  const [cascadeTarget, setCascadeTarget] = useState(null);
+  const [cascadeClusters, setCascadeClusters] = useState([]);
+  const [cascadeLoading, setCascadeLoading] = useState(false);
   // Track attached backup profiles per profile: { profileId: [rule, ...] }
   const [attachedRules, setAttachedRules] = useState({});
 
@@ -259,10 +262,49 @@ export default function Profiles() {
     }
   }
 
-  async function remove(id) {
+  async function remove(profile) {
+    if (profile.locked) {
+      // Locked profile — need cascade preview
+      setCascadeLoading(true);
+      setCascadeTarget(profile);
+      try {
+        const items = await api.cascadePreview(profile.id);
+        setCascadeClusters(items);
+      } catch (e) {
+        toast('Failed to preview cascade: ' + e.message, true);
+        setCascadeTarget(null);
+      } finally {
+        setCascadeLoading(false);
+      }
+      return;
+    }
+    // Unlocked profile — simple delete but still check for clusters
     try {
-      await api.deleteProfile(id);
+      const items = await api.cascadePreview(profile.id);
+      if (items.length > 0) {
+        setCascadeTarget(profile);
+        setCascadeClusters(items);
+        return;
+      }
+      await api.deleteProfile(profile.id);
       toast('Profile deleted');
+      refresh();
+    } catch (e) {
+      toast('Delete failed: ' + e.message, true);
+    }
+  }
+
+  async function confirmCascadeDelete() {
+    if (!cascadeTarget) return;
+    try {
+      if (cascadeClusters.length > 0 || cascadeTarget.locked) {
+        await api.cascadeDeleteProfile(cascadeTarget.id);
+      } else {
+        await api.deleteProfile(cascadeTarget.id);
+      }
+      toast('Profile deleted');
+      setCascadeTarget(null);
+      setCascadeClusters([]);
       refresh();
     } catch (e) {
       toast('Delete failed: ' + e.message, true);
@@ -362,13 +404,61 @@ export default function Profiles() {
                     ? <button className="btn btn-sm" onClick={() => startView(p)}>View</button>
                     : <button className="btn btn-sm" onClick={() => startEdit(p)}>Edit</button>}
                   <button className="btn btn-sm" onClick={() => { setCloneTarget(p.id); setCloneName(p.name + '-copy'); }}>Clone</button>
-                  {!p.locked && <button className="btn btn-sm btn-reject" onClick={() => remove(p.id)}>Delete</button>}
+                  <button className="btn btn-sm btn-reject" onClick={() => remove(p)}>Delete</button>
                 </span>
               </div>
             </div>
           );
         })}
       </div>
+
+      {cascadeTarget && (
+        <div className="modal-overlay" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Delete Profile: {cascadeTarget.name}</h3>
+              <button className="btn-icon" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>&times;</button>
+            </div>
+            <div className="modal-body">
+              {cascadeLoading ? (
+                <p>Loading...</p>
+              ) : cascadeClusters.length > 0 ? (
+                <>
+                  <p style={{ marginBottom: 8 }}>
+                    This will <strong>cascade-delete</strong> the following {cascadeClusters.length} cluster{cascadeClusters.length !== 1 ? 's' : ''}, their deployment rules, and the profile:
+                  </p>
+                  <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Cluster</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Namespace</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Satellite</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cascadeClusters.map(cc => (
+                        <tr key={cc.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                          <td style={{ padding: '4px 8px' }}><code>{cc.name}</code></td>
+                          <td style={{ padding: '4px 8px' }}><code>{cc.namespace || 'default'}</code></td>
+                          <td style={{ padding: '4px 8px' }}>{cc.satellite || 'unknown'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              ) : (
+                <p>No clusters are linked to this profile. Delete it?</p>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button className="btn" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>Cancel</button>
+              <button className="btn btn-reject" onClick={confirmCascadeDelete} disabled={cascadeLoading}>
+                {cascadeClusters.length > 0 ? 'Delete All' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

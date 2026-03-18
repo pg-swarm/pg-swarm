@@ -7,7 +7,8 @@ INSERT INTO backup_profiles (id, name, description, config) VALUES (
     'Base backup every minute with WAL archiving for rapid development and testing',
     '{
         "physical": {
-            "base_schedule": "* * * * *",
+            "base_schedule": "* */1 * * *",
+            "incremental_schedule": "*/5 * * * *",
             "wal_archive_enabled": true,
             "archive_timeout_seconds": 30
         },
@@ -17,6 +18,7 @@ INSERT INTO backup_profiles (id, name, description, config) VALUES (
         },
         "retention": {
             "base_backup_count": 2,
+            "incremental_backup_count": 5,
             "wal_retention_days": 1
         }
     }'
@@ -30,6 +32,7 @@ INSERT INTO backup_profiles (id, name, description, config) VALUES (
     '{
         "physical": {
             "base_schedule": "0 * * * *",
+            "incremental_schedule": "*/15 * * * *",
             "wal_archive_enabled": true,
             "archive_timeout_seconds": 60
         },
@@ -39,6 +42,7 @@ INSERT INTO backup_profiles (id, name, description, config) VALUES (
         },
         "retention": {
             "base_backup_count": 24,
+            "incremental_backup_count": 3,
             "wal_retention_days": 3
         }
     }'

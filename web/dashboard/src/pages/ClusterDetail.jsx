@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import MiniHeader from '../components/MiniHeader';
 import { api, parseSpec, timeAgo } from '../api';
 import {
@@ -13,7 +13,7 @@ import {
   ArrowUpRight, Pause, Play, HardDrive, BarChart3,
   Table2, SearchCode, ArrowLeft, X, Info, AlertTriangle,
   AlertCircle, Flame, Database, Activity, ChevronDown, ChevronRight,
-  Archive, RotateCcw, CheckCircle, Clock, XCircle, Loader,
+  Archive, RotateCcw, CheckCircle, Clock, XCircle, Loader, Trash2,
 } from 'lucide-react';
 
 const SEV_ICONS = { info: Info, warning: AlertTriangle, error: AlertCircle, critical: Flame };
@@ -33,6 +33,7 @@ const STATUS_ICON = {
 
 export default function ClusterDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [clusters, setClusters] = useState([]);
   const [satellites, setSatellites] = useState([]);
   const [health, setHealth] = useState([]);
@@ -44,6 +45,7 @@ export default function ClusterDetail() {
   const [detailInstId, setDetailInstId] = useState(null);
   const [switchoverTarget, setSwitchoverTarget] = useState(null);
   const [activeTab, setActiveTab] = useState('instances');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -129,6 +131,17 @@ export default function ClusterDetail() {
     }
   }
 
+  async function deleteCluster() {
+    setBusy(true);
+    try {
+      await api.deleteCluster(cluster.id);
+      navigate('/clusters');
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+      setBusy(false);
+    }
+  }
+
   function requestSwitchover(targetPod) {
     const currentPrimary = instances.find(i => i.role === 'primary');
     setSwitchoverTarget({ clusterId: cluster.id, targetPod, currentPrimary: currentPrimary?.pod_name });
@@ -170,10 +183,14 @@ export default function ClusterDetail() {
           {h && <span className={'cd-state-badge cd-state-' + h.state}>{h.state}</span>}
           {(!h || h.state !== cluster.state) && <span className={'cd-state-badge cd-state-' + cluster.state}>{cluster.state}</span>}
           {cluster.paused && <span className="cd-state-badge cd-state-paused">paused</span>}
-          <div style={{ marginLeft: 'auto' }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
             <button onClick={togglePause} disabled={busy} className={'cd-pause-btn' + (cluster.paused ? ' cd-pause-resume' : '')}>
               {cluster.paused ? <Play size={12} /> : <Pause size={12} />}
               {busy ? '...' : (cluster.paused ? 'Resume' : 'Pause')}
+            </button>
+            <button onClick={() => setShowDeleteConfirm(true)} disabled={busy} className="cd-pause-btn" style={{ color: 'var(--red)' }}>
+              <Trash2 size={12} />
+              Delete
             </button>
           </div>
         </div>
@@ -517,6 +534,35 @@ export default function ClusterDetail() {
           onConfirm={confirmSwitchover}
           onCancel={() => setSwitchoverTarget(null)}
         />
+      )}
+
+      {/* Delete confirmation modal */}
+      {showDeleteConfirm && (
+        <div className="confirm-overlay" onClick={() => setShowDeleteConfirm(false)}>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+            <div className="confirm-header" style={{ borderBottom: '1px solid var(--border)' }}>
+              <h3><Trash2 size={18} style={{ color: 'var(--red)' }} /> Delete Cluster</h3>
+              <button className="modal-close" onClick={() => setShowDeleteConfirm(false)}><X size={18} /></button>
+            </div>
+            <div className="confirm-body">
+              <p>Are you sure you want to delete <strong>{cluster.name}</strong>?</p>
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+                Namespace: <code>{cluster.namespace || 'default'}</code>
+                {' '}&middot;{' '}
+                Satellite: <code>{sat ? sat.hostname : 'unknown'}</code>
+              </p>
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+                This will remove the cluster configuration and notify the satellite to tear down all resources (StatefulSet, services, secrets, PVCs).
+              </p>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-sm" onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
+              <button className="btn-sm btn-danger" onClick={deleteCluster} disabled={busy}>
+                {busy ? 'Deleting...' : 'Delete Cluster'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

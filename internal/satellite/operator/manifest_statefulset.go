@@ -33,7 +33,6 @@ func archiveEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.Archive != nil && cfg.Archive.Mode != ""
 }
 
-
 // walStorageEnabled returns true if a separate WAL storage volume is configured.
 func walStorageEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.WalStorage != nil && cfg.WalStorage.Size != ""
@@ -167,6 +166,36 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			},
 		)
+
+		// Mount GCP credentials for backup sidecar if using GCS
+		if cfg.Backups[0].Destination != nil && cfg.Backups[0].Destination.Type == "gcs" {
+			ruleShort := ruleShortID(cfg.Backups[0].BackupProfileId)
+			sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
+				Name: "gcp-creds",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: backupCredentialSecretName(cfg.ClusterName, ruleShort),
+						Items: []corev1.KeyToPath{
+							{Key: "service-account-json", Path: "service-account.json"},
+						},
+					},
+				},
+			})
+		}
+	}
+
+	// Mount custom archive credentials as a volume
+	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" && cfg.Archive.CredentialsSecret != nil {
+		optional := true
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "archive-creds",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cfg.Archive.CredentialsSecret.Name,
+					Optional:   &optional,
+				},
+			},
+		})
 	}
 
 	return sts
@@ -576,6 +605,33 @@ while true; do
     # Check and fix timeline divergence before starting PG
     pg_swarm_recover
 
+    # Check if a forced re-basebackup was requested by the sidecar (e.g. WAL gap)
+    MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+    if [ -f "$MARKER" ] && [ "$ORDINAL" != "0" ]; then
+        echo "pg-swarm: forced re-basebackup requested (e.g. WAL gap)"
+        find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+        echo "pg-swarm: waiting for primary to re-basebackup..."
+        BASEBACKUP_OK=false
+        for i in $(seq 1 60); do
+            if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
+                if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                    -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+                    cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                    rm -f "$MARKER"
+                    BASEBACKUP_OK=true
+                    break
+                fi
+            fi
+            sleep 5
+        done
+        if [ "$BASEBACKUP_OK" = "false" ]; then
+            echo "pg-swarm: re-basebackup failed — retrying next iteration"
+            sleep 5
+            continue
+        fi
+    fi
+
     # Guard: if PGDATA has files but no PG_VERSION, it is corrupt (e.g. a
     # previous pg_basebackup failed partway through). Clean up and either
     # re-basebackup (replicas) or let docker-entrypoint.sh initdb (primary).
@@ -662,16 +718,25 @@ done
 			{Name: "data", MountPath: "/var/lib/postgresql/data"},
 			{Name: "config", MountPath: "/etc/pg-config", ReadOnly: true},
 		},
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"pg_isready", "-U", "postgres"},
+				},
+			},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+			FailureThreshold: 60,
+		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				Exec: &corev1.ExecAction{
 					Command: []string{"pg_isready", "-U", "postgres"},
 				},
 			},
-			InitialDelaySeconds: 30,
-			PeriodSeconds:       10,
-			TimeoutSeconds:      5,
-			FailureThreshold:    6,
+			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+			FailureThreshold: 6,
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -724,7 +789,8 @@ done
 		)
 	}
 
-	// Custom archive mode with credentials: mount secret as env vars
+	// Custom archive mode with credentials: mount secret as env vars AND as a volume
+	// (so file-based credentials like GOOGLE_APPLICATION_CREDENTIALS can be used).
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" && cfg.Archive.CredentialsSecret != nil {
 		optional := true
 		c.EnvFrom = append(c.EnvFrom, corev1.EnvFromSource{
@@ -734,6 +800,15 @@ done
 				},
 				Optional: &optional,
 			},
+		})
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "archive-creds",
+			MountPath: "/etc/archive-creds",
+			ReadOnly:  true,
+		})
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+			Value: "/etc/archive-creds/service-account.json", // Expected key in the secret
 		})
 	}
 

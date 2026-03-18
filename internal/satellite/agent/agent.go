@@ -186,6 +186,12 @@ func (a *Agent) Run(ctx context.Context) error {
 		log.Trace().Msg("health monitor started")
 	}
 
+	// 8. Start orphan checker
+	if a.operator != nil {
+		go a.operator.StartOrphanChecker(ctx)
+		log.Trace().Msg("orphan checker started")
+	}
+
 	log.Info().Str("satellite_id", a.identity.SatelliteID).Msg("satellite agent started")
 
 	return a.connector.Run(ctx)
