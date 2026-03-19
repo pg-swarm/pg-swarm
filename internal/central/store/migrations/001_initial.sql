@@ -11,6 +11,7 @@ CREATE TABLE edge_groups (
 
 CREATE TABLE satellites (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name TEXT NOT NULL UNIQUE DEFAULT '',
     hostname TEXT NOT NULL,
     k8s_cluster_name TEXT NOT NULL,
     region TEXT NOT NULL DEFAULT '',

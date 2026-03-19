@@ -31,9 +31,10 @@ INSERT INTO cluster_profiles (id, name, description, config) VALUES (
             }
         ],
         "pg_params": {
-            "log_statement": "all",
+            "log_statement": "ddl",
+            "log_min_messages": "error",
             "log_min_duration_statement": "0",
-            "shared_buffers": "128MB",
+            "shared_buffers": "512MB",
             "work_mem": "8MB"
         },
         "hba_rules": [

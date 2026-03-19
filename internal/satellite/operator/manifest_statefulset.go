@@ -353,6 +353,8 @@ if [ -f "$PGDATA/PG_VERSION" ]; then
                     --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$POSTGRES_PASSWORD dbname=postgres" \
                     --progress 2>&1; then
                     echo "pg_rewind succeeded"
+                    if [ -f "$PGDATA/backup_label" ]; then echo "Removing stale backup_label after pg_rewind"; rm -f "$PGDATA/backup_label"; fi
+                    if [ -f "$PGDATA/tablespace_map" ]; then echo "Removing stale tablespace_map after pg_rewind"; rm -f "$PGDATA/tablespace_map"; fi
                 else
                     echo "pg_rewind failed — falling back to full re-basebackup"
                     # Mark outside PGDATA (on PVC root) so it survives cleanup
@@ -569,6 +571,8 @@ pg_swarm_recover() {
         --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$POSTGRES_PASSWORD dbname=postgres" \
         --progress 2>&1; then
         echo "pg-swarm: pg_rewind succeeded"
+        if [ -f "$PGDATA/backup_label" ]; then echo "pg-swarm: removing stale backup_label after pg_rewind"; rm -f "$PGDATA/backup_label"; fi
+        if [ -f "$PGDATA/tablespace_map" ]; then echo "pg-swarm: removing stale tablespace_map after pg_rewind"; rm -f "$PGDATA/tablespace_map"; fi
     else
         echo "pg-swarm: pg_rewind failed — checking if primary is available for re-basebackup"
         if ! pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then
@@ -607,7 +611,7 @@ while true; do
 
     # Check if a forced re-basebackup was requested by the sidecar (e.g. WAL gap)
     MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
-    if [ -f "$MARKER" ] && [ "$ORDINAL" != "0" ]; then
+    if [ -f "$MARKER" ]; then
         echo "pg-swarm: forced re-basebackup requested (e.g. WAL gap)"
         find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
         echo "pg-swarm: waiting for primary to re-basebackup..."
@@ -866,6 +870,9 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 					},
 				},
 			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "data", MountPath: "/var/lib/postgresql/data"},
 		},
 	}
 }

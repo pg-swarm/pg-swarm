@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog/log"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -89,6 +92,10 @@ type Monitor struct {
 	// been reachable as primary after a crash-loop. We require stableUpThreshold
 	// consecutive healthy ticks before resuming lease renewal.
 	consecutiveHealthyTicks int
+
+	// wasConnected is set true after the first successful postgres connection.
+	// Used to distinguish "PGDATA deleted at runtime" from "postgres hasn't started yet".
+	wasConnected bool
 }
 
 // NewMonitor creates a new failover monitor.
@@ -126,12 +133,37 @@ func (m *Monitor) Run(ctx context.Context) error {
 	}
 }
 
+const (
+	pgVersionFile           = "/var/lib/postgresql/data/pgdata/PG_VERSION"
+	pgSwarmNeedsBasebackup  = "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+)
+
 // tick runs a single iteration of the monitoring loop: connects to PG,
 // determines whether the local instance is primary or replica, and delegates
 // to the appropriate handler.
 func (m *Monitor) tick(ctx context.Context) {
+	// Proactively detect PGDATA deletion. If we were connected before (postgres
+	// was healthy) but PG_VERSION is now absent, PGDATA was wiped at runtime.
+	// Write the re-basebackup marker and stop renewing the lease so a replica
+	// promotes immediately. The wrapper will re-basebackup from the new primary.
+	if m.wasConnected {
+		if _, err := os.Stat(pgVersionFile); os.IsNotExist(err) {
+			log.Error().Msg("PGDATA is gone while postgres was running — yielding lease for failover; pod will re-basebackup from new primary")
+			_ = os.WriteFile(pgSwarmNeedsBasebackup, nil, 0644)
+			m.wasConnected = false // prevent repeated log spam
+			return
+		}
+	}
+
 	conn, err := pgx.Connect(ctx, m.cfg.PGConnString)
 	if err != nil {
+		// 57P03 = cannot_connect_now: PG is still replaying WAL after startup.
+		// This is expected on replicas and should not be treated as a failure.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "57P03" {
+			log.Debug().Msg("postgres is starting up, waiting for WAL replay to complete")
+			return
+		}
 		m.localPGDownCount++
 		m.consecutiveHealthyTicks = 0
 		log.Warn().Err(err).Int("down_count", m.localPGDownCount).Msg("cannot connect to local PostgreSQL")
@@ -147,6 +179,7 @@ func (m *Monitor) tick(ctx context.Context) {
 		return
 	}
 
+	m.wasConnected = true
 	if !isInRecovery {
 		m.handlePrimary(ctx, conn)
 	} else {
@@ -257,6 +290,8 @@ touch "$PGDATA/standby.signal"
 sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
 sed -i '/^default_transaction_read_only/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
 echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
+if [ -f "$PGDATA/backup_label" ]; then echo "pg-swarm: removing stale backup_label"; rm -f "$PGDATA/backup_label"; fi
+if [ -f "$PGDATA/tablespace_map" ]; then echo "pg-swarm: removing stale tablespace_map"; rm -f "$PGDATA/tablespace_map"; fi
 pg_ctl -D "$PGDATA" stop -m fast`,
 		pgdata, primaryHost, m.cfg.PodName)
 

@@ -25,8 +25,8 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 
 // Column lists used across queries (keep in sync with scanners below).
 const (
-	satCols = `id, hostname, k8s_cluster_name, region, labels, storage_classes, tier_mappings, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
-	cfgCols = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at`
+	satCols  = `id, name, hostname, k8s_cluster_name, region, labels, storage_classes, tier_mappings, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
+	cfgCols  = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at`
 	ruleCols = `id, name, profile_id, label_selector, namespace, cluster_name, created_at, updated_at`
 )
 
@@ -38,6 +38,7 @@ func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 	var tmJSON []byte
 	err := row.Scan(
 		&sat.ID,
+		&sat.Name,
 		&sat.Hostname,
 		&sat.K8sClusterName,
 		&sat.Region,
@@ -213,11 +214,14 @@ func (s *PostgresStore) CreateSatellite(ctx context.Context, sat *models.Satelli
 	if sat.State == "" {
 		sat.State = models.SatelliteStatePending
 	}
+	if sat.Name == "" {
+		sat.Name = sat.K8sClusterName // Default to k8s cluster name initially
+	}
 
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO satellites (id, hostname, k8s_cluster_name, region, labels, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		sat.ID, sat.Hostname, sat.K8sClusterName, sat.Region, labelsJSON, sat.State,
+		`INSERT INTO satellites (id, name, hostname, k8s_cluster_name, region, labels, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		sat.ID, sat.Name, sat.Hostname, sat.K8sClusterName, sat.Region, labelsJSON, sat.State,
 		sat.AuthTokenHash, sat.TempTokenHash, sat.LastHeartbeat,
 		sat.CreatedAt, sat.UpdatedAt,
 	)
@@ -272,6 +276,19 @@ func (s *PostgresStore) UpdateSatelliteState(ctx context.Context, id uuid.UUID, 
 		`UPDATE satellites SET state = $1, updated_at = NOW() WHERE id = $2`, state, id)
 	if err != nil {
 		return fmt.Errorf("update satellite state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("satellite %s not found", id)
+	}
+	return nil
+}
+
+// UpdateSatelliteName sets the unique name of a satellite.
+func (s *PostgresStore) UpdateSatelliteName(ctx context.Context, id uuid.UUID, name string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE satellites SET name = $1, updated_at = NOW() WHERE id = $2`, name, id)
+	if err != nil {
+		return fmt.Errorf("update satellite name: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("satellite %s not found", id)
@@ -682,8 +699,11 @@ func (s *PostgresStore) CreateProfile(ctx context.Context, p *models.ClusterProf
 // GetProfile returns a cluster profile by its ID.
 func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.ClusterProfile, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, name, description, config, locked, created_at, updated_at
-		 FROM cluster_profiles WHERE id = $1`, id)
+		`SELECT p.id, p.name, p.description, p.config, 
+		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR 
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked, 
+		        p.created_at, p.updated_at
+		 FROM cluster_profiles p WHERE p.id = $1`, id)
 	p, err := scanProfile(row)
 	if err != nil {
 		return nil, fmt.Errorf("get profile %s: %w", id, err)
@@ -694,8 +714,11 @@ func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.C
 // ListProfiles returns all cluster profiles ordered by creation time.
 func (s *PostgresStore) ListProfiles(ctx context.Context) ([]*models.ClusterProfile, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, description, config, locked, created_at, updated_at
-		 FROM cluster_profiles ORDER BY created_at DESC`)
+		`SELECT p.id, p.name, p.description, p.config, 
+		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR 
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked, 
+		        p.created_at, p.updated_at
+		 FROM cluster_profiles p ORDER BY p.created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list profiles: %w", err)
 	}
@@ -719,16 +742,27 @@ func (s *PostgresStore) UpdateProfile(ctx context.Context, p *models.ClusterProf
 	}
 	p.UpdatedAt = time.Now()
 
+	var inUse bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM deployment_rules WHERE profile_id = $1) OR 
+		       EXISTS(SELECT 1 FROM cluster_configs WHERE profile_id = $1)`, p.ID).Scan(&inUse)
+	if err != nil {
+		return fmt.Errorf("check profile lock state: %w", err)
+	}
+	if inUse {
+		return fmt.Errorf("profile %s is currently in use and cannot be edited", p.ID)
+	}
+
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, updated_at = $4
-		 WHERE id = $5 AND locked = FALSE`,
+		 WHERE id = $5`,
 		p.Name, p.Description, p.Config, p.UpdatedAt, p.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("profile %s not found or is locked", p.ID)
+		return fmt.Errorf("profile %s not found", p.ID)
 	}
 	return nil
 }
@@ -743,13 +777,24 @@ func (s *PostgresStore) TouchProfile(ctx context.Context, id uuid.UUID) error {
 
 // DeleteProfile removes a cluster profile if it is not locked.
 func (s *PostgresStore) DeleteProfile(ctx context.Context, id uuid.UUID) error {
+	var inUse bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM deployment_rules WHERE profile_id = $1) OR 
+		       EXISTS(SELECT 1 FROM cluster_configs WHERE profile_id = $1)`, id).Scan(&inUse)
+	if err != nil {
+		return fmt.Errorf("check profile lock state: %w", err)
+	}
+	if inUse {
+		return fmt.Errorf("profile %s is currently in use and cannot be deleted", id)
+	}
+
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM cluster_profiles WHERE id = $1 AND locked = FALSE`, id)
+		`DELETE FROM cluster_profiles WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("profile %s not found or is locked", id)
+		return fmt.Errorf("profile %s not found", id)
 	}
 	return nil
 }
@@ -761,19 +806,6 @@ func (s *PostgresStore) ForceDeleteProfile(ctx context.Context, id uuid.UUID) er
 		`DELETE FROM cluster_profiles WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("force delete profile: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("profile %s not found", id)
-	}
-	return nil
-}
-
-// LockProfile marks a profile as locked, preventing further edits or deletion.
-func (s *PostgresStore) LockProfile(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE cluster_profiles SET locked = TRUE, updated_at = NOW() WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("lock profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("profile %s not found", id)

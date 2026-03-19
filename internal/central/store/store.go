@@ -17,6 +17,7 @@ type Store interface {
 	GetSatelliteByToken(ctx context.Context, tokenHash string) (*models.Satellite, error)
 	ListSatellites(ctx context.Context) ([]*models.Satellite, error)
 	UpdateSatelliteState(ctx context.Context, id uuid.UUID, state models.SatelliteState) error
+	UpdateSatelliteName(ctx context.Context, id uuid.UUID, name string) error
 	SetSatelliteAuthToken(ctx context.Context, id uuid.UUID, tokenHash string) error
 	UpdateSatelliteHeartbeat(ctx context.Context, id uuid.UUID) error
 	UpdateSatelliteLabels(ctx context.Context, id uuid.UUID, labels map[string]string) error
@@ -50,7 +51,6 @@ type Store interface {
 	UpdateProfile(ctx context.Context, profile *models.ClusterProfile) error
 	DeleteProfile(ctx context.Context, id uuid.UUID) error
 	ForceDeleteProfile(ctx context.Context, id uuid.UUID) error
-	LockProfile(ctx context.Context, id uuid.UUID) error
 	TouchProfile(ctx context.Context, id uuid.UUID) error
 
 	// Deployment Rules

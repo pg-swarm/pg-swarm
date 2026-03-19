@@ -363,7 +363,7 @@ export default function Profiles() {
                 <h3>{p.name}</h3>
                 <div className="badges">
                   {p.locked
-                    ? <span className="badge badge-amber"><span className="dot" />Locked</span>
+                    ? <span className="badge badge-amber" title="Profile is in use by active clusters or deployment rules"><span className="dot" />In Use (Locked)</span>
                     : <span className="badge badge-green"><span className="dot" />Editable</span>}
                   {clusterCount > 0 && (
                     <span className="badge badge-gray">{clusterCount} cluster{clusterCount !== 1 ? 's' : ''}</span>
