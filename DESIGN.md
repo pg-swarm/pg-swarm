@@ -89,7 +89,8 @@ pg-swarm/
 ├── cmd/
 │   ├── central/main.go              # Central control plane entrypoint
 │   ├── satellite/main.go            # Satellite agent entrypoint
-│   └── failover-sidecar/main.go     # Failover sidecar entrypoint
+│   ├── failover-sidecar/main.go     # Failover sidecar entrypoint
+│   └── backup-sidecar/main.go       # Backup sidecar entrypoint
 ├── api/
 │   ├── proto/v1/                    # Protobuf definitions
 │   │   ├── common.proto             # Shared enums (SatelliteState, ClusterState, InstanceRole)
@@ -132,6 +133,19 @@ pg-swarm/
 │   ├── failover/
 │   │   ├── monitor.go               # Sidecar: Lease election, fencing, demotion
 │   │   └── monitor_test.go          # Split-brain + lease tests
+│   ├── backup/                      # Backup sidecar package
+│   │   ├── sidecar.go              # Lifecycle, role detection, role switching
+│   │   ├── api.go                  # HTTP server (WAL push/fetch, backup/complete, /healthz)
+│   │   ├── metadata.go             # SQLite operations (backups.db)
+│   │   ├── physical.go             # pg_basebackup (base + incremental)
+│   │   ├── logical.go              # pg_dump / pg_dumpall
+│   │   ├── scheduler.go            # Cron scheduler for replica backups
+│   │   ├── notifier.go             # Replica→primary notification
+│   │   ├── reporter.go             # ConfigMap status writer
+│   │   ├── retention.go            # Retention policy enforcement
+│   │   └── destination/            # Storage backend interface + implementations
+│   │       ├── destination.go      # Interface: Upload, Download, List, Delete, Exists
+│   │       ├── s3.go, gcs.go, sftp.go, local.go
 │   └── shared/
 │       ├── models/models.go         # Shared Go types (ClusterState, etc.)
 │       └── pgfence/
@@ -562,11 +576,11 @@ From a `ClusterConfig`, the operator builds these Kubernetes resources:
 1. `pg-init` — init container for first-boot setup
 2. `postgres` — main PG container with liveness/readiness probes
 3. `failover` — sidecar for leader election and automatic failover (when enabled)
+4. `backup` — sidecar for WAL archiving, base/incremental/logical backups (when backup profiles attached)
 
 **Volume management:**
 - `data` VCT — primary PGDATA volume
 - `wal` VCT — separate WAL volume (optional, from `wal_storage` config)
-- `wal-archive` VCT — WAL archive volume (optional, for PVC archive mode)
 - `config` volume — mounted ConfigMap for postgresql.conf/pg_hba.conf
 - `secret` volume — mounted Secret for passwords
 
@@ -737,9 +751,94 @@ The failover sidecar requires these Kubernetes permissions:
 
 ---
 
-## 9. Profiles and Deployment Rules
+## 9. Backup Sidecar
 
-### 9.1 Profiles
+The backup sidecar (`cmd/backup-sidecar`) runs as a container alongside each postgres pod when backup profiles are attached. It detects its role (primary or replica) via `pg_is_in_recovery()` and activates the corresponding responsibilities.
+
+### 9.1 Split-Responsibility Model
+
+```
+┌─────────────────────────────────────────────────────┐
+│              StatefulSet Pod (Primary)               │
+│  ┌──────────┐  ┌──────────────┐  ┌───────────────┐ │
+│  │ postgres │  │   failover   │  │    backup      │ │
+│  │          │  │   sidecar    │  │    sidecar     │ │
+│  │ archive_ │  │              │  │                │ │
+│  │ command──┼──┼──────────────┼──►  WAL push API  │ │
+│  │          │  │              │  │  backups.db     │ │
+│  │          │  │              │  │  retention      │ │
+│  └──────────┘  └──────────────┘  └───────────────┘ │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│              StatefulSet Pod (Replica)                │
+│  ┌──────────┐  ┌──────────────┐  ┌───────────────┐ │
+│  │ postgres │  │   failover   │  │    backup      │ │
+│  │          │  │   sidecar    │  │    sidecar     │ │
+│  │          │  │              │  │                │ │
+│  │          │  │              │  │ pg_basebackup  │ │
+│  │          │  │              │  │ pg_dump        │ │
+│  │          │  │              │  │ scheduler      │ │
+│  └──────────┘  └──────────────┘  └───────────────┘ │
+└─────────────────────────────────────────────────────┘
+```
+
+### 9.2 WAL Archiving
+
+PostgreSQL's `archive_command` and `restore_command` point to the local backup sidecar via HTTP:
+
+```
+archive_command = 'curl -sf -X POST -F file=@%p -F name=%f http://localhost:8442/wal/push'
+restore_command = 'curl -sf -o %p http://localhost:8442/wal/fetch?name=%f'
+```
+
+The sidecar compresses WAL segments (gzip) and uploads them to the configured destination. The `archive_command` blocks until the upload is durable — PG only marks WAL as archived after curl returns 0.
+
+### 9.3 Metadata DB
+
+Each satellite-cluster combination has a SQLite database (`backups.db`) stored at the destination root. The primary sidecar is the single writer. It tracks backup sets, individual backups, WAL segments, and statistics. Chain reconstruction queries enable PITR: find the base backup, chain incrementals, identify the WAL range.
+
+### 9.4 Cross-Pod Communication
+
+The replica sidecar notifies the primary after each backup via:
+```
+POST http://{cluster}-0.{cluster}-headless.{namespace}.svc.cluster.local:8442/backup/complete
+```
+
+If the primary is unreachable (failover in progress), the replica retries with backoff. Backup files are already uploaded — only metadata recording is deferred.
+
+### 9.5 Role Change Handling
+
+The sidecar polls `pg_is_in_recovery()` every 10 seconds. On role change (failover):
+1. Stop current responsibilities (scheduler or WAL handler)
+2. Switch to new role's responsibilities
+3. New primary: take over WAL archiving + metadata
+4. New replica: start backup scheduler
+
+### 9.6 Environment Variables
+
+| Variable | Source | Purpose |
+|----------|--------|---------|
+| `SATELLITE_ID` | Config | Destination folder naming |
+| `CLUSTER_NAME` | Config | Destination folder + headless service DNS |
+| `POD_NAME` | Downward API | Pod identity |
+| `NAMESPACE` | Config | K8s namespace for services |
+| `DEST_TYPE` | Config | Destination type (s3, gcs, sftp, local) |
+| `BASE_SCHEDULE` | Config | Cron expression for base backups |
+| `INCR_SCHEDULE` | Config | Cron expression for incremental backups |
+| `LOGICAL_SCHEDULE` | Config | Cron expression for logical backups |
+| `RETENTION_SETS` | Config | Number of backup sets to retain |
+| `RETENTION_DAYS` | Config | Days of WAL retention |
+| `PGUSER` | Config | PostgreSQL user (backup_user) |
+| `PGPASSWORD` | Secret | PostgreSQL password |
+
+Destination-specific variables (S3_BUCKET, GCS_BUCKET, SFTP_HOST, etc.) are also injected.
+
+---
+
+## 10. Profiles and Deployment Rules
+
+### 10.1 Profiles
 
 A **Profile** is a reusable cluster template stored as JSONB. It defines the full cluster specification: PostgreSQL version, storage, resources, PG parameters, HBA rules, failover settings, WAL archiving, and application databases.
 
@@ -747,7 +846,7 @@ A **Profile** is a reusable cluster template stored as JSONB. It defines the ful
 - Profiles can be **locked** after first deployment (immutable — prevents accidental changes to running clusters)
 - The profile editor in the dashboard has 6 tabs: General, Volumes, Resources, PostgreSQL (extensive parameter catalog with 8 categories), HBA Rules, and Databases
 
-### 9.2 Deployment Rules
+### 10.2 Deployment Rules
 
 A **Deployment Rule** maps a profile (WHAT) to satellites (WHERE):
 
@@ -761,17 +860,17 @@ Rule: "prod-analytics-db"
 
 When a rule is created or a new satellite matches the label selector, the central automatically creates a `cluster_config` for each matching satellite and pushes it via the gRPC stream.
 
-### 9.3 PostgreSQL Version Registry
+### 10.3 PostgreSQL Version Registry
 
 The admin page manages a registry of available PostgreSQL versions (version, variant: alpine/debian, image tag). The default version is pre-selected when creating new profiles.
 
 ---
 
-## 10. Web Dashboard
+## 11. Web Dashboard
 
 The dashboard is a React 19 SPA built with Vite and JSX (not TypeScript). It is embedded into the Central binary via Go's `embed.FS` and served alongside the REST API.
 
-### 10.1 Pages
+### 11.1 Pages
 
 | Page | Purpose |
 |------|---------|
@@ -783,14 +882,14 @@ The dashboard is a React 19 SPA built with Vite and JSX (not TypeScript). It is 
 | **Events** | Event log with severity icons (info, warning, error, critical) |
 | **Admin** | PostgreSQL version registry management |
 
-### 10.2 Architecture
+### 11.2 Architecture
 
 - **DataContext**: Global provider fetching all data every 10 seconds via REST API
 - **ToastContext**: Toast notification system (auto-dismiss after 3.5s)
 - **Badge component**: Semantic state badges with lucide-react icons (CheckCircle2, Loader, AlertCircle, Pause, XCircle, etc.)
 - **Layout**: Sticky topbar with gradient, icon-enhanced navigation, satellite status pill
 
-### 10.3 Cluster Detail Modal
+### 11.3 Cluster Detail Modal
 
 The instance detail modal provides deep visibility into each PG pod:
 
@@ -801,7 +900,7 @@ The instance detail modal provides deep visibility into each PG pod:
 - **Table Stats**: Live/dead tuples, seq/idx scans, inserts/updates/deletes, last vacuum
 - **Slow Queries**: Query text, database, calls, avg/max/total time, rows (from `pg_stat_statements`)
 
-### 10.4 Status Indicators
+### 11.4 Status Indicators
 
 - **PG Status Dot**: Green (ready with uptime tooltip) or blinking red (not ready)
 - **Lag Dot**: Green (< 1 min), amber (1-3 min), blinking red (> 3 min)
@@ -809,7 +908,7 @@ The instance detail modal provides deep visibility into each PG pod:
 
 ---
 
-## 11. Configuration
+## 12. Configuration
 
 ### 11.1 Central
 
@@ -834,7 +933,7 @@ See Section 8.6.
 
 ---
 
-## 12. Build & Test
+## 13. Build & Test
 
 ```bash
 make build             # Compile all binaries (runs proto + dashboard first)
@@ -848,7 +947,7 @@ make dashboard         # Build React dashboard
 
 ---
 
-## 13. Key Design Decisions
+## 14. Key Design Decisions
 
 ### Why gRPC bidirectional streaming?
 
@@ -885,6 +984,19 @@ Without this, a cluster's config state stays stuck at `creating` forever after c
 ### Why buffered send channels (cap=64)?
 
 Decouples the REST API response time from satellite stream throughput. A slow satellite won't block the admin's API call. If the buffer fills (satellite severely behind), the push fails gracefully rather than blocking.
+
+### Why a backup sidecar instead of CronJobs?
+
+The original CronJob-based model had fundamental issues: WAL and backups could land on different storage systems, WAL continuity was never validated, and ~500 lines of bash were embedded in Go strings. The sidecar model provides:
+
+- **WAL integrity** — the sidecar owns both WAL archiving and backup metadata, ensuring consistency
+- **Role-aware** — detects primary/replica via `pg_is_in_recovery()` and switches responsibilities on failover
+- **localhost access** — `archive_command` POSTs to `localhost:8442`, no network hop for WAL. `pg_basebackup -h localhost` for backups, no service DNS resolution
+- **Pure Go** — all metadata operations in Go with embedded SQLite (`modernc.org/sqlite`), no shell scripts
+- **Automatic initial backup** — sidecar triggers a base backup on startup if no existing backup set exists
+- **Zero additional K8s resources** — no CronJobs, no backup PVCs, no Jobs to manage
+
+The StatefulSet rolling restart concern from adding a sidecar is acceptable because backup profiles are typically attached once at cluster creation time, not dynamically toggled.
 
 ### Why JSX instead of TypeScript?
 

@@ -42,12 +42,13 @@ Provide a single pane of glass for managing hundreds of PostgreSQL HA clusters a
           | Operator      |    | Operator      |    | Operator      |
           | Health Monitor|    | Health Monitor|    | Health Monitor|
           |               |    |               |    |               |
+          | Per PG Pod:    |    |               |    |               |
           | +--+ +--+ +--+|   |               |    |               |
-          | |FS| |FS| |FS||   |               |    |               |
+          | |FS| |BS| |PG||   |               |    |               |
           | +--+ +--+ +--+|   |               |    |               |
           |  K8s Edge      |   |  K8s Edge     |    |  K8s Edge     |
           +----------------+   +---------------+    +---------------+
-                                  FS = Failover Sidecar (per pod)
+                 FS = Failover Sidecar, BS = Backup Sidecar, PG = postgres
 ```
 
 ---
@@ -101,6 +102,19 @@ Runs as a container alongside each postgres pod in the StatefulSet. Operates aut
   - **Replica path**: Label pod, monitor WAL receiver health, check primary reachability (TCP connect to RW service), detect timeline divergence, trigger `pg_rewind` / re-basebackup for recovery, attempt promotion if leader lease expires
 - **`internal/shared/pgfence/`** — SQL fencing (`ALTER SYSTEM SET default_transaction_read_only`, reload, kill client connections) and unfencing. Idempotent and shared between sidecar and switchover handler.
 
+### Backup Sidecar (`cmd/backup-sidecar`)
+
+Runs as a container alongside each postgres pod when backup profiles are attached. Detects its role (primary vs replica) via `pg_is_in_recovery()` and activates the appropriate responsibilities.
+
+- **`internal/backup/`** — Backup sidecar package:
+  - **Primary**: WAL archiving (HTTP API on :8442 receives WAL from `archive_command`), SQLite metadata DB (`backups.db`), retention
+  - **Replica**: Scheduled base backups (`pg_basebackup`), incremental backups (`pg_basebackup --incremental`), logical backups (`pg_dump`/`pg_dumpall`)
+  - **Role switching**: On failover detection, automatically switches responsibilities
+  - **Destinations**: S3, GCS, SFTP, local filesystem via `internal/backup/destination/` interface
+  - **Status reporting**: Writes to `{cluster}-backup-status` ConfigMap for the health monitor
+
+> For detailed backup architecture, see [BACKUP.md](BACKUP.md).
+
 ### Profiles and Deployment Rules
 
 - **Profiles** — Reusable cluster templates (PG version, storage, resources, PG params, HBA rules, failover, WAL archiving, databases). Can be cloned and locked (immutable after deployment).
@@ -142,6 +156,7 @@ React 19 SPA built with Vite and JSX, embedded into the central binary via Go's 
 - Automatic replica recovery after failover: timeline divergence detection, `pg_rewind` with `pg_basebackup` fallback
 - Planned switchover (central-initiated): checkpoint, fence, lease transfer, promote
 - Rich health monitoring: replication lag, connections, disk, WAL stats, per-database cache hit ratios, table stats, slow queries (`pg_stat_statements`)
+- Backup sidecar: role-aware (primary/replica), WAL archiving via HTTP, scheduled base/incremental/logical backups, SQLite metadata, retention
 - Profiles and deployment rules for fleet-scale management
 - Web dashboard with 7 pages and 10-second auto-refresh
 - Docker Compose for local development
@@ -193,7 +208,7 @@ make k8s-status                # Show all pgswarm-system resources
 
 | Target | Description |
 |--------|-------------|
-| `make build` | Compile central, satellite, failover-sidecar binaries |
+| `make build` | Compile central, satellite, failover-sidecar, backup-sidecar binaries |
 | `make test` | Run unit tests |
 | `make test-integration` | Integration tests against minikube (requires real cluster) |
 | `make manifests` | Regenerate operator golden-file test YAMLs |
@@ -261,7 +276,8 @@ pg-swarm/
 ├── cmd/
 │   ├── central/main.go              # Central control plane
 │   ├── satellite/main.go            # Satellite agent
-│   └── failover-sidecar/main.go     # Failover sidecar
+│   ├── failover-sidecar/main.go     # Failover sidecar
+│   └── backup-sidecar/main.go       # Backup sidecar
 ├── api/
 │   ├── proto/v1/                    # Protobuf definitions
 │   └── gen/v1/                      # Generated Go code
@@ -277,6 +293,8 @@ pg-swarm/
 │   │   ├── operator/                # K8s manifest builders + reconcile
 │   │   └── health/                  # Health monitor + switchover
 │   ├── failover/                    # Leader election, fencing, demotion, recovery
+│   ├── backup/                      # Backup sidecar (WAL archiving, backups, metadata, retention)
+│   │   └── destination/             # Storage backends (S3, GCS, SFTP, local)
 │   └── shared/
 │       ├── models/                  # Shared Go types
 │       └── pgfence/                 # SQL fencing utilities
@@ -305,10 +323,13 @@ pg-swarm/
 
 ### Backup and Recovery
 
-- **Automated base backups** — Scheduled `pg_basebackup` to object storage (S3/GCS/MinIO) or PVC, managed by the satellite operator.
-- **Continuous WAL archiving to object storage** — Extend the current PVC-based archive mode with S3-compatible backends (e.g., via `wal-g` or `pgBackRest` integration).
-- **Point-in-time recovery (PITR)** — Central-initiated PITR to a specific timestamp: provision a new cluster from backup + WAL replay.
-- **Backup catalog and retention** — Central tracks all backups across the fleet with configurable retention policies (daily, weekly, monthly).
+- ~~**Automated base backups**~~ Done — backup sidecar runs scheduled `pg_basebackup` on the replica
+- ~~**Continuous WAL archiving**~~ Done — sidecar receives WAL via `archive_command` and uploads to S3/GCS/SFTP/local
+- ~~**Incremental backups**~~ Done — `pg_basebackup --incremental` with manifest chaining and standby WAL fallback
+- ~~**Logical backups**~~ Done — scheduled `pg_dump`/`pg_dumpall` with gzip compression
+- ~~**Backup metadata**~~ Done — SQLite database (`backups.db`) at each destination with chain reconstruction queries
+- ~~**Retention**~~ Done — configurable retention by set count, automatic cascade delete of files + metadata
+- **Point-in-time recovery (PITR)** — Central-initiated PITR to a specific timestamp: provision a new cluster from backup + WAL replay (restore Job exists, full PITR flow to be completed).
 - **Cross-cluster restore** — Restore a backup from one satellite's cluster onto a different satellite.
 - **Backup verification** — Periodic restore-to-temp and `pg_checksums` validation to ensure backups are usable.
 

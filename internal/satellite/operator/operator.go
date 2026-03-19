@@ -23,6 +23,7 @@ type Operator struct {
 	k8sClusterName       string // used in config-storage ConfigMap naming
 	defaultNamespace     string // fallback when ClusterConfig.Namespace is empty
 	defaultFailoverImage string // fallback failover sidecar image
+	satelliteID          string // satellite identity for backup sidecar
 	mu                   sync.RWMutex
 	desired              map[string]*pgswarmv1.ClusterConfig // key: "ns/cluster"
 	applied              map[string]int64                    // key -> last applied config version
@@ -31,18 +32,24 @@ type Operator struct {
 // New creates a new Operator backed by the given Kubernetes client.
 // k8sClusterName is used for config-storage ConfigMap naming (pg-swarm-<k8s>-<pg>).
 // defaultNamespace is used when a ClusterConfig has no namespace set.
-func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string) *Operator {
+// satelliteID is passed to the backup sidecar for destination folder naming.
+func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string, satelliteID ...string) *Operator {
 	if defaultNamespace == "" {
 		defaultNamespace = "default"
 	}
 	if defaultFailoverImage == "" {
 		defaultFailoverImage = "ghcr.io/pg-swarm/pg-swarm-failover:latest"
 	}
+	satID := ""
+	if len(satelliteID) > 0 {
+		satID = satelliteID[0]
+	}
 	return &Operator{
 		client:               client,
 		k8sClusterName:       k8sClusterName,
 		defaultNamespace:     defaultNamespace,
 		defaultFailoverImage: defaultFailoverImage,
+		satelliteID:          satID,
 		desired:              make(map[string]*pgswarmv1.ClusterConfig),
 		applied:              make(map[string]int64),
 	}
@@ -74,6 +81,13 @@ func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
 	log.Trace().Str("cluster", cfg.ClusterName).Int64("version", cfg.ConfigVersion).Msg("HandleConfig entry")
 	o.resolveNamespace(cfg)
 	key := clusterKey(cfg.Namespace, cfg.ClusterName)
+
+	// Remove any tombstone from a previous deletion — cluster is being re-configured
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := deleteTombstone(ctx, o.client, cfg.Namespace, cfg.ClusterName); err != nil {
+		log.Warn().Err(err).Str("cluster", key).Msg("failed to delete tombstone on re-config")
+	}
 
 	o.mu.RLock()
 	appliedVersion := o.applied[key]
@@ -185,12 +199,20 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 		log.Warn().Err(err).Str("resource", "configmap/"+cfgStoreName).Msg("delete failed")
 	}
 
-	// Delete backup CronJobs and credential Secret
+	// Delete backup resources (credential secrets, RBAC, status ConfigMap)
 	log.Trace().Msg("HandleDelete cleaning up backup resources")
-	cleanupBackupCronJobs(ctx, o.client, ns, name)
+	cleanupBackupResources(ctx, o.client, ns, name)
 
 	// Remove finalizers from PVCs and delete them
 	removeFinalizedPVCs(ctx, o.client, ns, name)
+
+	// Create tombstone marker so orphan detection knows this was intentional
+	o.mu.RLock()
+	ver := o.applied[key]
+	o.mu.RUnlock()
+	if err := createTombstone(ctx, o.client, ns, name, ver); err != nil {
+		log.Warn().Err(err).Str("cluster", key).Msg("failed to create tombstone")
+	}
 
 	o.mu.Lock()
 	delete(o.desired, key)
@@ -199,6 +221,13 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 
 	log.Info().Str("cluster", key).Msg("cluster resources deleted")
 	return nil
+}
+
+// TriggerPendingBackups is a no-op in the sidecar architecture.
+// The backup sidecar automatically triggers an initial base backup on startup.
+// Retained for interface compatibility with the health monitor.
+func (o *Operator) TriggerPendingBackups(ctx context.Context, ns, clusterName string) {
+	// No-op: sidecar handles initial backup automatically
 }
 
 // ManagedCluster is a snapshot of a cluster managed by this operator.
@@ -337,9 +366,9 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		}
 	}
 
-	// 7. StatefulSet
+	// 7. StatefulSet (pass satelliteID for backup sidecar)
 	log.Trace().Msg("reconcile: ensuring statefulset")
-	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage)
+	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage, o.satelliteID)
 	if err := createOrUpdateStatefulSet(ctx, o.client, sts); err != nil {
 		return fmt.Errorf("statefulset: %w", err)
 	}
@@ -356,9 +385,18 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to label pods (will retry on next reconcile)")
 	}
 
-	// 10. Backup CronJobs
+	// When failover is disabled, no sidecar will label pods later — we must
+	// wait for pods to appear and label them ourselves.
+	if !failoverEnabled(cfg) {
+		go o.ensurePodLabels(cfg.Namespace, cfg.ClusterName, cfg.Replicas)
+	}
+
+	// 10. Backup sidecar RBAC and credential secrets
 	if backupEnabled(cfg) {
-		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup credential secrets")
+		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
+		if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
+			return fmt.Errorf("backup RBAC: %w", err)
+		}
 		for _, backup := range cfg.Backups {
 			backupSecret := buildBackupCredentialSecret(cfg, backup)
 			if backupSecret != nil {
@@ -367,16 +405,104 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 				}
 			}
 		}
-
-		log.Trace().Msg("reconcile: reconciling backup cronjobs")
-		if err := reconcileBackupCronJobs(ctx, o.client, cfg); err != nil {
-			return fmt.Errorf("backup cronjobs: %w", err)
-		}
 	} else {
 		// Cleanup backup resources if backup was detached
-		log.Trace().Msg("reconcile: cleaning up backup cronjobs (backup disabled)")
-		cleanupBackupCronJobs(ctx, o.client, cfg.Namespace, cfg.ClusterName)
+		log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")
+		cleanupBackupResources(ctx, o.client, cfg.Namespace, cfg.ClusterName)
 	}
 
 	return nil
+}
+
+// CheckOrphans scans for StatefulSets managed by pg-swarm that are not in the
+// desired map. If a tombstone exists the cluster was intentionally deleted; if
+// not, it is logged as an orphan.
+func (o *Operator) CheckOrphans(ctx context.Context) {
+	nsList, err := o.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Warn().Err(err).Msg("orphan-check: failed to list namespaces")
+		return
+	}
+
+	o.mu.RLock()
+	desired := make(map[string]struct{}, len(o.desired))
+	for k := range o.desired {
+		desired[k] = struct{}{}
+	}
+	o.mu.RUnlock()
+
+	for _, ns := range nsList.Items {
+		stsList, err := o.client.AppsV1().StatefulSets(ns.Name).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s=%s", LabelManagedBy, ManagedByValue),
+		})
+		if err != nil {
+			log.Warn().Err(err).Str("namespace", ns.Name).Msg("orphan-check: failed to list statefulsets")
+			continue
+		}
+		for _, sts := range stsList.Items {
+			clusterName := sts.Labels[LabelCluster]
+			if clusterName == "" {
+				continue
+			}
+			key := clusterKey(ns.Name, clusterName)
+			if _, ok := desired[key]; ok {
+				continue
+			}
+			tombstoned, err := hasTombstone(ctx, o.client, ns.Name, clusterName)
+			if err != nil {
+				log.Warn().Err(err).Str("cluster", key).Msg("orphan-check: failed to check tombstone")
+				continue
+			}
+			if tombstoned {
+				log.Info().Str("cluster", key).Msg("orphan-check: cluster has tombstone (intentionally deleted)")
+			} else {
+				log.Warn().Str("cluster", key).Msg("orphan-check: orphaned cluster detected (no desired config, no tombstone)")
+			}
+		}
+	}
+}
+
+// StartOrphanChecker runs CheckOrphans periodically until the context is cancelled.
+func (o *Operator) StartOrphanChecker(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			o.CheckOrphans(ctx)
+		}
+	}
+}
+
+// ensurePodLabels polls until all expected pods have a role label.
+// Used when failover is disabled and no sidecar will label them.
+func (o *Operator) ensurePodLabels(namespace, clusterName string, replicas int32) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Warn().Str("cluster", clusterName).Msg("timed out waiting to label pods")
+			return
+		case <-ticker.C:
+			if err := labelPods(ctx, o.client, namespace, clusterName); err != nil {
+				log.Trace().Err(err).Msg("ensurePodLabels: retry")
+				continue
+			}
+			// Check if all pods are labeled
+			pods, err := o.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("%s=%s,%s", LabelCluster, clusterName, LabelRole),
+			})
+			if err == nil && int32(len(pods.Items)) >= replicas {
+				log.Info().Str("cluster", clusterName).Int("labeled", len(pods.Items)).Msg("all pods labeled")
+				return
+			}
+		}
+	}
 }

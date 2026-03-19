@@ -87,7 +87,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// 2. Create operator (requires K8s client)
 	if a.k8sClient != nil {
-		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage)
+		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage, a.identity.SatelliteID)
 		log.Trace().Msg("operator created")
 	} else {
 		log.Warn().Msg("K8s client unavailable — operator disabled, configs will be logged only")
@@ -184,6 +184,12 @@ func (a *Agent) Run(ctx context.Context) error {
 		})
 		go mon.Run(ctx)
 		log.Trace().Msg("health monitor started")
+	}
+
+	// 8. Start orphan checker
+	if a.operator != nil {
+		go a.operator.StartOrphanChecker(ctx)
+		log.Trace().Msg("orphan checker started")
 	}
 
 	log.Info().Str("satellite_id", a.identity.SatelliteID).Msg("satellite agent started")

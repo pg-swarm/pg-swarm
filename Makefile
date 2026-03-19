@@ -1,5 +1,5 @@
 .SILENT:
-.PHONY: proto dashboard dashboard-dev dashboard-mock build test lint clean manifests \
+.PHONY: proto dashboard dashboard-dev dashboard-mock build test test-integration lint clean manifests \
         docker-build-central docker-build-satellite docker-build-failover docker-build-backup docker-build-all \
         docker-push-central docker-push-satellite docker-push-failover docker-push-backup docker-push-all \
         docker-compose-up docker-compose-down \
@@ -38,10 +38,11 @@ dashboard-dev: ## Run React dashboard with hot-reload (proxies API to localhost:
 dashboard-mock: ## Run React dashboard with mock data (no backend needed)
 	cd web/dashboard && npm install && MOCK=true npm run dev
 
-build: proto dashboard ## Compile central, satellite, and failover-sidecar binaries
+build: proto dashboard ## Compile central, satellite, failover-sidecar, and backup-sidecar binaries
 	go build -o bin/central ./cmd/central
 	go build -o bin/satellite ./cmd/satellite
 	go build -o bin/failover-sidecar ./cmd/failover-sidecar
+	go build -o bin/backup-sidecar ./cmd/backup-sidecar
 
 clean: ## Remove compiled binaries and generated proto code
 	rm -rf bin/ api/gen/v1/*.go
@@ -50,6 +51,9 @@ clean: ## Remove compiled binaries and generated proto code
 
 test: ## Run unit tests
 	go test ./...
+
+test-integration: ## Run integration tests against minikube (requires running cluster)
+	go test -tags integration -timeout 10m -v ./internal/satellite/operator/
 
 manifests: ## Regenerate operator manifest YAMLs in testdata/
 	go test ./internal/satellite/operator/ -run TestManifests -count=1
@@ -74,10 +78,10 @@ docker-build-failover: ## Build failover-sidecar image (multi-platform, no push)
 		-f $(DOCKERFILE_DIR)/Dockerfile.failover-sidecar \
 		-t $(DOCKER_REPO)/pg-swarm-failover:$(IMAGE_TAG) .
 
-docker-build-backup: ## Build backup CronJob image (multi-platform, no push)
+docker-build-backup: ## Build backup sidecar image (multi-platform, no push)
 	docker buildx build --platform $(PLATFORMS) \
-		-f $(DOCKERFILE_DIR)/Dockerfile.backup \
-		-t $(DOCKER_REPO)/pg-swarm-backup:$(IMAGE_TAG) .
+		-f $(DOCKERFILE_DIR)/Dockerfile.backup-sidecar \
+		-t $(DOCKER_REPO)/pg-swarm-backup-sidecar:$(IMAGE_TAG) .
 
 docker-build-all: docker-build-central docker-build-satellite docker-build-failover docker-build-backup ## Build all images (multi-platform, no push)
 
@@ -96,10 +100,10 @@ docker-push-failover: ## Build and push failover-sidecar image
 		-f $(DOCKERFILE_DIR)/Dockerfile.failover-sidecar \
 		-t $(DOCKER_REPO)/pg-swarm-failover:$(IMAGE_TAG) --push .
 
-docker-push-backup: ## Build and push backup CronJob image
+docker-push-backup: ## Build and push backup sidecar image
 	docker buildx build --platform $(PLATFORMS) \
-		-f $(DOCKERFILE_DIR)/Dockerfile.backup \
-		-t $(DOCKER_REPO)/pg-swarm-backup:$(IMAGE_TAG) --push .
+		-f $(DOCKERFILE_DIR)/Dockerfile.backup-sidecar \
+		-t $(DOCKER_REPO)/pg-swarm-backup-sidecar:$(IMAGE_TAG) --push .
 
 docker-push-all: docker-push-central docker-push-satellite docker-push-failover docker-push-backup ## Build and push all images
 
@@ -131,11 +135,11 @@ minikube-build-failover: ## Build failover-sidecar image and load into minikube
 		-f $(DOCKERFILE_DIR)/Dockerfile.failover-sidecar \
 		-t $(DOCKER_REPO)/pg-swarm-failover:$(IMAGE_TAG) --load .
 
-minikube-build-backup: ## Build backup CronJob image and load into minikube
+minikube-build-backup: ## Build backup sidecar image and load into minikube
 	eval $$(minikube docker-env) && \
 	docker buildx build --platform linux/$(MINIKUBE_ARCH) \
-		-f $(DOCKERFILE_DIR)/Dockerfile.backup \
-		-t $(DOCKER_REPO)/pg-swarm-backup:$(IMAGE_TAG) --load .
+		-f $(DOCKERFILE_DIR)/Dockerfile.backup-sidecar \
+		-t $(DOCKER_REPO)/pg-swarm-backup-sidecar:$(IMAGE_TAG) --load .
 
 minikube-build-all: minikube-build-central minikube-build-satellite minikube-build-failover minikube-build-backup ## Build all images and load into minikube
 
