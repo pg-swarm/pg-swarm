@@ -16,24 +16,28 @@ export default function Satellites() {
   const [labelKey, setLabelKey] = useState('');
   const [labelVal, setLabelVal] = useState('');
   const [pendingLabels, setPendingLabels] = useState({});
-  const [replaceConfirm, setReplaceConfirm] = useState(null); // { id, old }
+  const [replaceConfirm, setReplaceConfirm] = useState(null); // { id, name, old }
   const [tierModal, setTierModal] = useState(null); // full satellite object
   const [pendingTiers, setPendingTiers] = useState({});
   const [tierKey, setTierKey] = useState('');
   const [tierVal, setTierVal] = useState('');
+  const [approveTarget, setApproveTarget] = useState(null);
+  const [satelliteName, setSatelliteName] = useState('');
+  const [approveError, setApproveError] = useState('');
 
-  async function approve(id, replace = false) {
+  async function approve(id, name, replace = false) {
     try {
-      await api.approve(id, replace);
+      await api.approve(id, { name }, replace);
       toast(replace ? 'Satellite approved (replaced previous)' : 'Satellite approved');
       setReplaceConfirm(null);
+      setApproveTarget(null);
       refresh();
     } catch (e) {
       if (e.status === 409 && e.body?.conflicting_satellite) {
-        setReplaceConfirm({ id, old: e.body.conflicting_satellite });
+        setReplaceConfirm({ id, name, old: e.body.conflicting_satellite });
         return;
       }
-      toast('Approve failed: ' + e.message, true);
+      setApproveError(e.message);
     }
   }
 
@@ -134,6 +138,7 @@ export default function Satellites() {
       <table>
         <thead>
           <tr>
+            <th>Name</th>
             <th>Hostname</th>
             <th>K8s Cluster</th>
             <th>Region</th>
@@ -153,6 +158,7 @@ export default function Satellites() {
             );
             return (
               <tr key={s.id}>
+                <td style={{ fontWeight: 'bold' }}>{s.name || '-'}</td>
                 <td className="mono sm">{s.hostname}</td>
                 <td>{s.k8s_cluster_name}</td>
                 <td>{s.region || '-'}</td>
@@ -190,7 +196,7 @@ export default function Satellites() {
                             <AlertTriangle size={11} /> replaces existing
                           </span>
                         )}
-                        <button className="btn btn-approve" onClick={() => approve(s.id)}><Check size={13} /> Approve</button>
+                        <button className="btn btn-approve" onClick={() => { setApproveTarget(s); setSatelliteName(s.k8s_cluster_name); setApproveError(''); }}><Check size={13} /> Approve</button>
                         <button className="btn btn-reject" onClick={() => reject(s.id)}><X size={13} /> Reject</button>
                       </>
                     )}
@@ -272,6 +278,39 @@ export default function Satellites() {
         </div>
       )}
 
+      {approveTarget && (
+        <div className="confirm-overlay" onClick={() => { setApproveTarget(null); setApproveError(''); }}>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()}>
+            <div className="confirm-header">
+              <h3><Check size={18} style={{ color: 'var(--green)' }} /> Approve Satellite</h3>
+              <button className="modal-close" onClick={() => { setApproveTarget(null); setApproveError(''); }}><X size={18} /></button>
+            </div>
+            <div className="confirm-body">
+              <p>Set a unique name for this satellite:</p>
+              <input
+                className="input"
+                style={{ marginTop: 8, width: '100%' }}
+                value={satelliteName}
+                onChange={e => { setSatelliteName(e.target.value.slice(0, 16)); setApproveError(''); }}
+                placeholder="e.g. us-east-prod"
+                maxLength={16}
+                autoFocus
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                {approveError
+                  ? <span className="sm" style={{ color: 'var(--red)' }}>{approveError}</span>
+                  : <span />}
+                <span className="sm muted">{satelliteName.length}/16</span>
+              </div>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-sm" onClick={() => { setApproveTarget(null); setApproveError(''); }}>Cancel</button>
+              <button className="btn-sm btn-approve" onClick={() => approve(approveTarget.id, satelliteName)} disabled={!satelliteName.trim() || satelliteName.length > 16}>Confirm Approval</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {replaceConfirm && (
         <div className="confirm-overlay" onClick={() => setReplaceConfirm(null)}>
           <div className="confirm-modal" onClick={e => e.stopPropagation()}>
@@ -285,7 +324,7 @@ export default function Satellites() {
             </div>
             <div className="confirm-footer">
               <button className="btn-sm" onClick={() => setReplaceConfirm(null)}>Cancel</button>
-              <button className="btn-sm btn-danger" onClick={() => approve(replaceConfirm.id, true)}>Replace Satellite</button>
+              <button className="btn-sm btn-danger" onClick={() => approve(replaceConfirm.id, replaceConfirm.name, true)}>Replace Satellite</button>
             </div>
           </div>
         </div>

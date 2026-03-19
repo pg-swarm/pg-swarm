@@ -40,6 +40,7 @@ type StorageClassInfo struct {
 
 type Satellite struct {
 	ID             uuid.UUID          `json:"id" db:"id"`
+	Name           string             `json:"name" db:"name"`
 	Hostname       string             `json:"hostname" db:"hostname"`
 	K8sClusterName string             `json:"k8s_cluster_name" db:"k8s_cluster_name"`
 	Region         string             `json:"region" db:"region"`
@@ -55,18 +56,18 @@ type Satellite struct {
 }
 
 type ClusterConfig struct {
-	ID                uuid.UUID       `json:"id" db:"id"`
-	Name              string          `json:"name" db:"name"`
-	Namespace         string          `json:"namespace" db:"namespace"`
-	SatelliteID       *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
-	ProfileID         *uuid.UUID      `json:"profile_id,omitempty" db:"profile_id"`
-	DeploymentRuleID  *uuid.UUID      `json:"deployment_rule_id,omitempty" db:"deployment_rule_id"`
-	Config            json.RawMessage `json:"config" db:"config"`
-	ConfigVersion     int64           `json:"config_version" db:"config_version"`
-	State             ClusterState    `json:"state" db:"state"`
-	Paused            bool            `json:"paused" db:"paused"`
-	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
+	ID               uuid.UUID       `json:"id" db:"id"`
+	Name             string          `json:"name" db:"name"`
+	Namespace        string          `json:"namespace" db:"namespace"`
+	SatelliteID      *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
+	ProfileID        *uuid.UUID      `json:"profile_id,omitempty" db:"profile_id"`
+	DeploymentRuleID *uuid.UUID      `json:"deployment_rule_id,omitempty" db:"deployment_rule_id"`
+	Config           json.RawMessage `json:"config" db:"config"`
+	ConfigVersion    int64           `json:"config_version" db:"config_version"`
+	State            ClusterState    `json:"state" db:"state"`
+	Paused           bool            `json:"paused" db:"paused"`
+	CreatedAt        time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // DeploymentRule maps a profile to satellites matching a label selector.
@@ -85,17 +86,17 @@ type DeploymentRule struct {
 // ClusterSpec represents the desired PostgreSQL cluster specification.
 // Stored as JSON in ClusterConfig.Config and parsed via ParseSpec().
 type ClusterSpec struct {
-	Replicas  int32             `json:"replicas"`
-	Postgres  PostgresSpec      `json:"postgres"`
-	Storage    StorageSpec       `json:"storage"`
-	WalStorage *StorageSpec     `json:"wal_storage,omitempty"` // nil = WAL on data volume
-	Resources  ResourceSpec     `json:"resources"`
-	PgParams  map[string]string `json:"pg_params,omitempty"`
-	HbaRules  []string          `json:"hba_rules,omitempty"`
-	Archive   *ArchiveSpec      `json:"archive,omitempty"`   // nil = archiving disabled
-	Databases []DatabaseSpec    `json:"databases,omitempty"` // databases to create with owner users
-	Failover           *FailoverSpec     `json:"failover,omitempty"`  // nil = failover disabled
-	DeletionProtection bool               `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
+	Replicas           int32             `json:"replicas"`
+	Postgres           PostgresSpec      `json:"postgres"`
+	Storage            StorageSpec       `json:"storage"`
+	WalStorage         *StorageSpec      `json:"wal_storage,omitempty"` // nil = WAL on data volume
+	Resources          ResourceSpec      `json:"resources"`
+	PgParams           map[string]string `json:"pg_params,omitempty"`
+	HbaRules           []string          `json:"hba_rules,omitempty"`
+	Archive            *ArchiveSpec      `json:"archive,omitempty"`             // nil = archiving disabled
+	Databases          []DatabaseSpec    `json:"databases,omitempty"`           // databases to create with owner users
+	Failover           *FailoverSpec     `json:"failover,omitempty"`            // nil = failover disabled
+	DeletionProtection bool              `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
 }
 
 type PostgresSpec struct {
@@ -294,10 +295,10 @@ type BackupProfileSpec struct {
 }
 
 type PhysicalBackupSpec struct {
-	BaseSchedule          string `json:"base_schedule"`                        // cron for full backups: "0 2 * * 0"
-	IncrementalSchedule   string `json:"incremental_schedule,omitempty"`       // cron for incrementals: "0 2 * * 1-6" (PG 17+)
-	WalArchiveEnabled     bool   `json:"wal_archive_enabled"`                  // enable continuous WAL archiving
-	ArchiveTimeoutSecs    int32  `json:"archive_timeout_seconds,omitempty"`    // default 60
+	BaseSchedule        string `json:"base_schedule"`                     // cron for full backups: "0 2 * * 0"
+	IncrementalSchedule string `json:"incremental_schedule,omitempty"`    // cron for incrementals: "0 2 * * 1-6" (PG 17+)
+	WalArchiveEnabled   bool   `json:"wal_archive_enabled"`               // enable continuous WAL archiving
+	ArchiveTimeoutSecs  int32  `json:"archive_timeout_seconds,omitempty"` // default 60
 }
 
 type LogicalBackupSpec struct {
@@ -321,13 +322,13 @@ type GCSConfig struct {
 }
 
 type S3Config struct {
-	Bucket         string `json:"bucket"`
-	Region         string `json:"region"`
-	Endpoint       string `json:"endpoint,omitempty"`      // for S3-compatible (MinIO)
-	PathPrefix     string `json:"path_prefix,omitempty"`
-	AccessKeyID    string `json:"access_key_id,omitempty"`
+	Bucket          string `json:"bucket"`
+	Region          string `json:"region"`
+	Endpoint        string `json:"endpoint,omitempty"` // for S3-compatible (MinIO)
+	PathPrefix      string `json:"path_prefix,omitempty"`
+	AccessKeyID     string `json:"access_key_id,omitempty"`
 	SecretAccessKey string `json:"secret_access_key,omitempty"`
-	ForcePathStyle bool   `json:"force_path_style,omitempty"`
+	ForcePathStyle  bool   `json:"force_path_style,omitempty"`
 }
 
 type SFTPConfig struct {
@@ -446,21 +447,21 @@ func estimateCronIntervalDays(cron string) int {
 }
 
 type BackupInventory struct {
-	ID           uuid.UUID  `json:"id" db:"id"`
-	SatelliteID  uuid.UUID  `json:"satellite_id" db:"satellite_id"`
-	ClusterName  string     `json:"cluster_name" db:"cluster_name"`
+	ID              uuid.UUID  `json:"id" db:"id"`
+	SatelliteID     uuid.UUID  `json:"satellite_id" db:"satellite_id"`
+	ClusterName     string     `json:"cluster_name" db:"cluster_name"`
 	BackupProfileID uuid.UUID  `json:"backup_profile_id" db:"backup_profile_id"`
-	BackupType   string     `json:"backup_type" db:"backup_type"`   // "base", "wal", "logical"
-	Status       string     `json:"status" db:"status"`             // "running", "completed", "failed"
-	StartedAt    time.Time  `json:"started_at" db:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty" db:"completed_at"`
-	SizeBytes    int64      `json:"size_bytes" db:"size_bytes"`
-	BackupPath   string     `json:"backup_path" db:"backup_path"`
-	PgVersion    string     `json:"pg_version" db:"pg_version"`
-	WalStartLSN  string     `json:"wal_start_lsn,omitempty" db:"wal_start_lsn"`
-	WalEndLSN    string     `json:"wal_end_lsn,omitempty" db:"wal_end_lsn"`
-	ErrorMessage string     `json:"error_message,omitempty" db:"error_message"`
-	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+	BackupType      string     `json:"backup_type" db:"backup_type"` // "base", "wal", "logical"
+	Status          string     `json:"status" db:"status"`           // "running", "completed", "failed"
+	StartedAt       time.Time  `json:"started_at" db:"started_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	SizeBytes       int64      `json:"size_bytes" db:"size_bytes"`
+	BackupPath      string     `json:"backup_path" db:"backup_path"`
+	PgVersion       string     `json:"pg_version" db:"pg_version"`
+	WalStartLSN     string     `json:"wal_start_lsn,omitempty" db:"wal_start_lsn"`
+	WalEndLSN       string     `json:"wal_end_lsn,omitempty" db:"wal_end_lsn"`
+	ErrorMessage    string     `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
 }
 
 type RestoreOperation struct {

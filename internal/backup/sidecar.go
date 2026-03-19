@@ -137,6 +137,12 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.dest = destination.NewFromEnv(s.cfg.DestType)
 	log.Info().Str("dest_type", s.cfg.DestType).Msg("destination initialized")
 
+	// Start WAL restore watcher before detectRole: PostgreSQL's restore_command
+	// runs during recovery (before PG accepts connections). Without this, there
+	// is a deadlock — PG waits 30s per WAL file for the watcher to respond,
+	// and detectRole() waits for PG to accept connections.
+	go s.WatchWALRestore(ctx)
+
 	// 2. Detect role
 	role, err := s.detectRole(ctx)
 	if err != nil {
@@ -257,9 +263,6 @@ func (s *Sidecar) activatePrimary(ctx context.Context) error {
 	// Start file-based WAL staging watcher (replaces HTTP WAL push)
 	go s.WatchWALStaging(ctx)
 
-	// Start file-based WAL restore watcher (replaces HTTP WAL fetch)
-	go s.WatchWALRestore(ctx)
-
 	// Start retention worker
 	s.ret = NewRetentionWorker(s, s.cfg.RetentionSets, s.cfg.RetentionDays)
 
@@ -275,13 +278,6 @@ func (s *Sidecar) activateReplica(ctx context.Context) error {
 	// Start HTTP API (/healthz only)
 	s.api = NewAPIServer(s)
 	go s.api.Start(s.cfg.ListenAddr)
-
-	// Start file-based WAL restore watcher. Replicas need this because PG's
-	// restore_command writes to /wal-restore/.request when it needs WAL segments
-	// or timeline history files (e.g. after a failover, PG must fetch
-	// 00000002.history to follow the new timeline). Without this watcher the
-	// request times out, PG gets FATAL and crash-loops.
-	go s.WatchWALRestore(ctx)
 
 	// Start reporter
 	s.reporter = NewReporter(s.cfg.Namespace, s.cfg.ClusterName)

@@ -199,6 +199,21 @@ func (s *RESTServer) approveSatellite(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid satellite id"})
 	}
 
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+
+	// Attempt to update the name first to enforce uniqueness before approving
+	if err := s.store.UpdateSatelliteName(c.Context(), id, body.Name); err != nil {
+		if strings.Contains(err.Error(), "duplicate key value") || strings.Contains(err.Error(), "unique constraint") {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "satellite name already in use"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update satellite name"})
+	}
+
 	replace := c.Query("replace") == "true"
 
 	replacedID, authToken, err := s.registry.Approve(c.Context(), id, replace)
@@ -208,8 +223,8 @@ func (s *RESTServer) approveSatellite(c *fiber.Ctx) error {
 		if !replace {
 			if conflict, _ := s.registry.ConflictingSatellite(c.Context(), id); conflict != nil {
 				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-					"error":                  err.Error(),
-					"conflicting_satellite":  conflict,
+					"error":                 err.Error(),
+					"conflicting_satellite": conflict,
 				})
 			}
 		}
@@ -277,13 +292,6 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 	if err := s.store.CreateClusterConfig(c.Context(), &cfg); err != nil {
 		log.Error().Err(err).Msg("failed to create cluster config")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create cluster config"})
-	}
-
-	// Lock the source profile once a cluster is built from it
-	if cfg.ProfileID != nil {
-		if err := s.store.LockProfile(c.Context(), *cfg.ProfileID); err != nil {
-			log.Warn().Err(err).Str("profile_id", cfg.ProfileID.String()).Msg("failed to lock profile")
-		}
 	}
 
 	log.Info().Str("config_id", cfg.ID.String()).Str("name", cfg.Name).Msg("cluster config created")
@@ -798,11 +806,6 @@ func (s *RESTServer) createDeploymentRule(c *fiber.Ctx) error {
 	if err := s.store.CreateDeploymentRule(c.Context(), &rule); err != nil {
 		log.Error().Err(err).Msg("failed to create deployment rule")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create deployment rule"})
-	}
-
-	// Lock the profile since it's now in use by a deployment rule
-	if err := s.store.LockProfile(c.Context(), rule.ProfileID); err != nil {
-		log.Warn().Err(err).Str("profile_id", rule.ProfileID.String()).Msg("failed to lock profile")
 	}
 
 	// Fan-out: create a ClusterConfig for each satellite matching the label selector
@@ -1549,12 +1552,12 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 	resolvedImage := resolvePostgresImage(st, spec)
 
 	protoConfig := &pgswarmv1.ClusterConfig{
-		ClusterName:   cfg.Name,
-		Namespace:     cfg.Namespace,
-		Replicas:      spec.Replicas,
-		ConfigVersion: cfg.ConfigVersion,
-		ProfileName:   profileName,
-		LabelSelector: labelSelector,
+		ClusterName:        cfg.Name,
+		Namespace:          cfg.Namespace,
+		Replicas:           spec.Replicas,
+		ConfigVersion:      cfg.ConfigVersion,
+		ProfileName:        profileName,
+		LabelSelector:      labelSelector,
 		Paused:             cfg.Paused,
 		DeletionProtection: spec.DeletionProtection,
 		Postgres: &pgswarmv1.PostgresSpec{

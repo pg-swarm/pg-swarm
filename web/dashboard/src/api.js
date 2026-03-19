@@ -20,7 +20,7 @@ export const api = {
   clusters:    ()       => request('/clusters'),
   health:      ()       => request('/health'),
   events:      (n)      => request('/events?limit=' + (n || 50)),
-  approve:     (id, replace) => request('/satellites/' + id + '/approve' + (replace ? '?replace=true' : ''), { method: 'POST' }),
+  approve:     (id, body, replace) => request('/satellites/' + id + '/approve' + (replace ? '?replace=true' : ''), { method: 'POST', body: JSON.stringify(body) }),
   reject:      (id)     => request('/satellites/' + id + '/reject',  { method: 'POST' }),
   profiles:    ()       => request('/profiles'),
   createProfile: (data) => request('/profiles', { method: 'POST', body: JSON.stringify(data) }),
