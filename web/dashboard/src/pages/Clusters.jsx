@@ -396,6 +396,7 @@ export default function Clusters() {
           No clusters match "{search}"
         </div>
       )}
+
     </>
   );
 }

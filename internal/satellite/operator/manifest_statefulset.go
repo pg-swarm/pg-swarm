@@ -65,7 +65,7 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 }
 
 // buildStatefulSet creates the StatefulSet for the PostgreSQL cluster.
-func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) *appsv1.StatefulSet {
+func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string, satelliteID ...string) *appsv1.StatefulSet {
 	selLabels := selectorLabels(cfg.ClusterName)
 	allLabels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
@@ -129,11 +129,6 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalVCT(cfg))
 	}
 
-	// PVC archive mode: add wal-archive VolumeClaimTemplate
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" && cfg.Archive.ArchiveStorage != nil {
-		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalArchiveVCT(cfg))
-	}
-
 	// Failover sidecar
 	if failoverEnabled(cfg) {
 		sts.Spec.Template.Spec.Containers = append(
@@ -143,33 +138,67 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		sts.Spec.Template.Spec.ServiceAccountName = failoverServiceAccountName(cfg.ClusterName)
 	}
 
-	return sts
-}
+	// Backup sidecar
+	if backupEnabled(cfg) {
+		satID := ""
+		if len(satelliteID) > 0 {
+			satID = satelliteID[0]
+		}
+		sts.Spec.Template.Spec.Containers = append(
+			sts.Spec.Template.Spec.Containers,
+			buildBackupSidecar(cfg, secretName, satID),
+		)
+		// If failover is not enabled but backup is, we still need a service account
+		if !failoverEnabled(cfg) {
+			sts.Spec.Template.Spec.ServiceAccountName = backupServiceAccountName(cfg.ClusterName)
+		}
+	}
 
-// buildWalArchiveVCT creates the PersistentVolumeClaim template for the WAL archive volume.
-func buildWalArchiveVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
-	objMeta := metav1.ObjectMeta{
-		Name:   "wal-archive",
-		Labels: clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+	// Shared emptyDir volumes for WAL staging (archive) and WAL restore (fetch).
+	if backupEnabled(cfg) {
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes,
+			corev1.Volume{
+				Name:         "wal-staging",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+			corev1.Volume{
+				Name:         "wal-restore",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+		)
+
+		// Mount GCP credentials for backup sidecar if using GCS
+		if cfg.Backups[0].Destination != nil && cfg.Backups[0].Destination.Type == "gcs" {
+			ruleShort := ruleShortID(cfg.Backups[0].BackupProfileId)
+			sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
+				Name: "gcp-creds",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: backupCredentialSecretName(cfg.ClusterName, ruleShort),
+						Items: []corev1.KeyToPath{
+							{Key: "service-account-json", Path: "service-account.json"},
+						},
+					},
+				},
+			})
+		}
 	}
-	if cfg.DeletionProtection {
-		objMeta.Finalizers = []string{FinalizerPGSwarm}
-	}
-	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: objMeta,
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: resource.MustParse(cfg.Archive.ArchiveStorage.Size),
+
+	// Mount custom archive credentials as a volume
+	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" && cfg.Archive.CredentialsSecret != nil {
+		optional := true
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "archive-creds",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cfg.Archive.CredentialsSecret.Name,
+					Optional:   &optional,
 				},
 			},
-		},
+		})
 	}
-	if cfg.Archive.ArchiveStorage.StorageClass != "" {
-		pvc.Spec.StorageClassName = &cfg.Archive.ArchiveStorage.StorageClass
-	}
-	return pvc
+
+	return sts
 }
 
 // buildVCT creates the PersistentVolumeClaim template for the main data volume.
@@ -223,22 +252,14 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 
 	// Build archive-specific script blocks
 	var primaryArchiveBlock, replicaRestoreBlock string
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" {
-		primaryArchiveBlock = `
-    # Ensure wal-archive directory is ready
-    mkdir -p /wal-archive
-    chown postgres:postgres /wal-archive`
-	}
 
 	// Determine restore_command for replicas
 	restoreCmd := ""
-	if archiveEnabled(cfg) {
-		switch cfg.Archive.Mode {
-		case "pvc":
-			restoreCmd = "cp /wal-archive/%f %p"
-		case "custom":
-			restoreCmd = cfg.Archive.RestoreCommand
-		}
+	if backupEnabled(cfg) {
+		// Sidecar handles WAL fetch via shared emptyDir volume
+		restoreCmd = walRestoreCommand
+	} else if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" {
+		restoreCmd = cfg.Archive.RestoreCommand
 	}
 	if restoreCmd != "" {
 		replicaRestoreBlock = fmt.Sprintf(`
@@ -332,6 +353,40 @@ if [ -f "$PGDATA/PG_VERSION" ]; then
                     --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$POSTGRES_PASSWORD dbname=postgres" \
                     --progress 2>&1; then
                     echo "pg_rewind succeeded"
+                    if [ -f "$PGDATA/backup_label" ]; then echo "Removing stale backup_label after pg_rewind"; rm -f "$PGDATA/backup_label"; fi
+                    if [ -f "$PGDATA/tablespace_map" ]; then echo "Removing stale tablespace_map after pg_rewind"; rm -f "$PGDATA/tablespace_map"; fi
+                    # Clean up stale/pre-allocated WAL segments to prevent "invalid record length".
+                    # Keep BOTH the REDO WAL file (replay start) AND the segment holding the
+                    # checkpoint record itself — they can be in different segments when a
+                    # checkpoint spans a WAL segment boundary.
+                    CTLDATA=$(pg_controldata -D "$PGDATA" 2>/dev/null)
+                    CKPT_WAL=$(echo "$CTLDATA" | grep "REDO WAL file" | awk '{print $NF}')
+                    CKPT_LOC=$(echo "$CTLDATA" | grep "Latest checkpoint location" | awk '{print $NF}')
+                    CKPT_SEG_SIZE=$(echo "$CTLDATA" | grep "Bytes per WAL segment" | awk '{print $NF}')
+                    CKPT_REC_WAL=""
+                    if [ -n "$CKPT_WAL" ] && [ -n "$CKPT_LOC" ]; then
+                        _HI=$(printf '%%d' "0x${CKPT_LOC%%/*}")
+                        _LO=$(printf '%%d' "0x${CKPT_LOC##*/}")
+                        _SEG=$(( _LO / ${CKPT_SEG_SIZE:-16777216} ))
+                        CKPT_REC_WAL=$(printf "%%s%%08X%%08X" "${CKPT_WAL:0:8}" "$_HI" "$_SEG")
+                    fi
+                    if [ -n "$CKPT_WAL" ]; then
+                        echo "pg-swarm: cleaning stale WAL segments after pg_rewind (keeping $CKPT_WAL${CKPT_REC_WAL:+ and $CKPT_REC_WAL})"
+                        find "$PGDATA/pg_wal" -maxdepth 1 -type f \
+                            ! -name "$CKPT_WAL" ! -name "${CKPT_REC_WAL:-$CKPT_WAL}" ! -name "*.history" ! -name "*.backup" \
+                            -delete 2>/dev/null || true
+                    fi
+                    if [ -n "$CKPT_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_WAL" ]; then
+                        echo "pg-swarm: checkpoint WAL $CKPT_WAL missing after pg_rewind — falling back to pg_basebackup"
+                        MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+                        touch "$MARKER"
+                        find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+                        PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                            -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
+                        rm -f "$MARKER"
+                        cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                        cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                    fi
                 else
                     echo "pg_rewind failed — falling back to full re-basebackup"
                     # Mark outside PGDATA (on PVC root) so it survives cleanup
@@ -474,11 +529,11 @@ fi
 		})
 	}
 
-	// Mount wal-archive volume on init container for PVC mode
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" {
+	// Mount wal-restore on init container (needed for recovery during init)
+	if backupEnabled(cfg) {
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-			Name:      "wal-archive",
-			MountPath: "/wal-archive",
+			Name:      "wal-restore",
+			MountPath: "/wal-restore",
 		})
 	}
 
@@ -501,6 +556,7 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 	// We distinguish the two cases via a SHUTTING_DOWN flag set by the trap.
 	startupScript := fmt.Sprintf(`#!/bin/bash
 PRIMARY_HOST="%s"
+ORDINAL=${POD_NAME##*-}
 
 # --- Timeline recovery function ---
 pg_swarm_recover() {
@@ -547,13 +603,66 @@ pg_swarm_recover() {
         --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$POSTGRES_PASSWORD dbname=postgres" \
         --progress 2>&1; then
         echo "pg-swarm: pg_rewind succeeded"
+        if [ -f "$PGDATA/backup_label" ]; then echo "pg-swarm: removing stale backup_label after pg_rewind"; rm -f "$PGDATA/backup_label"; fi
+        if [ -f "$PGDATA/tablespace_map" ]; then echo "pg-swarm: removing stale tablespace_map after pg_rewind"; rm -f "$PGDATA/tablespace_map"; fi
+        # Clean up stale/pre-allocated WAL segments to prevent "invalid record length".
+        # Keep BOTH the REDO WAL file (replay start) AND the segment holding the
+        # checkpoint record itself — they can be in different segments when a
+        # checkpoint spans a WAL segment boundary.
+        CTLDATA=$(pg_controldata -D "$PGDATA" 2>/dev/null)
+        CKPT_WAL=$(echo "$CTLDATA" | grep "REDO WAL file" | awk '{print $NF}')
+        CKPT_LOC=$(echo "$CTLDATA" | grep "Latest checkpoint location" | awk '{print $NF}')
+        CKPT_SEG_SIZE=$(echo "$CTLDATA" | grep "Bytes per WAL segment" | awk '{print $NF}')
+        CKPT_REC_WAL=""
+        if [ -n "$CKPT_WAL" ] && [ -n "$CKPT_LOC" ]; then
+            _HI=$(printf '%%d' "0x${CKPT_LOC%%/*}")
+            _LO=$(printf '%%d' "0x${CKPT_LOC##*/}")
+            _SEG=$(( _LO / ${CKPT_SEG_SIZE:-16777216} ))
+            CKPT_REC_WAL=$(printf "%%s%%08X%%08X" "${CKPT_WAL:0:8}" "$_HI" "$_SEG")
+        fi
+        if [ -n "$CKPT_WAL" ]; then
+            echo "pg-swarm: cleaning stale WAL segments after pg_rewind (keeping $CKPT_WAL${CKPT_REC_WAL:+ and $CKPT_REC_WAL})"
+            find "$PGDATA/pg_wal" -maxdepth 1 -type f \
+                ! -name "$CKPT_WAL" ! -name "${CKPT_REC_WAL:-$CKPT_WAL}" ! -name "*.history" ! -name "*.backup" \
+                -delete 2>/dev/null || true
+        fi
+        if [ -n "$CKPT_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_WAL" ]; then
+            echo "pg-swarm: checkpoint WAL $CKPT_WAL missing after pg_rewind — falling back to pg_basebackup"
+            if ! pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then
+                echo "pg-swarm: primary not reachable — skipping destructive recovery to preserve data"
+                return
+            fi
+            MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+            touch "$MARKER"
+            find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+            if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+                rm -f "$MARKER"
+                cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+            else
+                echo "pg-swarm: pg_basebackup failed — will retry on next loop iteration"
+                return
+            fi
+        fi
     else
-        echo "pg-swarm: pg_rewind failed — full re-basebackup"
-        rm -rf "$PGDATA"/*
-        PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
-            -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
-        cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-        cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+        echo "pg-swarm: pg_rewind failed — checking if primary is available for re-basebackup"
+        if ! pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then
+            echo "pg-swarm: primary not reachable — skipping destructive recovery to preserve data"
+            return
+        fi
+        MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+        touch "$MARKER"
+        find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+        if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+            -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+            rm -f "$MARKER"
+            cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+            cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+        else
+            echo "pg-swarm: pg_basebackup failed — will retry on next loop iteration"
+            return
+        fi
     fi
 
     touch "$PGDATA/standby.signal"
@@ -571,6 +680,98 @@ trap 'SHUTTING_DOWN=true; kill -TERM $PG_PID 2>/dev/null' TERM
 while true; do
     # Check and fix timeline divergence before starting PG
     pg_swarm_recover
+
+    # Check if a forced re-basebackup was requested by the sidecar (e.g. WAL gap)
+    MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+    if [ -f "$MARKER" ]; then
+        echo "pg-swarm: forced re-basebackup requested (e.g. WAL gap)"
+        find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+        echo "pg-swarm: waiting for primary to re-basebackup..."
+        BASEBACKUP_OK=false
+        for i in $(seq 1 60); do
+            if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
+                if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                    -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+                    cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                    rm -f "$MARKER"
+                    BASEBACKUP_OK=true
+                    break
+                fi
+            fi
+            sleep 5
+        done
+        if [ "$BASEBACKUP_OK" = "false" ]; then
+            echo "pg-swarm: re-basebackup failed — retrying next iteration"
+            sleep 5
+            continue
+        fi
+    fi
+
+    # Guard: if PGDATA has files but no PG_VERSION, it is corrupt (e.g. a
+    # previous pg_basebackup failed partway through). Clean up and either
+    # re-basebackup (replicas) or let docker-entrypoint.sh initdb (primary).
+    if [ -d "$PGDATA" ] && [ -n "$(ls -A "$PGDATA" 2>/dev/null)" ] && [ ! -s "$PGDATA/PG_VERSION" ]; then
+        echo "pg-swarm: corrupt PGDATA (no PG_VERSION) — cleaning up"
+        find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+        if [ "$ORDINAL" != "0" ]; then
+            # Replica: wait for primary and re-basebackup
+            echo "pg-swarm: waiting for primary to re-basebackup..."
+            BASEBACKUP_OK=false
+            for i in $(seq 1 60); do
+                if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
+                    if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                        -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+                        cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                        cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                        BASEBACKUP_OK=true
+                        break
+                    fi
+                fi
+                sleep 5
+            done
+            if [ "$BASEBACKUP_OK" = "false" ]; then
+                echo "pg-swarm: re-basebackup failed — retrying next iteration"
+                sleep 5
+                continue
+            fi
+        fi
+        # For ordinal 0 (primary), fall through to docker-entrypoint.sh which
+        # will run initdb on the now-empty directory.
+    fi
+
+    # Final guard: verify checkpoint WAL exists before starting PG
+    if [ -f "$PGDATA/PG_VERSION" ]; then
+        CKPT_WAL=$(pg_controldata -D "$PGDATA" 2>/dev/null | grep "REDO WAL file" | awk '{print $NF}')
+        if [ -n "$CKPT_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_WAL" ]; then
+            echo "pg-swarm: CRITICAL — checkpoint WAL $CKPT_WAL missing from pg_wal/"
+            if [ "$ORDINAL" != "0" ]; then
+                echo "pg-swarm: replica — falling back to full re-basebackup"
+                find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+                BASEBACKUP_OK=false
+                for i in $(seq 1 60); do
+                    if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
+                        if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
+                            -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
+                            cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
+                            cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
+                            BASEBACKUP_OK=true
+                            break
+                        fi
+                    fi
+                    sleep 5
+                done
+                if [ "$BASEBACKUP_OK" = "false" ]; then
+                    echo "pg-swarm: re-basebackup failed — retrying next iteration"
+                    sleep 5
+                    continue
+                fi
+            else
+                echo "pg-swarm: primary — attempting pg_resetwal to recover"
+                pg_resetwal -f -D "$PGDATA" 2>&1 || true
+            fi
+        fi
+    fi
 
     # Start PG in the background so we can catch its exit
     docker-entrypoint.sh postgres &
@@ -626,16 +827,25 @@ done
 			{Name: "data", MountPath: "/var/lib/postgresql/data"},
 			{Name: "config", MountPath: "/etc/pg-config", ReadOnly: true},
 		},
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"pg_isready", "-U", "postgres"},
+				},
+			},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+			FailureThreshold: 60,
+		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				Exec: &corev1.ExecAction{
 					Command: []string{"pg_isready", "-U", "postgres"},
 				},
 			},
-			InitialDelaySeconds: 30,
-			PeriodSeconds:       10,
-			TimeoutSeconds:      5,
-			FailureThreshold:    6,
+			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+			FailureThreshold: 6,
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -680,15 +890,16 @@ done
 		})
 	}
 
-	// PVC archive mode: mount wal-archive volume
-	if archiveEnabled(cfg) && cfg.Archive.Mode == "pvc" {
-		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-			Name:      "wal-archive",
-			MountPath: "/wal-archive",
-		})
+	// Shared emptyDir mounts for file-based WAL archive/restore
+	if backupEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts,
+			corev1.VolumeMount{Name: "wal-staging", MountPath: "/wal-staging"},
+			corev1.VolumeMount{Name: "wal-restore", MountPath: "/wal-restore"},
+		)
 	}
 
-	// Custom archive mode with credentials: mount secret as env vars
+	// Custom archive mode with credentials: mount secret as env vars AND as a volume
+	// (so file-based credentials like GOOGLE_APPLICATION_CREDENTIALS can be used).
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" && cfg.Archive.CredentialsSecret != nil {
 		optional := true
 		c.EnvFrom = append(c.EnvFrom, corev1.EnvFromSource{
@@ -698,6 +909,15 @@ done
 				},
 				Optional: &optional,
 			},
+		})
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "archive-creds",
+			MountPath: "/etc/archive-creds",
+			ReadOnly:  true,
+		})
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+			Value: "/etc/archive-creds/service-account.json", // Expected key in the secret
 		})
 	}
 
@@ -755,6 +975,9 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 					},
 				},
 			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "data", MountPath: "/var/lib/postgresql/data"},
 		},
 	}
 }

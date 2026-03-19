@@ -37,7 +37,7 @@ func buildFailoverServiceAccount(cfg *pgswarmv1.ClusterConfig) *corev1.ServiceAc
 
 // buildFailoverRole creates the RBAC Role granting pod, exec, and lease access for failover.
 func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
-	return &rbacv1.Role{
+	role := &rbacv1.Role{
 		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      failoverServiceAccountName(cfg.ClusterName),
@@ -62,6 +62,16 @@ func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 			},
 		},
 	}
+	// When backup is also enabled the backup sidecar runs under the failover SA
+	// (only one ServiceAccountName per pod), so grant it configmap access too.
+	if backupEnabled(cfg) {
+		role.Rules = append(role.Rules, rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"configmaps"},
+			Verbs:     []string{"get", "create", "update", "patch"},
+		})
+	}
+	return role
 }
 
 // buildFailoverRoleBinding creates the RoleBinding linking the failover ServiceAccount to its Role.

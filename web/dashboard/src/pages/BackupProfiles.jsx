@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
-import { Info } from 'lucide-react';
+import { Info, X } from 'lucide-react';
 
 const TABS = [
   { id: 'general', label: 'General' },
@@ -13,11 +13,57 @@ const TABS = [
 
 function emptySpec() {
   return {
-    physical: { base_schedule: '0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
+    physical: { base_schedule: '0 0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
     logical: null,
     destination: { type: 's3', s3: { bucket: '', region: '', endpoint: '', path_prefix: '' } },
     retention: { base_backup_count: 7, wal_retention_days: 14, logical_backup_count: 30 },
   };
+}
+
+// Validate a single cron field against allowed range [min, max].
+// Accepts: *, */N, N, N-M, N-M/S, and comma-separated combos.
+function validateCronField(field, min, max) {
+  if (field === '*') return true;
+  for (const part of field.split(',')) {
+    const stepMatch = part.match(/^(.+)\/(\d+)$/);
+    const base = stepMatch ? stepMatch[1] : part;
+    if (stepMatch) {
+      const step = parseInt(stepMatch[2]);
+      if (isNaN(step) || step < 1) return false;
+    }
+    if (base === '*') continue;
+    const rangeMatch = base.match(/^(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      const [, a, b] = rangeMatch.map(Number);
+      if (isNaN(a) || isNaN(b) || a < min || b > max || a > b) return false;
+    } else {
+      const n = parseInt(base);
+      if (isNaN(n) || n < min || n > max) return false;
+    }
+  }
+  return true;
+}
+
+// Validate a cron expression. Accepts 5-field (min hour dom mon dow)
+// or 6-field (sec min hour dom mon dow). Returns null if valid,
+// or an error message string if invalid.
+function validateCron(cron) {
+  if (!cron || !cron.trim()) return 'Schedule is required';
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length < 5 || parts.length > 6) return 'Must have 5 fields (min hour day month weekday) or 6 fields (sec min hour day month weekday)';
+  // Ranges: [min, max] for each field position
+  const ranges6 = [[0, 59], [0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  const ranges5 = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  const names6 = ['second', 'minute', 'hour', 'day', 'month', 'weekday'];
+  const names5 = ['minute', 'hour', 'day', 'month', 'weekday'];
+  const ranges = parts.length === 6 ? ranges6 : ranges5;
+  const names = parts.length === 6 ? names6 : names5;
+  for (let i = 0; i < parts.length; i++) {
+    if (!validateCronField(parts[i], ranges[i][0], ranges[i][1])) {
+      return `Invalid ${names[i]} field: "${parts[i]}" (allowed ${ranges[i][0]}-${ranges[i][1]})`;
+    }
+  }
+  return null;
 }
 
 function KV({ label, value }) {
@@ -25,11 +71,13 @@ function KV({ label, value }) {
 }
 
 // Describe a cron expression in plain English.
+// Supports both 5-field (min hour dom mon dow) and 6-field (sec min hour dom mon dow).
 function describeCron(cron) {
   if (!cron) return null;
   const parts = cron.trim().split(/\s+/);
   if (parts.length < 5) return null;
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  // 6-field: second minute hour dom month dow
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts.length >= 6 ? parts.slice(1) : parts;
 
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -106,7 +154,8 @@ function estimateCronIntervalDays(cron) {
   if (!cron) return null;
   const parts = cron.trim().split(/\s+/);
   if (parts.length < 5) return null;
-  const [, , dayOfMonth, month, dayOfWeek] = parts;
+  const fields = parts.length >= 6 ? parts.slice(1) : parts;
+  const [, , dayOfMonth, month, dayOfWeek] = fields;
 
   // "0 2 * * 0" = weekly
   if (dayOfMonth === '*' && month === '*' && dayOfWeek !== '*') {
@@ -171,6 +220,7 @@ export default function BackupProfiles() {
       refresh();
     } catch (e) {
       toast('Save failed: ' + e.message, true);
+      throw e;
     }
   }
 
@@ -200,7 +250,7 @@ export default function BackupProfiles() {
           <div className="empty">No backup rules created yet</div>
         ) : backupProfiles.map(rule => {
           const spec = parseSpec(rule.config);
-          const backupType = spec.physical ? 'Physical' : spec.logical ? 'Logical' : '-';
+          const backupType = (spec.physical && spec.logical) ? 'Physical + Logical' : spec.physical ? 'Physical' : spec.logical ? 'Logical' : '-';
           const schedule = spec.physical?.base_schedule || spec.logical?.schedule || '-';
           return (
             <div className="cl-card" key={rule.id}>
@@ -257,20 +307,18 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
     setState(prev => ({ ...prev, spec: fn(prev.spec) }));
   }
 
-  function setBackupType(type) {
-    if (type === 'physical') {
-      setSpec(s => ({
-        ...s,
-        physical: { base_schedule: '0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
-        logical: null,
-      }));
-    } else {
-      setSpec(s => ({
-        ...s,
-        physical: null,
-        logical: { schedule: '0 2 * * *', databases: [], format: 'custom' },
-      }));
-    }
+  function togglePhysical() {
+    setSpec(s => ({
+      ...s,
+      physical: s.physical ? null : { base_schedule: '0 0 2 * * 0', wal_archive_enabled: true, archive_timeout_seconds: 60 },
+    }));
+  }
+
+  function toggleLogical() {
+    setSpec(s => ({
+      ...s,
+      logical: s.logical ? null : { schedule: '0 0 2 * * *', databases: [], format: 'custom' },
+    }));
   }
 
   function setDestType(type) {
@@ -278,21 +326,79 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
     if (type === 's3') dest.s3 = { bucket: '', region: '', endpoint: '', path_prefix: '' };
     if (type === 'gcs') dest.gcs = { bucket: '', path_prefix: '', service_account_json: '' };
     if (type === 'sftp') dest.sftp = { host: '', port: 22, user: '', password: '', base_path: '' };
-    if (type === 'local') dest.local = { size: '10Gi', storage_class: '' };
     setSpec(s => ({ ...s, destination: dest }));
   }
 
+  const [saving, setSaving] = useState(false);
+  const [attempted, setAttempted] = useState(false);
+
+  // Validation: returns { tab: [error, ...] } for each tab with issues
+  function validate() {
+    const errors = { general: [], schedule: [], destination: [], retention: [] };
+
+    // General
+    if (!state.name.trim()) errors.general.push('name');
+    if (!spec.physical && !spec.logical) errors.general.push('type');
+
+    // Schedule
+    if (spec.physical && !spec.physical.base_schedule?.trim()) errors.schedule.push('base_schedule');
+    if (spec.logical && !spec.logical.schedule?.trim()) errors.schedule.push('logical_schedule');
+
+    // Destination
+    const dest = spec.destination;
+    if (dest.type === 's3') {
+      if (!dest.s3?.bucket?.trim()) errors.destination.push('s3_bucket');
+      if (!dest.s3?.region?.trim()) errors.destination.push('s3_region');
+    } else if (dest.type === 'gcs') {
+      if (!dest.gcs?.bucket?.trim()) errors.destination.push('gcs_bucket');
+    } else if (dest.type === 'sftp') {
+      if (!dest.sftp?.host?.trim()) errors.destination.push('sftp_host');
+      if (!dest.sftp?.user?.trim()) errors.destination.push('sftp_user');
+    }
+
+    // Retention
+    if (spec.physical) {
+      const baseCount = spec.retention.base_backup_count;
+      if (!baseCount || baseCount < 1) errors.retention.push('base_backup_count');
+      if (spec.physical.wal_archive_enabled) {
+        const walDays = spec.retention.wal_retention_days;
+        if (!walDays || walDays < 1) errors.retention.push('wal_retention_days');
+      }
+    }
+
+    return errors;
+  }
+
+  const errors = validate();
+  const hasError = (tab) => attempted && errors[tab].length > 0;
+  const fieldError = (tab, field) => attempted && errors[tab].includes(field);
+
   function handleSave() {
+    setAttempted(true);
+    const errs = validate();
+    const totalErrors = Object.values(errs).reduce((sum, arr) => sum + arr.length, 0);
+    if (totalErrors > 0) {
+      // Switch to first tab with errors
+      const firstBadTab = TABS.find(t => errs[t.id].length > 0);
+      if (firstBadTab) setActiveTab(firstBadTab.id);
+      return;
+    }
     setShowConfirm(true);
   }
 
-  function confirmSave() {
-    setShowConfirm(false);
-    onSave();
+  async function confirmSave() {
+    setSaving(true);
+    try {
+      await onSave();
+      setShowConfirm(false);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
     <div className="profile-form">
+      {/* Header */}
       <div className="card-head-bar">
         <span className="card-head-title">{state.isNew ? 'Create Backup Rule' : 'Edit Backup Rule'}</span>
         <div className="actions">
@@ -301,6 +407,7 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
         </div>
       </div>
 
+      {/* Tab bar */}
       <div className="tab-bar">
         {TABS.map(tab => (
           <button
@@ -309,10 +416,12 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
             onClick={() => setActiveTab(tab.id)}
           >
             {tab.label}
+            {hasError(tab.id) && <span className="tab-badge-error">{errors[tab.id].length}</span>}
           </button>
         ))}
       </div>
 
+      {/* Tab content */}
       <div className="tab-content">
         {activeTab === 'general' && (
           <section className="form-section">
@@ -320,26 +429,28 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
             <div className="form-grid">
               <div className="form-row">
                 <label>Name</label>
-                <input className="input" value={state.name} onChange={e => setField('name', e.target.value)} placeholder="e.g. s3-weekly-base" />
+                <input className={'input' + (fieldError('general', 'name') ? ' input-error' : '')} value={state.name} onChange={e => setField('name', e.target.value)} placeholder="e.g. s3-weekly-base" />
+                {fieldError('general', 'name') && <span className="form-error">Name is required</span>}
               </div>
               <div className="form-row">
                 <label>Description</label>
                 <input className="input" value={state.description} onChange={e => setField('description', e.target.value)} placeholder="Optional description" />
               </div>
               <div className="form-row">
-                <label>Backup Type</label>
+                <label>Backup Types</label>
                 <div className="radio-group">
                   <label className="toggle">
-                    <input type="radio" name="backup-type" checked={!!spec.physical} onChange={() => setBackupType('physical')} />
-                    <span>Physical</span>
+                    <input type="checkbox" checked={!!spec.physical} onChange={togglePhysical} />
+                    <span>Enable Physical Backup</span>
                     <span className="info-tip" title="Full binary copy of the data directory. Supports continuous WAL archiving and point-in-time recovery (PITR). Best for disaster recovery."><Info size={14} /></span>
                   </label>
                   <label className="toggle">
-                    <input type="radio" name="backup-type" checked={!!spec.logical} onChange={() => setBackupType('logical')} />
-                    <span>Logical</span>
+                    <input type="checkbox" checked={!!spec.logical} onChange={toggleLogical} />
+                    <span>Enable Logical Backup</span>
                     <span className="info-tip" title="SQL-level dump of database objects and data. Portable across PG versions. Best for migrations, selective restores, and cross-version upgrades."><Info size={14} /></span>
                   </label>
                 </div>
+                {fieldError('general', 'type') && <span className="form-error">At least one backup type must be enabled</span>}
               </div>
             </div>
           </section>
@@ -353,14 +464,16 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <div className="form-grid">
                   <div className="form-row">
                     <label>Base Backup Schedule (cron)</label>
-                    <input className="input" value={spec.physical.base_schedule} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, base_schedule: e.target.value } }))} placeholder="0 2 * * 0" />
-                    {describeCron(spec.physical.base_schedule)
-                      ? <span className="form-hint cron-desc">{describeCron(spec.physical.base_schedule)}</span>
-                      : <span className="form-hint">Standard cron: minute hour day month weekday</span>}
+                    <input className={'input' + (fieldError('schedule', 'base_schedule') ? ' input-error' : '')} value={spec.physical.base_schedule} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, base_schedule: e.target.value } }))} placeholder="0 0 2 * * 0" />
+                    {fieldError('schedule', 'base_schedule')
+                      ? <span className="form-error">Base backup schedule is required</span>
+                      : describeCron(spec.physical.base_schedule)
+                        ? <span className="form-hint cron-desc">{describeCron(spec.physical.base_schedule)}</span>
+                        : <span className="form-hint">Cron: second minute hour day month weekday</span>}
                   </div>
                   <div className="form-row">
                     <label>Incremental Backup Schedule (PG 17+)</label>
-                    <input className="input" value={spec.physical.incremental_schedule || ''} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, incremental_schedule: e.target.value } }))} placeholder="Optional, e.g. 0 2 * * 1-6" />
+                    <input className="input" value={spec.physical.incremental_schedule || ''} onChange={e => setSpec(s => ({ ...s, physical: { ...s.physical, incremental_schedule: e.target.value } }))} placeholder="Optional, e.g. 0 0 2 * * 1-6" />
                     {spec.physical.incremental_schedule && describeCron(spec.physical.incremental_schedule)
                       ? <span className="form-hint cron-desc">{describeCron(spec.physical.incremental_schedule)}</span>
                       : <span className="form-hint">Requires PostgreSQL 17+. Takes smaller backups of only changed blocks since last full.</span>}
@@ -390,10 +503,12 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <div className="form-grid">
                   <div className="form-row">
                     <label>Schedule (cron)</label>
-                    <input className="input" value={spec.logical.schedule} onChange={e => setSpec(s => ({ ...s, logical: { ...s.logical, schedule: e.target.value } }))} placeholder="0 2 * * *" />
-                    {describeCron(spec.logical.schedule)
-                      ? <span className="form-hint cron-desc">{describeCron(spec.logical.schedule)}</span>
-                      : <span className="form-hint">Standard cron: minute hour day month weekday</span>}
+                    <input className={'input' + (fieldError('schedule', 'logical_schedule') ? ' input-error' : '')} value={spec.logical.schedule} onChange={e => setSpec(s => ({ ...s, logical: { ...s.logical, schedule: e.target.value } }))} placeholder="0 0 2 * * *" />
+                    {fieldError('schedule', 'logical_schedule')
+                      ? <span className="form-error">Logical backup schedule is required</span>
+                      : describeCron(spec.logical.schedule)
+                        ? <span className="form-hint cron-desc">{describeCron(spec.logical.schedule)}</span>
+                        : <span className="form-hint">Cron: second minute hour day month weekday</span>}
                   </div>
                   <div className="form-row">
                     <label>Dump Format</label>
@@ -424,7 +539,6 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                   <option value="s3">S3 / S3-Compatible (MinIO)</option>
                   <option value="gcs">Google Cloud Storage</option>
                   <option value="sftp">SFTP</option>
-                  <option value="local">Local PVC</option>
                 </select>
               </div>
             </div>
@@ -435,11 +549,13 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <div className="form-grid">
                   <div className="form-row">
                     <label>Bucket</label>
-                    <input className="input" value={spec.destination.s3.bucket} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, s3: { ...s.destination.s3, bucket: e.target.value } } }))} placeholder="my-pg-backups" />
+                    <input className={'input' + (fieldError('destination', 's3_bucket') ? ' input-error' : '')} value={spec.destination.s3.bucket} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, s3: { ...s.destination.s3, bucket: e.target.value } } }))} placeholder="my-pg-backups" />
+                    {fieldError('destination', 's3_bucket') && <span className="form-error">Bucket is required</span>}
                   </div>
                   <div className="form-row">
                     <label>Region</label>
-                    <input className="input" value={spec.destination.s3.region} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, s3: { ...s.destination.s3, region: e.target.value } } }))} placeholder="us-east-1" />
+                    <input className={'input' + (fieldError('destination', 's3_region') ? ' input-error' : '')} value={spec.destination.s3.region} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, s3: { ...s.destination.s3, region: e.target.value } } }))} placeholder="us-east-1" />
+                    {fieldError('destination', 's3_region') && <span className="form-error">Region is required</span>}
                   </div>
                   <div className="form-row">
                     <label>Endpoint (for S3-compatible)</label>
@@ -469,7 +585,8 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <div className="form-grid">
                   <div className="form-row">
                     <label>Bucket</label>
-                    <input className="input" value={spec.destination.gcs.bucket} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, gcs: { ...s.destination.gcs, bucket: e.target.value } } }))} placeholder="my-pg-backups" />
+                    <input className={'input' + (fieldError('destination', 'gcs_bucket') ? ' input-error' : '')} value={spec.destination.gcs.bucket} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, gcs: { ...s.destination.gcs, bucket: e.target.value } } }))} placeholder="my-pg-backups" />
+                    {fieldError('destination', 'gcs_bucket') && <span className="form-error">Bucket is required</span>}
                   </div>
                   <div className="form-row">
                     <label>Path Prefix</label>
@@ -502,7 +619,8 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                 <div className="form-grid">
                   <div className="form-row">
                     <label>Host</label>
-                    <input className="input" value={spec.destination.sftp.host} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, sftp: { ...s.destination.sftp, host: e.target.value } } }))} placeholder="backup.example.com" />
+                    <input className={'input' + (fieldError('destination', 'sftp_host') ? ' input-error' : '')} value={spec.destination.sftp.host} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, sftp: { ...s.destination.sftp, host: e.target.value } } }))} placeholder="backup.example.com" />
+                    {fieldError('destination', 'sftp_host') && <span className="form-error">Host is required</span>}
                   </div>
                   <div className="form-row">
                     <label>Port</label>
@@ -510,7 +628,8 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                   </div>
                   <div className="form-row">
                     <label>Username</label>
-                    <input className="input" value={spec.destination.sftp.user} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, sftp: { ...s.destination.sftp, user: e.target.value } } }))} placeholder="backup-user" />
+                    <input className={'input' + (fieldError('destination', 'sftp_user') ? ' input-error' : '')} value={spec.destination.sftp.user} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, sftp: { ...s.destination.sftp, user: e.target.value } } }))} placeholder="backup-user" />
+                    {fieldError('destination', 'sftp_user') && <span className="form-error">Username is required</span>}
                   </div>
                   <div className="form-row">
                     <label>Password</label>
@@ -525,21 +644,6 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
               </>
             )}
 
-            {spec.destination.type === 'local' && spec.destination.local && (
-              <>
-                <h4 style={{ marginTop: 20 }}>Local PVC Configuration</h4>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>Volume Size</label>
-                    <input className="input" value={spec.destination.local.size} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, local: { ...s.destination.local, size: e.target.value } } }))} placeholder="50Gi" />
-                  </div>
-                  <div className="form-row">
-                    <label>Storage Class (optional)</label>
-                    <input className="input" value={spec.destination.local.storage_class || ''} onChange={e => setSpec(s => ({ ...s, destination: { ...s.destination, local: { ...s.destination.local, storage_class: e.target.value } } }))} placeholder="Default storage class" />
-                  </div>
-                </div>
-              </>
-            )}
           </section>
         )}
 
@@ -556,8 +660,10 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                   <>
                     <div className="form-row">
                       <label>Base Backup Count</label>
-                      <input className="input" type="number" min="1" value={baseCount} onChange={e => setSpec(s => ({ ...s, retention: { ...s.retention, base_backup_count: parseInt(e.target.value) || 7 } }))} />
-                      <span className="form-hint">Number of full base backups to keep before oldest is deleted</span>
+                      <input className={'input' + (fieldError('retention', 'base_backup_count') ? ' input-error' : '')} type="number" min="1" value={baseCount} onChange={e => setSpec(s => ({ ...s, retention: { ...s.retention, base_backup_count: parseInt(e.target.value) || 7 } }))} />
+                      {fieldError('retention', 'base_backup_count')
+                        ? <span className="form-error">Base backup count must be at least 1</span>
+                        : <span className="form-hint">Number of full base backups to keep before oldest is deleted</span>}
                     </div>
                     {spec.physical.incremental_schedule && (
                       <div className="form-row">
@@ -569,8 +675,10 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
                     {spec.physical.wal_archive_enabled && (
                       <div className="form-row">
                         <label>WAL Retention Days</label>
-                        <input className={'input' + (walTooShort ? ' input-warn' : '')} type="number" min="1" value={walDays} onChange={e => setSpec(s => ({ ...s, retention: { ...s.retention, wal_retention_days: parseInt(e.target.value) || 14 } }))} />
-                        {walTooShort ? (
+                        <input className={'input' + (fieldError('retention', 'wal_retention_days') ? ' input-error' : walTooShort ? ' input-warn' : '')} type="number" min="1" value={walDays} onChange={e => setSpec(s => ({ ...s, retention: { ...s.retention, wal_retention_days: parseInt(e.target.value) || 14 } }))} />
+                        {fieldError('retention', 'wal_retention_days') ? (
+                          <span className="form-error">WAL retention days must be at least 1</span>
+                        ) : walTooShort ? (
                           <span className="form-warn">
                             WAL retention ({walDays}d) is shorter than the span covered by {baseCount} base backups ({minDays}d).
                             Older base backups won't support PITR.{' '}
@@ -603,12 +711,17 @@ function BackupProfileForm({ state, setState, onSave, onCancel }) {
 
       {showConfirm && (
         <div className="confirm-overlay" onClick={() => setShowConfirm(false)}>
-          <div className="confirm-dialog" onClick={e => e.stopPropagation()}>
-            <h3>{state.isNew ? 'Create' : 'Update'} Backup Rule</h3>
-            <p>This will {state.isNew ? 'create' : 'update'} the backup rule <strong>{state.name}</strong>. If attached to profiles, all linked clusters will be re-pushed with the new backup configuration.</p>
-            <div className="confirm-actions">
-              <button className="btn btn-approve" onClick={confirmSave}>Confirm</button>
-              <button className="btn btn-reject" onClick={() => setShowConfirm(false)}>Cancel</button>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()}>
+            <div className="confirm-header">
+              <h3>{state.isNew ? 'Create' : 'Update'} Backup Rule</h3>
+              <button className="modal-close" onClick={() => setShowConfirm(false)}><X size={18} /></button>
+            </div>
+            <div className="confirm-body">
+              <p>This will {state.isNew ? 'create' : 'update'} the backup rule <strong>{state.name}</strong>. If attached to profiles, all linked clusters will be re-pushed with the new backup configuration.</p>
+            </div>
+            <div className="confirm-footer">
+              <button className="btn" onClick={() => setShowConfirm(false)} disabled={saving}>Cancel</button>
+              <button className="btn btn-approve" onClick={confirmSave} disabled={saving}>{saving ? 'Saving…' : 'Confirm'}</button>
             </div>
           </div>
         </div>

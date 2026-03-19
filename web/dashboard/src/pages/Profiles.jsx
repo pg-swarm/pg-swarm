@@ -148,7 +148,7 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, postgresVariants, satellites, clusters, backupProfiles, refresh } = useData();
+  const { profiles, postgresVersions, postgresVariants, clusters, backupProfiles, storageTiers, refresh } = useData();
   const toast = useToast();
 
   useEffect(() => { document.title = 'Profiles - PG-Swarm'; }, []);
@@ -156,7 +156,9 @@ export default function Profiles() {
   const [viewing, setViewing] = useState(null);
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
-  const [scRefreshing, setScRefreshing] = useState(false);
+  const [cascadeTarget, setCascadeTarget] = useState(null);
+  const [cascadeClusters, setCascadeClusters] = useState([]);
+  const [cascadeLoading, setCascadeLoading] = useState(false);
   // Track attached backup profiles per profile: { profileId: [rule, ...] }
   const [attachedRules, setAttachedRules] = useState({});
 
@@ -197,32 +199,6 @@ export default function Profiles() {
     }
   }
 
-  // Deduplicate storage classes across all satellites
-  const storageClasses = useMemo(() => {
-    const seen = new Set();
-    const result = [];
-    for (const sat of satellites) {
-      for (const sc of (sat.storage_classes || [])) {
-        if (!seen.has(sc.name)) {
-          seen.add(sc.name);
-          result.push(sc);
-        }
-      }
-    }
-    return result.sort((a, b) => a.name.localeCompare(b.name));
-  }, [satellites]);
-
-  async function refreshAllStorageClasses() {
-    setScRefreshing(true);
-    try {
-      await Promise.all(satellites.map(s => api.refreshStorageClasses(s.id).catch(() => {})));
-      // Wait briefly for reports to arrive, then refresh
-      setTimeout(() => { refresh(); setScRefreshing(false); }, 2000);
-    } catch {
-      setScRefreshing(false);
-    }
-  }
-
   function startCreate() {
     setEditing({ name: '', description: '', spec: emptySpec(), isNew: true });
   }
@@ -255,7 +231,7 @@ export default function Profiles() {
     return (clusters || []).filter(c => c.profile_id === profileId).length;
   }
 
-  async function save() {
+  async function save(pendingBackupAttach = []) {
     const payload = {
       name: editing.name,
       description: editing.description,
@@ -263,8 +239,18 @@ export default function Profiles() {
     };
     try {
       if (editing.isNew) {
-        await api.createProfile(payload);
+        const created = await api.createProfile(payload);
         toast('Profile created');
+        // Attach any pending backup profiles
+        if (pendingBackupAttach.length > 0 && created?.id) {
+          for (const rule of pendingBackupAttach) {
+            try {
+              await api.attachBackupProfile(created.id, rule.id);
+            } catch (e) {
+              toast('Failed to attach backup profile ' + rule.name + ': ' + e.message, true);
+            }
+          }
+        }
       } else {
         await api.updateProfile(editing.id, payload);
         toast('Profile updated');
@@ -276,10 +262,49 @@ export default function Profiles() {
     }
   }
 
-  async function remove(id) {
+  async function remove(profile) {
+    if (profile.locked) {
+      // Locked profile — need cascade preview
+      setCascadeLoading(true);
+      setCascadeTarget(profile);
+      try {
+        const items = await api.cascadePreview(profile.id);
+        setCascadeClusters(items);
+      } catch (e) {
+        toast('Failed to preview cascade: ' + e.message, true);
+        setCascadeTarget(null);
+      } finally {
+        setCascadeLoading(false);
+      }
+      return;
+    }
+    // Unlocked profile — simple delete but still check for clusters
     try {
-      await api.deleteProfile(id);
+      const items = await api.cascadePreview(profile.id);
+      if (items.length > 0) {
+        setCascadeTarget(profile);
+        setCascadeClusters(items);
+        return;
+      }
+      await api.deleteProfile(profile.id);
       toast('Profile deleted');
+      refresh();
+    } catch (e) {
+      toast('Delete failed: ' + e.message, true);
+    }
+  }
+
+  async function confirmCascadeDelete() {
+    if (!cascadeTarget) return;
+    try {
+      if (cascadeClusters.length > 0 || cascadeTarget.locked) {
+        await api.cascadeDeleteProfile(cascadeTarget.id);
+      } else {
+        await api.deleteProfile(cascadeTarget.id);
+      }
+      toast('Profile deleted');
+      setCascadeTarget(null);
+      setCascadeClusters([]);
       refresh();
     } catch (e) {
       toast('Delete failed: ' + e.message, true);
@@ -299,7 +324,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageClasses={storageClasses} scRefreshing={scRefreshing} onRefreshStorageClasses={refreshAllStorageClasses} backupProfiles={backupProfiles} attachedBackupProfiles={attachedRules[editing.id] || []} onAttachBackup={attachRule} onDetachBackup={detachRule} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} backupProfiles={backupProfiles} attachedBackupProfiles={attachedRules[editing.id] || []} onAttachBackup={attachRule} onDetachBackup={detachRule} />;
   }
 
   if (viewing) {
@@ -338,7 +363,7 @@ export default function Profiles() {
                 <h3>{p.name}</h3>
                 <div className="badges">
                   {p.locked
-                    ? <span className="badge badge-amber"><span className="dot" />Locked</span>
+                    ? <span className="badge badge-amber" title="Profile is in use by active clusters or deployment rules"><span className="dot" />In Use (Locked)</span>
                     : <span className="badge badge-green"><span className="dot" />Editable</span>}
                   {clusterCount > 0 && (
                     <span className="badge badge-gray">{clusterCount} cluster{clusterCount !== 1 ? 's' : ''}</span>
@@ -379,13 +404,61 @@ export default function Profiles() {
                     ? <button className="btn btn-sm" onClick={() => startView(p)}>View</button>
                     : <button className="btn btn-sm" onClick={() => startEdit(p)}>Edit</button>}
                   <button className="btn btn-sm" onClick={() => { setCloneTarget(p.id); setCloneName(p.name + '-copy'); }}>Clone</button>
-                  {!p.locked && <button className="btn btn-sm btn-reject" onClick={() => remove(p.id)}>Delete</button>}
+                  <button className="btn btn-sm btn-reject" onClick={() => remove(p)}>Delete</button>
                 </span>
               </div>
             </div>
           );
         })}
       </div>
+
+      {cascadeTarget && (
+        <div className="modal-overlay" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Delete Profile: {cascadeTarget.name}</h3>
+              <button className="btn-icon" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>&times;</button>
+            </div>
+            <div className="modal-body">
+              {cascadeLoading ? (
+                <p>Loading...</p>
+              ) : cascadeClusters.length > 0 ? (
+                <>
+                  <p style={{ marginBottom: 8 }}>
+                    This will <strong>cascade-delete</strong> the following {cascadeClusters.length} cluster{cascadeClusters.length !== 1 ? 's' : ''}, their deployment rules, and the profile:
+                  </p>
+                  <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Cluster</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Namespace</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Satellite</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cascadeClusters.map(cc => (
+                        <tr key={cc.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                          <td style={{ padding: '4px 8px' }}><code>{cc.name}</code></td>
+                          <td style={{ padding: '4px 8px' }}><code>{cc.namespace || 'default'}</code></td>
+                          <td style={{ padding: '4px 8px' }}>{cc.satellite || 'unknown'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              ) : (
+                <p>No clusters are linked to this profile. Delete it?</p>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button className="btn" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>Cancel</button>
+              <button className="btn btn-reject" onClick={confirmCascadeDelete} disabled={cascadeLoading}>
+                {cascadeClusters.length > 0 ? 'Delete All' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -429,7 +502,7 @@ function ProfileBackupProfiles({ profileId, attached, allRules, onAttach, onDeta
       )}
       {attached.map(r => {
         const s = parseSpec(r.config);
-        const type = s.physical ? 'Physical' : 'Logical';
+        const type = (s.physical && s.logical) ? 'Physical + Logical' : s.physical ? 'Physical' : 'Logical';
         return (
           <div key={r.id} className="backup-profile-chip">
             <span className="tag">{type}</span>
@@ -445,7 +518,7 @@ function ProfileBackupProfiles({ profileId, attached, allRules, onAttach, onDeta
           <option value="" disabled>Select a backup profile...</option>
           {available.map(r => {
             const s = parseSpec(r.config);
-            const type = s.physical ? 'Physical' : 'Logical';
+            const type = (s.physical && s.logical) ? 'Physical + Logical' : s.physical ? 'Physical' : 'Logical';
             return <option key={r.id} value={r.id}>{r.name} ({type})</option>;
           })}
         </select>
@@ -468,12 +541,13 @@ const TABS = [
 
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageClasses, scRefreshing, onRefreshStorageClasses, backupProfiles, attachedBackupProfiles, onAttachBackup, onDetachBackup }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, backupProfiles, attachedBackupProfiles, onAttachBackup, onDetachBackup }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
   const [pgSearch, setPgSearch] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState({});
+  const [pendingAttach, setPendingAttach] = useState([]);
 
   // Build version options from postgres_versions table
   const versionOptions = useMemo(() => {
@@ -575,7 +649,7 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
 
   function confirmSave() {
     setShowConfirm(false);
-    onSave();
+    onSave(pendingAttach);
   }
 
   // Count non-default pg_params for badge
@@ -671,9 +745,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
           <section className="form-section">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <h4>Volumes</h4>
-              <button className="btn-sm" onClick={onRefreshStorageClasses} disabled={scRefreshing}>
-                {scRefreshing ? 'Refreshing...' : 'Refresh Storage Classes'}
-              </button>
             </div>
             <div className="volume-section">
               <div className="volume-toggle">
@@ -692,8 +763,8 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
                   <input className="input" value={spec.storage.size} onChange={e => setSpec(s => ({ ...s, storage: { ...s.storage, size: e.target.value } }))} />
                 </div>
                 <div className="form-row">
-                  <label>Storage Class</label>
-                  <StorageClassSelect value={spec.storage.storage_class} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, storage: { ...s.storage, storage_class: v } }))} />
+                  <label>Storage Tier</label>
+                  <StorageClassSelect value={spec.storage.storage_class} storageTiers={storageTiers} onChange={v => setSpec(s => ({ ...s, storage: { ...s.storage, storage_class: v } }))} />
                 </div>
               </div>
             </div>
@@ -712,27 +783,12 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
                     <input className="input" value={spec.wal_storage.size} onChange={e => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, size: e.target.value } }))} />
                   </div>
                   <div className="form-row">
-                    <label>Storage Class</label>
-                    <StorageClassSelect value={spec.wal_storage.storage_class} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, storage_class: v } }))} />
+                    <label>Storage Tier</label>
+                    <StorageClassSelect value={spec.wal_storage.storage_class} storageTiers={storageTiers} onChange={v => setSpec(s => ({ ...s, wal_storage: { ...s.wal_storage, storage_class: v } }))} />
                   </div>
                 </div>
               )}
             </div>
-            {spec.archive?.mode === 'pvc' && (
-              <div className="volume-section">
-                <h5>WAL Archive Volume</h5>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>Size</label>
-                    <input className="input" value={spec.archive?.archive_storage?.size || ''} onChange={e => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), size: e.target.value } } }))} />
-                  </div>
-                  <div className="form-row">
-                    <label>Storage Class</label>
-                    <StorageClassSelect value={spec.archive?.archive_storage?.storage_class || ''} storageClasses={storageClasses} onChange={v => setSpec(s => ({ ...s, archive: { ...s.archive, archive_storage: { ...(s.archive?.archive_storage || {}), storage_class: v } } }))} />
-                  </div>
-                </div>
-              </div>
-            )}
           </section>
         )}
 
@@ -953,9 +1009,20 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
         {activeTab === 'backups' && (
           <section className="form-section">
             <h4>Backup Profiles</h4>
-            <p className="muted sm" style={{ marginBottom: 12 }}>Attach up to two backup profiles: one physical (base backup + WAL) and one logical (pg_dump). Each targets a single destination.</p>
+            <p className="muted sm" style={{ marginBottom: 12 }}>Configure Backup. Profiles can be configured in Backup Profiles.</p>
             {state.isNew ? (
-              <div className="empty" style={{ padding: 16 }}>Save the profile first, then attach backup profiles.</div>
+              <ProfileBackupProfiles
+                profileId="__new__"
+                attached={pendingAttach}
+                allRules={backupProfiles}
+                onAttach={(_pid, ruleId) => {
+                  const rule = backupProfiles.find(r => r.id === ruleId);
+                  if (rule) setPendingAttach(prev => [...prev, rule]);
+                }}
+                onDetach={(_pid, ruleId) => {
+                  setPendingAttach(prev => prev.filter(r => r.id !== ruleId));
+                }}
+              />
             ) : (
               <ProfileBackupProfiles
                 profileId={state.id}
@@ -1038,9 +1105,6 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOn
               <ReportRow label="Data" value={`${spec.storage.size}${spec.storage.storage_class ? ` (${spec.storage.storage_class})` : ''}`} />
               {spec.wal_storage && (
                 <ReportRow label="WAL" value={`${spec.wal_storage.size}${spec.wal_storage.storage_class ? ` (${spec.wal_storage.storage_class})` : ''}`} />
-              )}
-              {spec.archive?.mode === 'pvc' && spec.archive?.archive_storage?.size && (
-                <ReportRow label="WAL Archive" value={`${spec.archive.archive_storage.size}${spec.archive.archive_storage.storage_class ? ` (${spec.archive.archive_storage.storage_class})` : ''}`} />
               )}
             </div>
           </div>
@@ -1126,17 +1190,15 @@ function ReportRow({ label, value }) {
   );
 }
 
-function StorageClassSelect({ value, storageClasses, onChange }) {
-  // If the current value isn't in the list (e.g. typed manually before), keep it as an option
-  const hasValue = !value || storageClasses.some(sc => sc.name === value);
+function StorageClassSelect({ value, storageTiers = [], onChange }) {
+  const isTier = value && value.startsWith('tier:');
+  const hasValue = !value || isTier || storageTiers.some(t => 'tier:' + t.name === value);
   return (
     <select className="input" value={value} onChange={e => onChange(e.target.value)}>
       <option value="">Default</option>
-      {!hasValue && <option value={value}>{value}</option>}
-      {storageClasses.map(sc => (
-        <option key={sc.name} value={sc.name}>
-          {sc.name}{sc.is_default ? ' (default)' : ''} — {sc.provisioner}
-        </option>
+      {!hasValue && value && <option value={value}>{value}</option>}
+      {storageTiers.map(t => (
+        <option key={t.name} value={'tier:' + t.name}>{t.name}{t.description ? ' — ' + t.description : ''}</option>
       ))}
     </select>
   );

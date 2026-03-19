@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
+	"github.com/rs/zerolog/log"
 )
 
 // PostgresStore implements the Store interface using a PostgreSQL connection pool.
@@ -24,8 +25,8 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 
 // Column lists used across queries (keep in sync with scanners below).
 const (
-	satCols = `id, hostname, k8s_cluster_name, region, labels, storage_classes, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
-	cfgCols = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at`
+	satCols  = `id, name, hostname, k8s_cluster_name, region, labels, storage_classes, tier_mappings, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
+	cfgCols  = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at`
 	ruleCols = `id, name, profile_id, label_selector, namespace, cluster_name, created_at, updated_at`
 )
 
@@ -34,13 +35,16 @@ func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 	var sat models.Satellite
 	var labelsJSON []byte
 	var scJSON []byte
+	var tmJSON []byte
 	err := row.Scan(
 		&sat.ID,
+		&sat.Name,
 		&sat.Hostname,
 		&sat.K8sClusterName,
 		&sat.Region,
 		&labelsJSON,
 		&scJSON,
+		&tmJSON,
 		&sat.State,
 		&sat.AuthTokenHash,
 		&sat.TempTokenHash,
@@ -66,6 +70,14 @@ func scanSatellite(row pgx.Row) (*models.Satellite, error) {
 	}
 	if sat.StorageClasses == nil {
 		sat.StorageClasses = []models.StorageClassInfo{}
+	}
+	if tmJSON != nil {
+		if err := json.Unmarshal(tmJSON, &sat.TierMappings); err != nil {
+			return nil, fmt.Errorf("unmarshal satellite tier_mappings: %w", err)
+		}
+	}
+	if sat.TierMappings == nil {
+		sat.TierMappings = make(map[string]string)
 	}
 	return &sat, nil
 }
@@ -202,11 +214,14 @@ func (s *PostgresStore) CreateSatellite(ctx context.Context, sat *models.Satelli
 	if sat.State == "" {
 		sat.State = models.SatelliteStatePending
 	}
+	if sat.Name == "" {
+		sat.Name = sat.K8sClusterName // Default to k8s cluster name initially
+	}
 
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO satellites (id, hostname, k8s_cluster_name, region, labels, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		sat.ID, sat.Hostname, sat.K8sClusterName, sat.Region, labelsJSON, sat.State,
+		`INSERT INTO satellites (id, name, hostname, k8s_cluster_name, region, labels, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		sat.ID, sat.Name, sat.Hostname, sat.K8sClusterName, sat.Region, labelsJSON, sat.State,
 		sat.AuthTokenHash, sat.TempTokenHash, sat.LastHeartbeat,
 		sat.CreatedAt, sat.UpdatedAt,
 	)
@@ -261,6 +276,19 @@ func (s *PostgresStore) UpdateSatelliteState(ctx context.Context, id uuid.UUID, 
 		`UPDATE satellites SET state = $1, updated_at = NOW() WHERE id = $2`, state, id)
 	if err != nil {
 		return fmt.Errorf("update satellite state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("satellite %s not found", id)
+	}
+	return nil
+}
+
+// UpdateSatelliteName sets the unique name of a satellite.
+func (s *PostgresStore) UpdateSatelliteName(ctx context.Context, id uuid.UUID, name string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE satellites SET name = $1, updated_at = NOW() WHERE id = $2`, name, id)
+	if err != nil {
+		return fmt.Errorf("update satellite name: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("satellite %s not found", id)
@@ -330,6 +358,102 @@ func (s *PostgresStore) UpdateSatelliteStorageClasses(ctx context.Context, id uu
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("satellite %s not found", id)
+	}
+	return nil
+}
+
+// UpdateSatelliteTierMappings replaces the tier mappings for a satellite.
+func (s *PostgresStore) UpdateSatelliteTierMappings(ctx context.Context, id uuid.UUID, mappings map[string]string) error {
+	if mappings == nil {
+		mappings = make(map[string]string)
+	}
+	tmJSON, err := json.Marshal(mappings)
+	if err != nil {
+		return fmt.Errorf("marshal tier mappings: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE satellites SET tier_mappings = $1, updated_at = NOW() WHERE id = $2`, tmJSON, id)
+	if err != nil {
+		return fmt.Errorf("update satellite tier mappings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("satellite %s not found", id)
+	}
+	return nil
+}
+
+// ---- Storage Tiers ----
+
+func (s *PostgresStore) CreateStorageTier(ctx context.Context, tier *models.StorageTier) error {
+	if tier.ID == uuid.Nil {
+		tier.ID = uuid.New()
+	}
+	now := time.Now()
+	tier.CreatedAt = now
+	tier.UpdatedAt = now
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO storage_tiers (id, name, description, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		tier.ID, tier.Name, tier.Description, tier.CreatedAt, tier.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("create storage tier: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetStorageTier(ctx context.Context, id uuid.UUID) (*models.StorageTier, error) {
+	var t models.StorageTier
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, name, description, created_at, updated_at FROM storage_tiers WHERE id = $1`, id).
+		Scan(&t.ID, &t.Name, &t.Description, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get storage tier: %w", err)
+	}
+	return &t, nil
+}
+
+func (s *PostgresStore) ListStorageTiers(ctx context.Context) ([]*models.StorageTier, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, description, created_at, updated_at FROM storage_tiers ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list storage tiers: %w", err)
+	}
+	defer rows.Close()
+	var tiers []*models.StorageTier
+	for rows.Next() {
+		var t models.StorageTier
+		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan storage tier: %w", err)
+		}
+		tiers = append(tiers, &t)
+	}
+	if tiers == nil {
+		tiers = []*models.StorageTier{}
+	}
+	return tiers, rows.Err()
+}
+
+func (s *PostgresStore) UpdateStorageTier(ctx context.Context, tier *models.StorageTier) error {
+	tier.UpdatedAt = time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE storage_tiers SET name = $1, description = $2, updated_at = $3 WHERE id = $4`,
+		tier.Name, tier.Description, tier.UpdatedAt, tier.ID)
+	if err != nil {
+		return fmt.Errorf("update storage tier: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("storage tier %s not found", tier.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteStorageTier(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM storage_tiers WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete storage tier: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("storage tier %s not found", id)
 	}
 	return nil
 }
@@ -464,11 +588,11 @@ func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.Clu
 	var newVersion int64
 	err := s.pool.QueryRow(ctx,
 		`UPDATE cluster_configs SET name = $1, namespace = $2, satellite_id = $3,
-		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, state = $7, paused = $8, updated_at = $9
-		 WHERE id = $10
+		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, paused = $7, updated_at = $8
+		 WHERE id = $9
 		 RETURNING config_version`,
 		cfg.Name, cfg.Namespace, cfg.SatelliteID,
-		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.State, cfg.Paused, cfg.UpdatedAt, cfg.ID,
+		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.Paused, cfg.UpdatedAt, cfg.ID,
 	).Scan(&newVersion)
 	if err != nil {
 		return fmt.Errorf("update cluster config: %w", err)
@@ -575,8 +699,11 @@ func (s *PostgresStore) CreateProfile(ctx context.Context, p *models.ClusterProf
 // GetProfile returns a cluster profile by its ID.
 func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.ClusterProfile, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, name, description, config, locked, created_at, updated_at
-		 FROM cluster_profiles WHERE id = $1`, id)
+		`SELECT p.id, p.name, p.description, p.config, 
+		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR 
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked, 
+		        p.created_at, p.updated_at
+		 FROM cluster_profiles p WHERE p.id = $1`, id)
 	p, err := scanProfile(row)
 	if err != nil {
 		return nil, fmt.Errorf("get profile %s: %w", id, err)
@@ -587,8 +714,11 @@ func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.C
 // ListProfiles returns all cluster profiles ordered by creation time.
 func (s *PostgresStore) ListProfiles(ctx context.Context) ([]*models.ClusterProfile, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, description, config, locked, created_at, updated_at
-		 FROM cluster_profiles ORDER BY created_at DESC`)
+		`SELECT p.id, p.name, p.description, p.config, 
+		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR 
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked, 
+		        p.created_at, p.updated_at
+		 FROM cluster_profiles p ORDER BY p.created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list profiles: %w", err)
 	}
@@ -612,39 +742,70 @@ func (s *PostgresStore) UpdateProfile(ctx context.Context, p *models.ClusterProf
 	}
 	p.UpdatedAt = time.Now()
 
+	var inUse bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM deployment_rules WHERE profile_id = $1) OR 
+		       EXISTS(SELECT 1 FROM cluster_configs WHERE profile_id = $1)`, p.ID).Scan(&inUse)
+	if err != nil {
+		return fmt.Errorf("check profile lock state: %w", err)
+	}
+	if inUse {
+		return fmt.Errorf("profile %s is currently in use and cannot be edited", p.ID)
+	}
+
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, updated_at = $4
-		 WHERE id = $5 AND locked = FALSE`,
+		 WHERE id = $5`,
 		p.Name, p.Description, p.Config, p.UpdatedAt, p.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("profile %s not found or is locked", p.ID)
+		return fmt.Errorf("profile %s not found", p.ID)
 	}
 	return nil
+}
+
+// TouchProfile bumps the updated_at timestamp on a cluster profile without
+// changing any other fields. Used when an attached backup profile changes.
+func (s *PostgresStore) TouchProfile(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE cluster_profiles SET updated_at = NOW() WHERE id = $1`, id)
+	return err
 }
 
 // DeleteProfile removes a cluster profile if it is not locked.
 func (s *PostgresStore) DeleteProfile(ctx context.Context, id uuid.UUID) error {
+	var inUse bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM deployment_rules WHERE profile_id = $1) OR 
+		       EXISTS(SELECT 1 FROM cluster_configs WHERE profile_id = $1)`, id).Scan(&inUse)
+	if err != nil {
+		return fmt.Errorf("check profile lock state: %w", err)
+	}
+	if inUse {
+		return fmt.Errorf("profile %s is currently in use and cannot be deleted", id)
+	}
+
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM cluster_profiles WHERE id = $1 AND locked = FALSE`, id)
+		`DELETE FROM cluster_profiles WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("profile %s not found or is locked", id)
+		return fmt.Errorf("profile %s not found", id)
 	}
 	return nil
 }
 
-// LockProfile marks a profile as locked, preventing further edits or deletion.
-func (s *PostgresStore) LockProfile(ctx context.Context, id uuid.UUID) error {
+// ForceDeleteProfile removes a cluster profile regardless of lock state.
+// Used by cascade deletion where the caller has already cleaned up dependents.
+func (s *PostgresStore) ForceDeleteProfile(ctx context.Context, id uuid.UUID) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE cluster_profiles SET locked = TRUE, updated_at = NOW() WHERE id = $1`, id)
+		`DELETE FROM cluster_profiles WHERE id = $1`, id)
 	if err != nil {
-		return fmt.Errorf("lock profile: %w", err)
+		return fmt.Errorf("force delete profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("profile %s not found", id)
@@ -966,13 +1127,16 @@ func (s *PostgresStore) DeletePostgresVariant(ctx context.Context, id uuid.UUID)
 // UpdateClusterConfigState sets the cluster config state based on health reports.
 // It only updates if the current state is not paused or deleting (user-controlled states).
 func (s *PostgresStore) UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error {
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE cluster_configs SET state = $1, updated_at = NOW()
 		 WHERE satellite_id = $2 AND name = $3 AND state NOT IN ('paused', 'deleting')`,
 		state, satelliteID, clusterName,
 	)
 	if err != nil {
 		return fmt.Errorf("update cluster config state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		log.Warn().Str("satellite_id", satelliteID.String()).Str("cluster", clusterName).Str("state", string(state)).Msg("state update matched no rows")
 	}
 	return nil
 }
@@ -1253,6 +1417,26 @@ func (s *PostgresStore) ListBackupProfilesForProfile(ctx context.Context, profil
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+// ListProfileIDsForBackupProfile returns all profile IDs that have the given backup profile attached.
+func (s *PostgresStore) ListProfileIDsForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT profile_id FROM profile_backup_profiles WHERE backup_profile_id = $1`, backupProfileID)
+	if err != nil {
+		return nil, fmt.Errorf("list profiles for backup profile: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan profile id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ---------- Backup Inventory ----------

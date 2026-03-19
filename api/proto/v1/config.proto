@@ -138,14 +138,16 @@ message DatabaseSpec {
 }
 
 message ArchiveSpec {
-  string mode = 1;                          // "pvc" or "custom"; empty = disabled
+  string mode = 1;                          // "custom"; empty = disabled. WAL archiving via backup sidecar is configured through BackupConfig.
   string archive_command = 2;               // required for "custom"
   string restore_command = 3;               // optional for "custom"
   int32 archive_timeout_seconds = 4;        // default 60
-  ArchiveStorageSpec archive_storage = 5;   // for "pvc" mode
+  ArchiveStorageSpec archive_storage = 5;   // deprecated — PVC archive mode removed
   SecretRef credentials_secret = 6;         // for "custom" mode
 }
 
+// Deprecated: PVC archive mode has been removed. This message is retained
+// for proto wire compatibility but is no longer used.
 message ArchiveStorageSpec {
   string size = 1;
   string storage_class = 2;
