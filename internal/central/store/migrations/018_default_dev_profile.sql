@@ -33,7 +33,7 @@ INSERT INTO cluster_profiles (id, name, description, config) VALUES (
         "pg_params": {
             "log_statement": "ddl",
             "log_min_messages": "error",
-            "log_min_duration_statement": "0",
+            "log_min_duration_statement": "500",
             "shared_buffers": "512MB",
             "work_mem": "8MB"
         },

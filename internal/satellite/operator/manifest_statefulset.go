@@ -355,12 +355,25 @@ if [ -f "$PGDATA/PG_VERSION" ]; then
                     echo "pg_rewind succeeded"
                     if [ -f "$PGDATA/backup_label" ]; then echo "Removing stale backup_label after pg_rewind"; rm -f "$PGDATA/backup_label"; fi
                     if [ -f "$PGDATA/tablespace_map" ]; then echo "Removing stale tablespace_map after pg_rewind"; rm -f "$PGDATA/tablespace_map"; fi
-                    # Clean up stale/pre-allocated WAL segments to prevent "invalid record length"
-                    CKPT_WAL=$(pg_controldata -D "$PGDATA" 2>/dev/null | grep "REDO WAL file" | awk '{print $NF}')
+                    # Clean up stale/pre-allocated WAL segments to prevent "invalid record length".
+                    # Keep BOTH the REDO WAL file (replay start) AND the segment holding the
+                    # checkpoint record itself — they can be in different segments when a
+                    # checkpoint spans a WAL segment boundary.
+                    CTLDATA=$(pg_controldata -D "$PGDATA" 2>/dev/null)
+                    CKPT_WAL=$(echo "$CTLDATA" | grep "REDO WAL file" | awk '{print $NF}')
+                    CKPT_LOC=$(echo "$CTLDATA" | grep "Latest checkpoint location" | awk '{print $NF}')
+                    CKPT_SEG_SIZE=$(echo "$CTLDATA" | grep "Bytes per WAL segment" | awk '{print $NF}')
+                    CKPT_REC_WAL=""
+                    if [ -n "$CKPT_WAL" ] && [ -n "$CKPT_LOC" ]; then
+                        _HI=$(printf '%%d' "0x${CKPT_LOC%%/*}")
+                        _LO=$(printf '%%d' "0x${CKPT_LOC##*/}")
+                        _SEG=$(( _LO / ${CKPT_SEG_SIZE:-16777216} ))
+                        CKPT_REC_WAL=$(printf "%%s%%08X%%08X" "${CKPT_WAL:0:8}" "$_HI" "$_SEG")
+                    fi
                     if [ -n "$CKPT_WAL" ]; then
-                        echo "pg-swarm: cleaning stale WAL segments after pg_rewind (keeping $CKPT_WAL)"
+                        echo "pg-swarm: cleaning stale WAL segments after pg_rewind (keeping $CKPT_WAL${CKPT_REC_WAL:+ and $CKPT_REC_WAL})"
                         find "$PGDATA/pg_wal" -maxdepth 1 -type f \
-                            ! -name "$CKPT_WAL" ! -name "*.history" ! -name "*.backup" \
+                            ! -name "$CKPT_WAL" ! -name "${CKPT_REC_WAL:-$CKPT_WAL}" ! -name "*.history" ! -name "*.backup" \
                             -delete 2>/dev/null || true
                     fi
                     if [ -n "$CKPT_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_WAL" ]; then
@@ -592,12 +605,25 @@ pg_swarm_recover() {
         echo "pg-swarm: pg_rewind succeeded"
         if [ -f "$PGDATA/backup_label" ]; then echo "pg-swarm: removing stale backup_label after pg_rewind"; rm -f "$PGDATA/backup_label"; fi
         if [ -f "$PGDATA/tablespace_map" ]; then echo "pg-swarm: removing stale tablespace_map after pg_rewind"; rm -f "$PGDATA/tablespace_map"; fi
-        # Clean up stale/pre-allocated WAL segments to prevent "invalid record length"
-        CKPT_WAL=$(pg_controldata -D "$PGDATA" 2>/dev/null | grep "REDO WAL file" | awk '{print $NF}')
+        # Clean up stale/pre-allocated WAL segments to prevent "invalid record length".
+        # Keep BOTH the REDO WAL file (replay start) AND the segment holding the
+        # checkpoint record itself — they can be in different segments when a
+        # checkpoint spans a WAL segment boundary.
+        CTLDATA=$(pg_controldata -D "$PGDATA" 2>/dev/null)
+        CKPT_WAL=$(echo "$CTLDATA" | grep "REDO WAL file" | awk '{print $NF}')
+        CKPT_LOC=$(echo "$CTLDATA" | grep "Latest checkpoint location" | awk '{print $NF}')
+        CKPT_SEG_SIZE=$(echo "$CTLDATA" | grep "Bytes per WAL segment" | awk '{print $NF}')
+        CKPT_REC_WAL=""
+        if [ -n "$CKPT_WAL" ] && [ -n "$CKPT_LOC" ]; then
+            _HI=$(printf '%%d' "0x${CKPT_LOC%%/*}")
+            _LO=$(printf '%%d' "0x${CKPT_LOC##*/}")
+            _SEG=$(( _LO / ${CKPT_SEG_SIZE:-16777216} ))
+            CKPT_REC_WAL=$(printf "%%s%%08X%%08X" "${CKPT_WAL:0:8}" "$_HI" "$_SEG")
+        fi
         if [ -n "$CKPT_WAL" ]; then
-            echo "pg-swarm: cleaning stale WAL segments after pg_rewind (keeping $CKPT_WAL)"
+            echo "pg-swarm: cleaning stale WAL segments after pg_rewind (keeping $CKPT_WAL${CKPT_REC_WAL:+ and $CKPT_REC_WAL})"
             find "$PGDATA/pg_wal" -maxdepth 1 -type f \
-                ! -name "$CKPT_WAL" ! -name "*.history" ! -name "*.backup" \
+                ! -name "$CKPT_WAL" ! -name "${CKPT_REC_WAL:-$CKPT_WAL}" ! -name "*.history" ! -name "*.backup" \
                 -delete 2>/dev/null || true
         fi
         if [ -n "$CKPT_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_WAL" ]; then
