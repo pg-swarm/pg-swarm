@@ -1302,6 +1302,10 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("profile_id", id.String()).Str("name", profile.Name).Msg("profile updated")
+
+	// Propagate changes to all clusters using this profile
+	s.rePushClustersForProfile(c.Context(), id)
+
 	return c.JSON(profile)
 }
 

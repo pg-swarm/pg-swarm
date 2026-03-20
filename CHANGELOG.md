@@ -1,6 +1,57 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
+
+### Sidecar streaming connector
+
+- Bidirectional gRPC streaming between failover sidecars and satellite agent (`internal/satellite/sidecar/`, `internal/failover/connector.go`).
+- Persistent connection with exponential backoff and automatic reconnection.
+- Command protocol: fence, checkpoint, promote, unfence, status. Each command returns a typed `CommandResult`.
+- Sidecar identity exchange and heartbeat keep-alive.
+
+### Satellite-controlled switchover
+
+- Switchover is now a satellite-controlled 9-step process (previously central-initiated 7-step).
+- Steps: verify target, discover primary, check replica status, fence primary (with drain), checkpoint, transfer lease, promote, label pods, renew lease.
+- Point of no return (PONR) at step 7 (promote).
+- `FencePrimaryWithOpts` supports configurable drain timeout.
+- WebSocket progress broadcasting via ops tracker — dashboard receives real-time step updates.
+
+### Log watcher and recovery rules
+
+- `internal/failover/logwatcher.go`: Real-time PG log monitoring via K8s log API.
+- 40+ recovery patterns across 9 categories: data corruption, OOM, WAL issues, replication failures, configuration errors, connection issues, storage, tablespace, and extension problems.
+- Action types: restart, rewind, rebasebackup, event, exec. Configurable cooldown, deduplication, and action mutex.
+- Recovery rule sets: central CRUD (`/api/v1/recovery-rule-sets`) with dashboard editor and pattern sandbox.
+- Recovery rules attached to cluster configs via `recovery_rule_set` field.
+
+### Backup profiles and inventory
+
+- Backup profile CRUD (`/api/v1/backup-profiles`): schedule configuration, destination settings, retention policies.
+- Attach/detach backup profiles to cluster profiles (`/api/v1/profiles/:id/backup-profiles`).
+- Backup inventory browsing (`/api/v1/clusters/:id/backups`) — lists backup sets reported by sidecars.
+- Restore operations (`/api/v1/clusters/:id/restore`, `/api/v1/clusters/:id/restores`) — initiate and track restores.
+
+### Storage tiers and image variants
+
+- Storage tier CRUD (`/api/v1/storage-tiers`) with satellite tier mappings.
+- Image variant management (`/api/v1/postgres-variants`) for postgres base images.
+
+### WebSocket hub and ops tracker
+
+- `internal/central/server/ws.go`: WebSocket hub for real-time state push to dashboard clients.
+- `internal/central/server/ops_tracker.go`: Active operation tracking with progress updates, used by switchover and restore flows.
+- Dashboard uses WebSocket with automatic polling fallback.
+
+### Dashboard: new pages and components
+
+- **Backup Profiles page**: Backup profile CRUD, schedule configuration, destination settings.
+- **Satellite Logs page**: Terminal-style log viewer with SSE streaming, server-side level dropdown, client-side level filter, auto-scroll toggle, clear button.
+- **Cluster Detail page**: Full-page cluster view with tabs (Instances, Backups, Events), separated from the Clusters list page.
+- **SwitchoverProgressModal**: 9-step visualization with PONR indicator, real-time WebSocket updates.
+- **RecoveryRulesTab**: Recovery rule set management in Admin page, inline rule editing, pattern sandbox.
+- **MiniHeader**: Compact header for full-page routes (SatelliteLogs, ClusterDetail).
+- **Admin page**: Expanded from 1 tab (PG Versions) to 4 tabs (Storage Tiers, Image Variants, PG Versions, Recovery Rules).
 
 ### Satellite log streaming and dynamic log levels
 

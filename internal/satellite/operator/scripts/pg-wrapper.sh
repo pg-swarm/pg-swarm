@@ -257,7 +257,9 @@ while true; do
 
     # Scan PG output for fatal errors that are immediately unrecoverable.
     # React on the FIRST crash instead of waiting for the crash-loop breaker.
-    if [ "$ORDINAL" != "0" ] && [ -f "$PG_LOG" ]; then
+    # Skip if the failover sidecar already wrote the basebackup marker
+    # (it detects these errors in real-time via logwatcher).
+    if [ "$ORDINAL" != "0" ] && [ -f "$PG_LOG" ] && [ ! -f "$MARKER" ]; then
         if grep -qE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal' "$PG_LOG"; then
             MATCHED=$(grep -oE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal' "$PG_LOG" | head -1)
             echo "pg-swarm: FATAL unrecoverable error detected: $MATCHED"

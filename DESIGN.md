@@ -15,7 +15,7 @@ pg-swarm is a centralized management system for PostgreSQL High Availability (HA
 | Centralized visibility | All health and events stream to central; REST API + web dashboard for ops |
 | Automated failover | Per-pod sidecar with Lease-based leader election; no central round-trip required |
 | Split-brain prevention | SQL fencing + K8s exec demotion; old primary converted to standby |
-| Planned switchover | Central-initiated primary switch with fencing and WAL catch-up |
+| Planned switchover | Satellite-controlled 9-step orchestration with progress tracking |
 | Secure by default | Token-based auth with SHA-256 hashing; mTLS planned for Phase 7 |
 
 ### Tech Stack
@@ -96,16 +96,19 @@ pg-swarm/
 │   │   ├── common.proto             # Shared enums (SatelliteState, ClusterState, InstanceRole)
 │   │   ├── registration.proto       # Register + CheckApproval RPCs
 │   │   ├── config.proto             # Bidirectional streaming + ClusterConfig messages
-│   │   └── health.proto             # Health reports, events, database/table/query stats
+│   │   ├── health.proto             # Health reports, events, database/table/query stats
+│   │   └── backup.proto             # BackupConfig, BackupStatusReport, RestoreCommand, destinations
 │   └── gen/v1/                      # Generated Go code (buf generate)
 ├── internal/
 │   ├── central/
 │   │   ├── server/
 │   │   │   ├── grpc.go              # gRPC server, StreamManager, auth interceptors
 │   │   │   ├── grpc_health_test.go  # Health report gRPC tests
-│   │   │   └── rest.go              # REST API (GoFiber v2, 30+ endpoints)
+│   │   │   ├── rest.go              # REST API (GoFiber v2, 60+ endpoints)
+│   │   │   ├── ws.go               # WebSocket hub for real-time state push
+│   │   │   └── ops_tracker.go      # Active operation tracking with progress updates
 │   │   ├── store/
-│   │   │   ├── store.go             # Store interface (40+ methods)
+│   │   │   ├── store.go             # Store interface (79 methods)
 │   │   │   ├── postgres.go          # PostgreSQL implementation (pgxpool)
 │   │   │   ├── migrate.go           # Embedded SQL migration runner
 │   │   │   └── migrations/          # SQL migration files
@@ -125,14 +128,21 @@ pg-swarm/
 │   │   │   ├── manifest_configmap.go  # postgresql.conf + pg_hba.conf
 │   │   │   ├── manifest_secret.go   # Password generation + create-only semantics
 │   │   │   ├── manifest_rbac.go     # ServiceAccount, Role, RoleBinding for failover
-│   │   │   └── manifest_test.go     # Golden-file manifest tests
+│   │   │   ├── manifest_test.go     # Golden-file manifest tests
+│   │   │   └── tombstone.go        # Cluster deletion markers
+│   │   ├── sidecar/                 # gRPC server for failover sidecar streaming
+│   │   │   ├── server.go           # SidecarStreamService gRPC server
+│   │   │   └── stream_manager.go   # Sidecar connection lifecycle
+│   │   ├── logcapture/             # Satellite log capture and forwarding
 │   │   └── health/
 │   │       ├── monitor.go           # Health checker + reporter (10s interval)
 │   │       ├── monitor_test.go      # Health monitor tests
-│   │       └── switchover.go        # Planned switchover orchestration
+│   │       └── switchover.go        # Satellite-controlled 9-step switchover
 │   ├── failover/
 │   │   ├── monitor.go               # Sidecar: Lease election, fencing, demotion
-│   │   └── monitor_test.go          # Split-brain + lease tests
+│   │   ├── monitor_test.go          # Split-brain + lease tests
+│   │   ├── logwatcher.go            # Real-time PG log monitoring (40+ patterns)
+│   │   └── connector.go             # Bidirectional gRPC streaming to satellite
 │   ├── backup/                      # Backup sidecar package
 │   │   ├── sidecar.go              # Lifecycle, role detection, role switching
 │   │   ├── api.go                  # HTTP server (WAL push/fetch, backup/complete, /healthz)
@@ -155,13 +165,16 @@ pg-swarm/
 │   ├── embed.go                     # Go embed for static dashboard assets
 │   └── dashboard/                   # React SPA (Vite)
 │       └── src/
-│           ├── App.jsx              # Router setup (7 routes)
+│           ├── App.jsx              # Router setup (10 routes)
 │           ├── main.jsx             # React entry point
 │           ├── api.js               # REST API client + helpers
 │           ├── index.css            # Global styles (CSS variables, responsive)
 │           ├── components/
 │           │   ├── Layout.jsx       # Topbar, nav with icons, status pill
-│           │   └── Badge.jsx        # State badges with lucide-react icons
+│           │   ├── Badge.jsx        # State badges with lucide-react icons
+│           │   ├── MiniHeader.jsx   # Compact header for full-page routes
+│           │   ├── SwitchoverProgressModal.jsx  # 9-step switchover visualization
+│           │   └── RecoveryRulesTab.jsx  # Recovery rule set editor for Admin
 │           ├── context/
 │           │   ├── DataContext.jsx   # Global data provider (10s auto-refresh)
 │           │   └── ToastContext.jsx  # Toast notification system
@@ -170,9 +183,12 @@ pg-swarm/
 │               ├── Satellites.jsx   # Satellite table, approve/reject, labels
 │               ├── Profiles.jsx     # Profile editor (6-tab form, PG params)
 │               ├── DeploymentRules.jsx  # Rule CRUD, cluster list per rule
-│               ├── Clusters.jsx     # Cluster cards, instance table, detail modal
+│               ├── Clusters.jsx     # Cluster cards, instance table
+│               ├── ClusterDetail.jsx  # Full-page cluster view (instances, backups, events)
+│               ├── BackupProfiles.jsx  # Backup profile CRUD + destinations
 │               ├── Events.jsx       # Event log with severity icons
-│               └── Admin.jsx        # PostgreSQL version registry
+│               ├── SatelliteLogs.jsx  # Terminal-style log viewer with SSE
+│               └── Admin.jsx        # 4 tabs: Storage Tiers, Image Variants, PG Versions, Recovery Rules
 ├── deploy/
 │   ├── docker/                      # Dockerfiles + docker-compose
 │   └── k8s/                         # Kubernetes manifests (kustomize)
@@ -218,6 +234,10 @@ service SatelliteStreamService {
 | `ClusterHealthReport` | Per-cluster health with instance details | Every 10 seconds |
 | `EventReport` | Significant events (failover, errors) | On occurrence |
 | `ConfigAck` | Acknowledge config receipt with success/error | On config push |
+| `BackupStatusReport` | Backup completion/failure from sidecar | On backup complete |
+| `RestoreStatusReport` | Restore completion/failure from sidecar | On restore complete |
+| `LogEntry` | Satellite log entry for central buffering | On log emission |
+| `SidecarMessage` | Sidecar identity, heartbeat, command results | Via sidecar stream |
 
 **Downstream (Central → Satellite):**
 
@@ -227,6 +247,10 @@ service SatelliteStreamService {
 | `DeleteCluster` | Remove a cluster | REST delete |
 | `HeartbeatAck` | Acknowledge heartbeat | On heartbeat |
 | `SwitchoverRequest` | Initiate planned primary switch | REST API |
+| `RestoreCommand` | Initiate restore on a cluster | REST API |
+| `SetLogLevel` | Change satellite log level remotely | REST API |
+| `SidecarCommand` | Fence, checkpoint, promote, unfence, status | Switchover flow |
+| `RequestStorageClasses` | Trigger storage class re-discovery | REST API |
 
 ### 4.3 ClusterConfig (Core Data Contract)
 
@@ -250,6 +274,8 @@ message ClusterConfig {
   repeated DatabaseSpec databases = 14; // application databases
   string profile_name = 15;          // originating profile name
   map<string, string> label_selector = 16; // satellite label matching
+  BackupConfig backup_config = 17;   // backup sidecar configuration
+  string recovery_rule_set = 18;     // recovery rule set name
 }
 ```
 
@@ -293,6 +319,36 @@ message InstanceHealth {
 ```
 
 The satellite health monitor connects to each user database individually to collect per-database table stats and cache hit ratios from `pg_statio_user_tables`. Slow queries require `pg_stat_statements` extension; the monitor gracefully skips this if the extension is not loaded.
+
+### 4.5 SidecarStreamService
+
+Bidirectional streaming RPC between failover sidecars and the satellite agent (`internal/satellite/sidecar/`, `internal/failover/connector.go`):
+
+```protobuf
+service SidecarStreamService {
+  rpc Connect(stream SidecarMessage) returns (stream SidecarCommand);
+}
+```
+
+**Upstream (Sidecar → Satellite):**
+
+| Message | Purpose | Frequency |
+|---------|---------|-----------|
+| `SidecarIdentity` | Pod name, cluster, namespace on connect | Once on connect |
+| `Heartbeat` | Keep-alive | Every 10 seconds |
+| `CommandResult` | Result of a dispatched command (success/error, output) | On command completion |
+
+**Downstream (Satellite → Sidecar):**
+
+| Command | Purpose | Trigger |
+|---------|---------|---------|
+| `fence` | Fence primary (block writes, kill connections) | Switchover step 4 |
+| `checkpoint` | Run CHECKPOINT on primary | Switchover step 5 |
+| `promote` | Run pg_promote() on target replica | Switchover step 7 |
+| `unfence` | Unfence primary (reset read-only) | Rollback/recovery |
+| `status` | Query sidecar health and PG state | On demand |
+
+The sidecar maintains a persistent connection with exponential backoff (1s to 30s). The satellite's `StreamManager` maps connected sidecars by pod name for targeted command dispatch during switchover.
 
 ---
 
@@ -347,15 +403,21 @@ The satellite stores its identity in a Kubernetes Secret (`pg-swarm-identity` in
 
 ### 6.1 Store Layer
 
-The `Store` interface defines 40+ methods across 7 domains:
+The `Store` interface defines 79 methods across 13 domains:
 
 | Domain | Methods | Key Details |
 |--------|---------|-------------|
-| Satellites | 10 | CRUD, token lookup, heartbeat, labels, storage classes, label selector query |
-| Cluster Configs | 7 | CRUD, query by satellite, pause/resume |
-| Profiles | 6 | CRUD, lock (immutable after deployment) |
+| Satellites | 12 | CRUD, token lookup, heartbeat, labels, storage classes, tier mappings, label selector query |
+| Cluster Configs | 8 | CRUD, query by satellite/profile, pause/resume |
+| Profiles | 7 | CRUD, lock, force delete, touch |
 | Deployment Rules | 7 | CRUD, query by profile, query clusters by rule |
 | Postgres Versions | 7 | CRUD, set default, query by version+variant |
+| Postgres Variants | 3 | List, create, delete |
+| Backup Profiles | 9 | CRUD, attach/detach to profiles, list for profile |
+| Backup Inventory | 4 | Create, update, list, get |
+| Restore Operations | 4 | Create, update, get, list |
+| Recovery Rule Sets | 5 | CRUD |
+| Storage Tiers | 6 | CRUD, satellite tier mappings, reassign configs |
 | Health | 4 | Upsert health, update config state from health, query |
 | Events | 3 | Create, list with limit, filter by cluster |
 
@@ -402,6 +464,39 @@ The `Store` interface defines 40+ methods across 7 domains:
                                                       │ is_default       │
                                                       │ UQ(version,var)  │
                                                       └──────────────────┘
+
+┌──────────────────┐       ┌──────────────────────┐       ┌──────────────────┐
+│ backup_profiles   │       │ profile_backup_       │       │ recovery_rule_   │
+├──────────────────┤       │ profiles (junction)   │       │ sets             │
+│ id (PK)          │◄──FK──├──────────────────────┤       ├──────────────────┤
+│ name (UQ)        │       │ profile_id ──────────┼──►    │ id (PK)          │
+│ config JSONB     │       │ backup_profile_id     │       │ name (UQ)        │
+│ created_at       │       └──────────────────────┘       │ rules JSONB      │
+│ updated_at       │                                       │ created_at       │
+└──────────────────┘                                       │ updated_at       │
+                                                           └──────────────────┘
+┌──────────────────┐       ┌──────────────────────┐       ┌──────────────────┐
+│ storage_tiers     │       │ satellite_tier_       │       │ postgres_        │
+├──────────────────┤       │ mappings             │       │ variants         │
+│ id (PK)          │◄──FK──├──────────────────────┤       ├──────────────────┤
+│ name (UQ)        │       │ satellite_id ────────┼──►    │ id (PK)          │
+│ config JSONB     │       │ tier_id              │       │ name (UQ)        │
+│ created_at       │       │ storage_class        │       │ image            │
+│ updated_at       │       └──────────────────────┘       │ created_at       │
+└──────────────────┘                                       └──────────────────┘
+
+┌──────────────────┐       ┌──────────────────┐
+│ backup_inventory  │       │ restore_          │
+├──────────────────┤       │ operations        │
+│ id (PK)          │       ├──────────────────┤
+│ satellite_id (FK)│       │ id (PK)          │
+│ cluster_name     │       │ cluster_config_id │
+│ backup_data JSONB│       │ backup_id         │
+│ created_at       │       │ status            │
+│ updated_at       │       │ details JSONB     │
+└──────────────────┘       │ created_at       │
+                           │ updated_at       │
+                           └──────────────────┘
 ```
 
 ### 6.3 Migration System
@@ -448,16 +543,33 @@ The 64-message buffer prevents slow satellites from blocking the REST API. If th
 
 ### 6.5 REST API
 
-All endpoints are under `/api/v1` using GoFiber v2:
+63 endpoints under `/api/v1` using GoFiber v2:
 
 | Method | Path | Description |
 |--------|------|-------------|
+| **WebSocket** | | |
+| GET | `/ws` | WebSocket for real-time state push |
 | **Satellites** | | |
 | GET | `/satellites` | List all satellites with derived state |
 | POST | `/satellites/{id}/approve` | Approve pending satellite → returns auth_token |
 | POST | `/satellites/{id}/reject` | Reject pending satellite |
 | PUT | `/satellites/{id}/labels` | Update satellite labels |
 | POST | `/satellites/{id}/refresh-storage-classes` | Trigger storage class discovery |
+| PUT | `/satellites/{id}/tier-mappings` | Update satellite storage tier mappings |
+| GET | `/satellites/{id}/logs` | Get buffered satellite logs |
+| GET | `/satellites/{id}/logs/stream` | SSE stream for real-time satellite logs |
+| POST | `/satellites/{id}/log-level` | Change satellite log level remotely |
+| **Storage Tiers** | | |
+| GET | `/storage-tiers` | List storage tiers |
+| POST | `/storage-tiers` | Create storage tier |
+| PUT | `/storage-tiers/{id}` | Update storage tier |
+| DELETE | `/storage-tiers/{id}` | Delete storage tier |
+| **Recovery Rule Sets** | | |
+| GET | `/recovery-rule-sets` | List recovery rule sets |
+| POST | `/recovery-rule-sets` | Create recovery rule set |
+| GET | `/recovery-rule-sets/{id}` | Get recovery rule set |
+| PUT | `/recovery-rule-sets/{id}` | Update recovery rule set |
+| DELETE | `/recovery-rule-sets/{id}` | Delete recovery rule set |
 | **Clusters** | | |
 | GET | `/clusters` | List all cluster configs |
 | POST | `/clusters` | Create cluster config → triggers push |
@@ -467,14 +579,9 @@ All endpoints are under `/api/v1` using GoFiber v2:
 | POST | `/clusters/{id}/pause` | Pause cluster (stops reconciliation) |
 | POST | `/clusters/{id}/resume` | Resume paused cluster |
 | POST | `/clusters/{id}/switchover` | Initiate planned primary switchover |
-| **Profiles** | | |
-| GET | `/profiles` | List all profiles |
-| POST | `/profiles` | Create profile |
-| GET | `/profiles/{id}` | Get profile |
-| PUT | `/profiles/{id}` | Update profile |
-| DELETE | `/profiles/{id}` | Delete profile |
-| POST | `/profiles/{id}/clone` | Clone profile with new name |
-| POST | `/profiles/{id}/lock` | Lock profile (immutable) |
+| GET | `/clusters/{id}/backups` | List backup inventory for cluster |
+| POST | `/clusters/{id}/restore` | Initiate restore operation |
+| GET | `/clusters/{id}/restores` | List restore operations for cluster |
 | **Deployment Rules** | | |
 | GET | `/deployment-rules` | List rules |
 | POST | `/deployment-rules` | Create rule → auto-creates cluster configs |
@@ -482,6 +589,26 @@ All endpoints are under `/api/v1` using GoFiber v2:
 | PUT | `/deployment-rules/{id}` | Update rule |
 | DELETE | `/deployment-rules/{id}` | Delete rule |
 | GET | `/deployment-rules/{id}/clusters` | List clusters created by rule |
+| **Profiles** | | |
+| GET | `/profiles` | List all profiles |
+| POST | `/profiles` | Create profile |
+| GET | `/profiles/{id}` | Get profile |
+| PUT | `/profiles/{id}` | Update profile |
+| DELETE | `/profiles/{id}` | Delete profile |
+| GET | `/profiles/{id}/cascade-preview` | Preview cascade delete impact |
+| POST | `/profiles/{id}/clone` | Clone profile with new name |
+| **Backup Profiles** | | |
+| GET | `/backup-profiles` | List backup profiles |
+| POST | `/backup-profiles` | Create backup profile |
+| GET | `/backup-profiles/{id}` | Get backup profile |
+| PUT | `/backup-profiles/{id}` | Update backup profile |
+| DELETE | `/backup-profiles/{id}` | Delete backup profile |
+| POST | `/profiles/{id}/backup-profiles` | Attach backup profile to profile |
+| DELETE | `/profiles/{id}/backup-profiles/{bpId}` | Detach backup profile from profile |
+| GET | `/profiles/{id}/backup-profiles` | List backup profiles for profile |
+| **Backup Inventory** | | |
+| GET | `/backups` | List all backup inventory |
+| GET | `/backups/{id}` | Get backup inventory entry |
 | **Health & Events** | | |
 | GET | `/health` | List all cluster health reports |
 | GET | `/events?limit=N` | List recent events (default limit: 100) |
@@ -491,6 +618,9 @@ All endpoints are under `/api/v1` using GoFiber v2:
 | PUT | `/postgres-versions/{id}` | Update PG version |
 | DELETE | `/postgres-versions/{id}` | Delete PG version |
 | POST | `/postgres-versions/{id}/default` | Set default PG version |
+| GET | `/postgres-variants` | List image variants |
+| POST | `/postgres-variants` | Create image variant |
+| DELETE | `/postgres-variants/{id}` | Delete image variant |
 
 ---
 
@@ -516,7 +646,7 @@ All endpoints are under `/api/v1` using GoFiber v2:
  │     └─ Every 10s: PG metrics + per-DB stats        │
  │                                                    │
  │  5. Switchover handler                             │
- │     └─ Central-initiated planned primary switch    │
+ │     └─ Satellite-controlled 9-step orchestration   │
  └──────────────────────────────────────────────────┘
 ```
 
@@ -625,22 +755,25 @@ The satellite health monitor runs a 10-second collection loop per cluster:
 
 ### 7.6 Planned Switchover
 
-The satellite handles central-initiated switchover requests:
+The satellite orchestrates switchover as a 9-step process with progress tracking. The switchover is satellite-controlled — central sends the `SwitchoverRequest`, and the satellite drives the entire flow using sidecar streaming for direct command dispatch:
 
 ```
- Switchover (Central → Satellite)
+ Switchover (Satellite-controlled, 9 steps)
     │
     ├─ 1. Verify target pod exists and is a replica
-    ├─ 2. Find current primary pod
-    ├─ 3. Verify target is streaming and caught up
-    ├─ 4. CHECKPOINT on primary (flush WAL)
-    ├─ 4b. Fence old primary (block writes + kill connections)
-    ├─ 5. Transfer leader lease to target pod
-    ├─ 6. pg_promote() on target replica
-    └─ 7. Report success to central
+    ├─ 2. Discover current primary pod (via sidecar stream)
+    ├─ 3. Check replica is streaming and caught up
+    ├─ 4. Fence primary with drain (FencePrimaryWithOpts, configurable timeout)
+    ├─ 5. CHECKPOINT on primary (flush WAL)
+    ├─ 6. Transfer leader lease to target pod
+    ├─ 7. pg_promote() on target replica    ◄── POINT OF NO RETURN
+    ├─ 8. Label pods (swap primary/replica labels)
+    └─ 9. Renew lease under new primary
 ```
 
-After switchover, the old primary's failover sidecar detects the split-brain condition on its next tick and automatically demotes PG to a standby (see Section 8).
+**Progress tracking**: Each step is reported to the ops tracker (`internal/central/server/ops_tracker.go`), which broadcasts updates to dashboard clients via WebSocket. The dashboard renders a `SwitchoverProgressModal` with real-time step visualization and a PONR indicator.
+
+**Rollback**: Steps 1-6 are reversible (unfence primary, restore lease). After step 7 (promote), the switchover cannot be rolled back — the old primary's failover sidecar detects the split-brain condition on its next tick and automatically demotes PG to a standby (see Section 8).
 
 ---
 
@@ -707,6 +840,8 @@ We intentionally do NOT lower `max_connections` because `ALTER SYSTEM` persists 
 
 **`IsFenced(ctx, db)`** — checks live `SHOW default_transaction_read_only`. Nil-safe with panic recovery.
 
+**`FencePrimaryWithOpts(ctx, db, opts)`** — extended fencing for switchover with configurable drain timeout. Allows existing connections to complete in-flight transactions before termination. Used by the satellite-controlled switchover (step 4).
+
 Fencing is **idempotent** — double-fencing from both switchover and sidecar is harmless. The `ALTER SYSTEM` settings persist in `postgresql.auto.conf` across restarts, ensuring PG stays read-only until explicitly unfenced.
 
 ### 8.4 Demotion via K8s Exec
@@ -748,6 +883,55 @@ The failover sidecar requires these Kubernetes permissions:
 | `REPLICATION_PASSWORD` | Secret | Set primary_conninfo on demotion |
 | `HEALTH_CHECK_INTERVAL` | Config | Tick interval in seconds (default: 1) |
 | `PRIMARY_HOST` | Config | RW service DNS for direct primary reachability check |
+
+### 8.7 Log Watcher (`internal/failover/logwatcher.go`)
+
+Real-time PostgreSQL log monitoring via the Kubernetes log API. The log watcher tails the postgres container's stdout/stderr and matches log lines against recovery patterns.
+
+**Pattern categories (40+ patterns across 9 categories):**
+
+| Category | Examples | Default Actions |
+|----------|----------|-----------------|
+| Data corruption | checksum failure, invalid page header | rebasebackup |
+| OOM | out of memory, kill process | restart |
+| WAL issues | WAL segment not found, timeline mismatch | rewind |
+| Replication failures | replication terminated, primary connection lost | event |
+| Configuration errors | invalid config parameter, could not bind | event |
+| Connection issues | too many connections, connection limit exceeded | event |
+| Storage | no space left on device, disk full | event |
+| Tablespace | tablespace not found, invalid tablespace | event |
+| Extension | extension not found, incompatible version | event |
+
+**Action types:**
+- `restart` — stop and restart PostgreSQL
+- `rewind` — run `pg_rewind` to re-sync with primary
+- `rebasebackup` — full re-sync via `pg_basebackup`
+- `event` — report event to central (no local action)
+- `exec` — run a custom command
+
+**Safety features:** cooldown period between actions (prevents action storms), pattern deduplication (same log line won't trigger twice), action mutex (only one recovery action at a time).
+
+Recovery patterns can be managed centrally via recovery rule sets and attached to clusters.
+
+### 8.8 Sidecar Streaming (`internal/failover/connector.go`)
+
+Bidirectional gRPC streaming between each failover sidecar and the satellite agent. This enables the satellite to dispatch commands directly to specific sidecars during switchover and other operations.
+
+**Connection lifecycle:**
+1. Sidecar connects to satellite's `SidecarStreamService` (see Section 4.5)
+2. Sends `SidecarIdentity` with pod name, cluster name, namespace
+3. Maintains heartbeat every 10 seconds
+4. Receives commands and returns results
+
+**Reconnection:** Exponential backoff (1s to 30s), automatic reconnection on disconnect.
+
+**Command flow during switchover:**
+1. Satellite's switchover handler looks up the sidecar stream by pod name
+2. Sends command (e.g., `fence`, `checkpoint`, `promote`) to the target sidecar
+3. Sidecar executes the command locally and returns `CommandResult` with success/error and output
+4. Satellite proceeds to next switchover step or handles failure
+
+This replaces the previous approach of K8s exec for switchover operations, providing lower latency and typed command/result protocol.
 
 ---
 
@@ -872,15 +1056,18 @@ The dashboard is a React 19 SPA built with Vite and JSX (not TypeScript). It is 
 
 ### 11.1 Pages
 
-| Page | Purpose |
-|------|---------|
-| **Overview** | Stat cards (satellites, clusters, healthy, events) with icons; recent activity table |
-| **Satellites** | Table with approve/reject, label editing, state badges |
-| **Profiles** | Grid of profile cards; 6-tab editor with PG parameter catalog |
-| **Deployment Rules** | Rule CRUD; expandable cards showing profile summary and created clusters |
-| **Clusters** | Card grid with instance table, disk/WAL breakdown, database sizes, cache hit ratio, slow queries, switchover buttons |
-| **Events** | Event log with severity icons (info, warning, error, critical) |
-| **Admin** | PostgreSQL version registry management |
+| Page | Route | Purpose |
+|------|-------|---------|
+| **Overview** | `/` | Stat cards (satellites, clusters, healthy, events) with icons; recent activity table |
+| **Satellites** | `/satellites` | Table with approve/reject, label editing, state badges, log viewer link |
+| **Profiles** | `/profiles` | Grid of profile cards; 6-tab editor with PG parameter catalog, backup profile attach/detach |
+| **Deployment Rules** | `/deployment-rules` | Rule CRUD; expandable cards showing profile summary and created clusters |
+| **Clusters** | `/clusters` | Card grid with instance table, disk/WAL breakdown, database sizes, cache hit ratio, slow queries, switchover buttons |
+| **Cluster Detail** | `/clusters/:id` | Full-page cluster view with tabs: Instances, Backups, Events (separate route, uses MiniHeader) |
+| **Backup Profiles** | `/backup-profiles` | Backup profile CRUD, schedule configuration, destination settings |
+| **Events** | `/events` | Event log with severity icons (info, warning, error, critical) |
+| **Satellite Logs** | `/satellites/:id/logs` | Terminal-style log viewer with SSE streaming, level filter, remote log level control (uses MiniHeader) |
+| **Admin** | `/admin` | 4 tabs: Storage Tiers, Image Variants, PG Versions, Recovery Rules |
 
 ### 11.2 Architecture
 
@@ -888,19 +1075,37 @@ The dashboard is a React 19 SPA built with Vite and JSX (not TypeScript). It is 
 - **ToastContext**: Toast notification system (auto-dismiss after 3.5s)
 - **Badge component**: Semantic state badges with lucide-react icons (CheckCircle2, Loader, AlertCircle, Pause, XCircle, etc.)
 - **Layout**: Sticky topbar with gradient, icon-enhanced navigation, satellite status pill
+- **MiniHeader**: Compact header for full-page routes (SatelliteLogs, ClusterDetail) outside the main Layout
+- **WebSocket**: Real-time state push for switchover progress and health updates, with automatic polling fallback
+- **Ops Tracker**: Active operation tracking — dashboard subscribes to operation updates via WebSocket
+- **SSE**: Server-sent events for satellite log streaming (`/satellites/:id/logs/stream`)
 
-### 11.3 Cluster Detail Modal
+### 11.3 Cluster Detail Page
 
-The instance detail modal provides deep visibility into each PG pod:
+The Cluster Detail page (`/clusters/:id`) is a full-page route providing deep visibility into a cluster:
 
-- **Instance Overview**: Ready state, timeline, connections, replication lag, PG uptime, WAL receiver status
-- **Disk Usage**: Data vs WAL bar chart with percentages against volume capacity
-- **WAL Statistics**: Records, bytes written, buffers full
-- **Databases**: Size, percentage of data, cache hit ratio (color-coded: green >= 99%, amber >= 95%, red < 95%). Clickable drill-down to table stats.
-- **Table Stats**: Live/dead tuples, seq/idx scans, inserts/updates/deletes, last vacuum
-- **Slow Queries**: Query text, database, calls, avg/max/total time, rows (from `pg_stat_statements`)
+- **Instances tab**: Per-pod details — ready state, timeline, connections, replication lag, PG uptime, WAL receiver status, disk/WAL breakdown, database sizes, cache hit ratios, table stats, slow queries
+- **Backups tab**: Backup inventory from sidecar reports, restore operations
+- **Events tab**: Cluster-specific event log
 
-### 11.4 Status Indicators
+### 11.4 Switchover Progress Modal
+
+The `SwitchoverProgressModal` component visualizes the 9-step satellite-controlled switchover in real-time:
+
+- Each step shown with status (pending, in-progress, completed, failed)
+- Point of no return (PONR) indicator at step 7 (promote)
+- Real-time updates via WebSocket from the ops tracker
+- Error details if a step fails, with rollback status for pre-PONR failures
+
+### 11.5 Recovery Rules Editor
+
+The `RecoveryRulesTab` component in the Admin page provides:
+
+- Recovery rule set CRUD (create, edit, delete)
+- Inline rule editing — add/remove patterns, configure actions, set cooldowns
+- Pattern sandbox — test regex patterns against sample log lines
+
+### 11.6 Status Indicators
 
 - **PG Status Dot**: Green (ready with uptime tooltip) or blinking red (not ready)
 - **Lag Dot**: Green (< 1 min), amber (1-3 min), blinking red (> 3 min)

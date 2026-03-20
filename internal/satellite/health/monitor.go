@@ -35,18 +35,51 @@ type Monitor struct {
 	mu           sync.Mutex
 	firstSeen    map[string]time.Time // tracks when each cluster was first observed
 	lastBackupCM map[string]string    // tracks last-seen backup status ConfigMap resourceVersion
+
+	// Adaptive interval: Boost() temporarily switches to fast polling.
+	boostInterval time.Duration
+	boostUntil    time.Time
+	poke          chan struct{} // signals the run loop to reset its ticker
 }
 
 // New creates a new health Monitor.
 func New(client kubernetes.Interface, op *operator.Operator, interval time.Duration) *Monitor {
 	return &Monitor{
-		client:       client,
-		operator:     op,
-		interval:     interval,
-		lastStates:   make(map[string]pgswarmv1.ClusterState),
-		firstSeen:    make(map[string]time.Time),
-		lastBackupCM: make(map[string]string),
+		client:        client,
+		operator:      op,
+		interval:      interval,
+		boostInterval: 3 * time.Second,
+		lastStates:    make(map[string]pgswarmv1.ClusterState),
+		firstSeen:     make(map[string]time.Time),
+		lastBackupCM:  make(map[string]string),
+		poke:          make(chan struct{}, 1),
 	}
+}
+
+// Boost switches the monitor to fast polling (3s) for the given duration,
+// then automatically reverts to the normal interval. Safe to call multiple
+// times — each call extends the boost window.
+func (m *Monitor) Boost(d time.Duration) {
+	m.mu.Lock()
+	m.boostUntil = time.Now().Add(d)
+	m.mu.Unlock()
+	// Wake up the run loop so it resets the ticker immediately.
+	select {
+	case m.poke <- struct{}{}:
+	default:
+	}
+	log.Info().Dur("duration", d).Msg("health monitor boosted to fast polling")
+}
+
+// currentInterval returns the boost interval if active, otherwise the normal interval.
+func (m *Monitor) currentInterval() time.Duration {
+	m.mu.Lock()
+	boosted := time.Now().Before(m.boostUntil)
+	m.mu.Unlock()
+	if boosted {
+		return m.boostInterval
+	}
+	return m.interval
 }
 
 // SetOnHealth sets the callback for health reports.
@@ -74,10 +107,11 @@ func (m *Monitor) Run(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(m.interval)
-	defer ticker.Stop()
-
 	m.checkAll(ctx)
+
+	active := m.currentInterval()
+	ticker := time.NewTicker(active)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -86,6 +120,14 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ticker.C:
 			log.Trace().Msg("health monitor tick")
 			m.checkAll(ctx)
+		case <-m.poke:
+			// Boost or un-boost: reset the ticker to the new interval.
+		}
+		// Adjust ticker if interval changed (boost started/expired).
+		if next := m.currentInterval(); next != active {
+			active = next
+			ticker.Reset(active)
+			log.Debug().Dur("interval", active).Msg("health monitor interval changed")
 		}
 	}
 }
@@ -111,6 +153,7 @@ func (m *Monitor) checkAll(ctx context.Context) {
 	}
 	wg.Wait()
 
+	needsBoost := false
 	for _, r := range results {
 		if r.report == nil {
 			continue
@@ -139,7 +182,23 @@ func (m *Monitor) checkAll(ctx context.Context) {
 			(!existed || prev != pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING) {
 			m.operator.TriggerPendingBackups(ctx, r.mc.Namespace, r.mc.ClusterName)
 		}
+
+		// Auto-boost: new cluster appearing, or any cluster not yet RUNNING
+		if !existed {
+			needsBoost = true
+			log.Info().Str("cluster", key).Msg("new cluster detected, boosting health monitor")
+		}
+		if r.report.State != pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING &&
+			r.report.State != pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED {
+			needsBoost = true
+		}
+
 		m.lastStates[key] = r.report.State
+	}
+
+	// Keep boost active while any cluster is still starting/degraded/failed
+	if needsBoost {
+		m.Boost(1 * time.Minute)
 	}
 
 	// Check for backup status ConfigMap updates

@@ -225,6 +225,10 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					if err := s.store.UpdateClusterConfigState(ctx, satID, report.ClusterName, h.State); err != nil {
 						log.Warn().Err(err).Str("cluster", report.ClusterName).Msg("failed to update cluster config state")
 					}
+					// Push to dashboard immediately (50ms debounce in hub)
+					if s.wsHub != nil {
+						s.wsHub.Notify()
+					}
 				}
 
 			case *pgswarmv1.SatelliteMessage_EventReport:
