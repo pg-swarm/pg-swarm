@@ -114,3 +114,99 @@ var SatelliteStreamService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "config.proto",
 }
+
+const (
+	SidecarStreamService_Connect_FullMethodName = "/pgswarm.v1.SidecarStreamService/Connect"
+)
+
+// SidecarStreamServiceClient is the client API for SidecarStreamService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type SidecarStreamServiceClient interface {
+	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SidecarMessage, SidecarCommand], error)
+}
+
+type sidecarStreamServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSidecarStreamServiceClient(cc grpc.ClientConnInterface) SidecarStreamServiceClient {
+	return &sidecarStreamServiceClient{cc}
+}
+
+func (c *sidecarStreamServiceClient) Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SidecarMessage, SidecarCommand], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SidecarStreamService_ServiceDesc.Streams[0], SidecarStreamService_Connect_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SidecarMessage, SidecarCommand]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SidecarStreamService_ConnectClient = grpc.BidiStreamingClient[SidecarMessage, SidecarCommand]
+
+// SidecarStreamServiceServer is the server API for SidecarStreamService service.
+// All implementations must embed UnimplementedSidecarStreamServiceServer
+// for forward compatibility.
+type SidecarStreamServiceServer interface {
+	Connect(grpc.BidiStreamingServer[SidecarMessage, SidecarCommand]) error
+	mustEmbedUnimplementedSidecarStreamServiceServer()
+}
+
+// UnimplementedSidecarStreamServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedSidecarStreamServiceServer struct{}
+
+func (UnimplementedSidecarStreamServiceServer) Connect(grpc.BidiStreamingServer[SidecarMessage, SidecarCommand]) error {
+	return status.Error(codes.Unimplemented, "method Connect not implemented")
+}
+func (UnimplementedSidecarStreamServiceServer) mustEmbedUnimplementedSidecarStreamServiceServer() {}
+func (UnimplementedSidecarStreamServiceServer) testEmbeddedByValue()                              {}
+
+// UnsafeSidecarStreamServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to SidecarStreamServiceServer will
+// result in compilation errors.
+type UnsafeSidecarStreamServiceServer interface {
+	mustEmbedUnimplementedSidecarStreamServiceServer()
+}
+
+func RegisterSidecarStreamServiceServer(s grpc.ServiceRegistrar, srv SidecarStreamServiceServer) {
+	// If the following call panics, it indicates UnimplementedSidecarStreamServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&SidecarStreamService_ServiceDesc, srv)
+}
+
+func _SidecarStreamService_Connect_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SidecarStreamServiceServer).Connect(&grpc.GenericServerStream[SidecarMessage, SidecarCommand]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SidecarStreamService_ConnectServer = grpc.BidiStreamingServer[SidecarMessage, SidecarCommand]
+
+// SidecarStreamService_ServiceDesc is the grpc.ServiceDesc for SidecarStreamService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var SidecarStreamService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "pgswarm.v1.SidecarStreamService",
+	HandlerType: (*SidecarStreamServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Connect",
+			Handler:       _SidecarStreamService_Connect_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "config.proto",
+}

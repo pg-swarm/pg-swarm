@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,13 +14,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
-	"github.com/pg-swarm/pg-swarm/internal/shared/pgfence"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/sidecar"
 )
 
-// Switchover performs a planned primary switchover: demotes the current
-// primary (pg_wal_switch + checkpoint) and promotes the target replica.
-// It also updates the leader lease so the failover sidecar doesn't fight.
-func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1.SwitchoverRequest, password string) *pgswarmv1.SwitchoverResult {
+// Switchover performs a planned primary switchover: fences the current
+// primary (via sidecar stream), runs a checkpoint, transfers the lease,
+// and promotes the target replica (via sidecar stream).
+func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1.SwitchoverRequest, streams *sidecar.SidecarStreamManager) *pgswarmv1.SwitchoverResult {
 	log.Trace().Str("cluster", req.ClusterName).Str("target", req.TargetPod).Str("namespace", req.Namespace).Msg("Switchover entry")
 	result := &pgswarmv1.SwitchoverResult{ClusterName: req.ClusterName}
 	ns := req.Namespace
@@ -57,93 +55,98 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 	primaryPod := &pods.Items[0]
 	log.Trace().Str("primary", primaryPod.Name).Msg("Switchover: current primary found")
 
-	// Read superuser password from the target to verify PG connectivity
-	targetHost := fmt.Sprintf("%s.%s-headless.%s.svc.cluster.local",
-		target, req.ClusterName, ns)
-	primaryHost := fmt.Sprintf("%s.%s-headless.%s.svc.cluster.local",
-		primaryPod.Name, req.ClusterName, ns)
-	escapedPass := url.QueryEscape(password)
-
-	// 3. Verify target replica is streaming and caught up
-	targetConn, err := pgx.Connect(ctx, fmt.Sprintf(
-		"postgres://postgres:%s@%s:5432/postgres?connect_timeout=5&sslmode=disable", escapedPass, targetHost))
+	// 3. Verify target is in recovery via sidecar stream
+	log.Trace().Msg("Switchover: checking target status via sidecar stream")
+	statusCtx, statusCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer statusCancel()
+	statusResult, err := streams.SendCommandAndWait(statusCtx, ns, target, &pgswarmv1.SidecarCommand{
+		Cmd: &pgswarmv1.SidecarCommand_Status{Status: &pgswarmv1.StatusCmd{}},
+	})
 	if err != nil {
-		result.ErrorMessage = fmt.Sprintf("cannot connect to target replica: %v", err)
+		result.ErrorMessage = fmt.Sprintf("cannot check target status: %v", err)
 		return result
 	}
-	defer targetConn.Close(ctx)
-
-	var isRecovery bool
-	if err := targetConn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&isRecovery); err != nil || !isRecovery {
+	if !statusResult.Success {
+		result.ErrorMessage = fmt.Sprintf("target status check failed: %s", statusResult.Error)
+		return result
+	}
+	if !statusResult.InRecovery {
 		result.ErrorMessage = "target is not in recovery mode"
 		return result
 	}
 
-	// 4. Checkpoint on primary to flush pending WAL
-	log.Trace().Msg("Switchover: running checkpoint on primary")
-	primaryConn, err := pgx.Connect(ctx, fmt.Sprintf(
-		"postgres://postgres:%s@%s:5432/postgres?connect_timeout=5&sslmode=disable", escapedPass, primaryHost))
+	// 4a. Fence the old primary via sidecar stream
+	log.Trace().Msg("Switchover: fencing old primary via sidecar stream")
+	fenceCtx, fenceCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer fenceCancel()
+	fenceResult, err := streams.SendCommandAndWait(fenceCtx, ns, primaryPod.Name, &pgswarmv1.SidecarCommand{
+		Cmd: &pgswarmv1.SidecarCommand_Fence{Fence: &pgswarmv1.FenceCmd{DrainTimeoutSeconds: 5}},
+	})
 	if err != nil {
-		result.ErrorMessage = fmt.Sprintf("cannot connect to primary: %v", err)
+		result.ErrorMessage = fmt.Sprintf("fencing old primary failed: %v", err)
 		return result
 	}
-	defer primaryConn.Close(ctx)
-
-	if _, err := primaryConn.Exec(ctx, "CHECKPOINT"); err != nil {
-		log.Warn().Err(err).Msg("checkpoint on primary failed (proceeding anyway)")
+	if !fenceResult.Success {
+		result.ErrorMessage = fmt.Sprintf("fencing old primary failed: %s", fenceResult.Error)
+		return result
 	}
 
-	// 4b. Fence the old primary — block new writes and terminate client connections.
-	// Uses graceful drain (5s for in-flight transactions) and aborts on failure
-	// to prevent split-brain (two writable primaries).
-	log.Trace().Msg("Switchover: fencing old primary")
-	if err := pgfence.FencePrimaryWithOpts(ctx, primaryConn, pgfence.FenceOpts{
-		DrainTimeout: 5 * time.Second,
-	}); err != nil {
-		result.ErrorMessage = fmt.Sprintf("fencing old primary failed, aborting switchover: %v", err)
+	// 4b. Checkpoint on primary via sidecar stream
+	log.Trace().Msg("Switchover: running checkpoint on primary via sidecar stream")
+	cpCtx, cpCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cpCancel()
+	cpResult, err := streams.SendCommandAndWait(cpCtx, ns, primaryPod.Name, &pgswarmv1.SidecarCommand{
+		Cmd: &pgswarmv1.SidecarCommand_Checkpoint{Checkpoint: &pgswarmv1.CheckpointCmd{}},
+	})
+	if err != nil {
+		// Rollback: unfence primary
+		log.Warn().Err(err).Msg("Switchover: checkpoint failed, unfencing primary")
+		unfenceRollback(ctx, streams, ns, primaryPod.Name)
+		result.ErrorMessage = fmt.Sprintf("checkpoint on primary failed: %v", err)
+		return result
+	}
+	if !cpResult.Success {
+		log.Warn().Str("error", cpResult.Error).Msg("Switchover: checkpoint failed, unfencing primary")
+		unfenceRollback(ctx, streams, ns, primaryPod.Name)
+		result.ErrorMessage = fmt.Sprintf("checkpoint on primary failed: %s", cpResult.Error)
 		return result
 	}
 
 	// 5. Transfer the leader lease to the target pod
 	leaseName := req.ClusterName + "-leader"
 	if err := transferLease(ctx, client, ns, leaseName, target); err != nil {
+		// Rollback: unfence primary
+		log.Warn().Err(err).Msg("Switchover: lease transfer failed, unfencing primary")
+		unfenceRollback(ctx, streams, ns, primaryPod.Name)
 		result.ErrorMessage = fmt.Sprintf("failed to transfer lease: %v", err)
 		return result
 	}
 
-	// 6. Promote the target replica
-	log.Trace().Str("target", target).Msg("Switchover: promoting target")
-	if _, err := targetConn.Exec(ctx, "SELECT pg_promote()"); err != nil {
-		result.ErrorMessage = fmt.Sprintf("pg_promote() failed: %v", err)
+	// 6. Promote the target replica via sidecar stream
+	log.Trace().Str("target", target).Msg("Switchover: promoting target via sidecar stream")
+	promoteCtx, promoteCancel := context.WithTimeout(ctx, 20*time.Second)
+	defer promoteCancel()
+	promoteResult, err := streams.SendCommandAndWait(promoteCtx, ns, target, &pgswarmv1.SidecarCommand{
+		Cmd: &pgswarmv1.SidecarCommand_Promote{Promote: &pgswarmv1.PromoteCmd{WaitTimeoutSeconds: 15}},
+	})
+	if err != nil {
+		// Point of no return — lease already transferred, do NOT unfence
+		log.Error().Err(err).Msg("Switchover: promote failed after lease transfer (point of no return)")
+		result.ErrorMessage = fmt.Sprintf("promote failed after lease transfer: %v", err)
+		return result
+	}
+	if !promoteResult.Success {
+		log.Error().Str("error", promoteResult.Error).Msg("Switchover: promote failed after lease transfer (point of no return)")
+		result.ErrorMessage = fmt.Sprintf("promote failed after lease transfer: %s", promoteResult.Error)
 		return result
 	}
 
-	// 7. Wait for promotion to complete — pg_is_in_recovery() must return false.
-	// This prevents a race where the sidecar ticks before promotion finishes
-	// and labels the target as replica, causing the lease to expire.
-	log.Trace().Msg("Switchover: waiting for promotion to complete")
-	promoted := false
-	for i := 0; i < 30; i++ {
-		var stillRecovery bool
-		if err := targetConn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&stillRecovery); err == nil && !stillRecovery {
-			promoted = true
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !promoted {
-		result.ErrorMessage = "pg_promote() was called but target did not exit recovery within 15 seconds"
-		return result
-	}
-
-	// 8. Label pods directly so the sidecars and services pick up the new
-	// topology immediately, without waiting for the next sidecar tick.
+	// 7. Label pods directly so sidecars and services pick up the new topology
 	log.Trace().Msg("Switchover: labeling pods")
 	labelPod(ctx, client, ns, target, "primary")
 	labelPod(ctx, client, ns, primaryPod.Name, "replica")
 
-	// 9. Renew the lease one more time now that the promotion is confirmed,
-	// so the sidecar has a full lease duration to take over renewal.
+	// 8. Renew the lease one more time
 	_ = renewLease(ctx, client, ns, leaseName, target)
 
 	log.Info().
@@ -154,6 +157,18 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 
 	result.Success = true
 	return result
+}
+
+// unfenceRollback attempts to unfence a primary as part of switchover rollback.
+func unfenceRollback(ctx context.Context, streams *sidecar.SidecarStreamManager, ns, podName string) {
+	unfenceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := streams.SendCommandAndWait(unfenceCtx, ns, podName, &pgswarmv1.SidecarCommand{
+		Cmd: &pgswarmv1.SidecarCommand_Unfence{Unfence: &pgswarmv1.UnfenceCmd{}},
+	})
+	if err != nil {
+		log.Error().Err(err).Str("pod", podName).Msg("Switchover rollback: unfence failed")
+	}
 }
 
 // labelPod patches the pg-swarm.io/role label on a pod.

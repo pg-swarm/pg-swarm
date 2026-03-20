@@ -179,3 +179,56 @@ message DeleteCluster {
   string cluster_name = 1;
   string namespace = 2;
 }
+
+// --- Sidecar ↔ Satellite bidi stream ---
+
+service SidecarStreamService {
+  rpc Connect(stream SidecarMessage) returns (stream SidecarCommand);
+}
+
+// Sidecar → Satellite
+message SidecarMessage {
+  oneof payload {
+    SidecarIdentity identity = 1;    // sent on connect
+    SidecarHeartbeat heartbeat = 2;
+    CommandResult command_result = 3; // response to a command
+  }
+}
+
+message SidecarIdentity {
+  string pod_name = 1;
+  string cluster_name = 2;
+  string namespace = 3;
+}
+
+message SidecarHeartbeat {
+  google.protobuf.Timestamp timestamp = 1;
+}
+
+message CommandResult {
+  string request_id = 1;
+  bool success = 2;
+  string error = 3;
+  bool in_recovery = 4;   // populated by StatusCmd
+  bool is_fenced = 5;     // populated by StatusCmd
+}
+
+// Satellite → Sidecar
+message SidecarCommand {
+  string request_id = 1;
+  oneof cmd {
+    FenceCmd fence = 2;
+    CheckpointCmd checkpoint = 3;
+    PromoteCmd promote = 4;
+    UnfenceCmd unfence = 5;
+    StatusCmd status = 6;
+    SidecarHeartbeatAck heartbeat_ack = 7;
+  }
+}
+
+message FenceCmd { int32 drain_timeout_seconds = 1; }
+message CheckpointCmd {}
+message PromoteCmd { int32 wait_timeout_seconds = 1; }
+message UnfenceCmd {}
+message StatusCmd {}
+message SidecarHeartbeatAck {}

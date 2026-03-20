@@ -605,6 +605,19 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 					},
 				},
 			},
+			{
+				Name:  "SATELLITE_ADDR",
+				Value: "pg-swarm-satellite.pgswarm-system.svc.cluster.local:9091",
+			},
+			{
+				Name: "SIDECAR_STREAM_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "sidecar-stream-token",
+					},
+				},
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: "/var/lib/postgresql/data"},
