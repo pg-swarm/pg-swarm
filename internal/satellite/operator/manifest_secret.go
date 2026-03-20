@@ -17,6 +17,7 @@ func buildSecret(cfg *pgswarmv1.ClusterConfig) *corev1.Secret {
 		"superuser-password":   randomPassword(24),
 		"replication-password": randomPassword(24),
 		"backup-password":      randomPassword(24),
+		"sidecar-stream-token": randomPassword(32),
 	}
 
 	// Add per-database user passwords

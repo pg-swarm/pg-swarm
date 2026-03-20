@@ -27,11 +27,13 @@ type GRPCServer struct {
 	pgswarmv1.UnimplementedRegistrationServiceServer
 	pgswarmv1.UnimplementedSatelliteStreamServiceServer
 
-	registry  *registry.Registry
-	store     store.Store
-	streams   *StreamManager
-	logBuffer *LogBuffer
-	server    *grpc.Server
+	registry   *registry.Registry
+	store      store.Store
+	streams    *StreamManager
+	logBuffer  *LogBuffer
+	server     *grpc.Server
+	wsHub      *WSHub
+	opsTracker *OpsTracker
 }
 
 type StreamManager struct {
@@ -223,6 +225,10 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					if err := s.store.UpdateClusterConfigState(ctx, satID, report.ClusterName, h.State); err != nil {
 						log.Warn().Err(err).Str("cluster", report.ClusterName).Msg("failed to update cluster config state")
 					}
+					// Push to dashboard immediately (50ms debounce in hub)
+					if s.wsHub != nil {
+						s.wsHub.Notify()
+					}
 				}
 
 			case *pgswarmv1.SatelliteMessage_EventReport:
@@ -242,6 +248,34 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					log.Info().Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Str("severity", report.Severity).Msg("event recorded")
 				}
 
+			case *pgswarmv1.SatelliteMessage_SwitchoverProgress:
+				prog := payload.SwitchoverProgress
+				log.Debug().
+					Str("satellite_id", satID.String()).
+					Str("cluster", prog.ClusterName).
+					Int32("step", prog.Step).
+					Str("step_name", prog.StepName).
+					Str("status", prog.Status).
+					Msg("switchover progress")
+				if s.opsTracker != nil {
+					s.opsTracker.UpdateStep(prog.OperationId, prog.Step, prog.StepName, prog.Status, prog.TargetPod, prog.ErrorMessage, prog.PointOfNoReturn)
+					if prog.StepName == "find_primary" && prog.Status == "completed" && prog.TargetPod != "" {
+						s.opsTracker.SetPrimaryPod(prog.OperationId, prog.TargetPod)
+					}
+				}
+				if s.wsHub != nil {
+					s.wsHub.BroadcastJSON("switchover_progress", map[string]interface{}{
+						"operation_id":       prog.OperationId,
+						"cluster_name":       prog.ClusterName,
+						"step":               prog.Step,
+						"step_name":          prog.StepName,
+						"status":             prog.Status,
+						"target_pod":         prog.TargetPod,
+						"error_message":      prog.ErrorMessage,
+						"point_of_no_return": prog.PointOfNoReturn,
+					})
+				}
+
 			case *pgswarmv1.SatelliteMessage_SwitchoverResult:
 				result := payload.SwitchoverResult
 				if result.Success {
@@ -257,6 +291,17 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 						ID: uuid.New(), SatelliteID: satID, ClusterName: result.ClusterName,
 						Severity: "error", Message: "switchover failed: " + result.ErrorMessage, Source: "switchover",
 						CreatedAt: time.Now(),
+					})
+				}
+				if s.opsTracker != nil && result.OperationId != "" {
+					s.opsTracker.Complete(result.OperationId, result.Success, result.ErrorMessage)
+				}
+				if s.wsHub != nil && result.OperationId != "" {
+					s.wsHub.BroadcastJSON("switchover_complete", map[string]interface{}{
+						"operation_id": result.OperationId,
+						"cluster_name": result.ClusterName,
+						"success":      result.Success,
+						"error":        result.ErrorMessage,
 					})
 				}
 
@@ -548,6 +593,16 @@ func (s *GRPCServer) GetStreams() *StreamManager {
 // GetLogBuffer returns the LogBuffer (needed by REST API for log endpoints).
 func (s *GRPCServer) GetLogBuffer() *LogBuffer {
 	return s.logBuffer
+}
+
+// SetWSHub sets the WebSocket hub for broadcasting switchover progress.
+func (s *GRPCServer) SetWSHub(hub *WSHub) {
+	s.wsHub = hub
+}
+
+// SetOpsTracker sets the operations tracker for switchover progress tracking.
+func (s *GRPCServer) SetOpsTracker(ot *OpsTracker) {
+	s.opsTracker = ot
 }
 
 // Auth interceptors

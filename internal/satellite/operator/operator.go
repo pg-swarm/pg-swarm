@@ -271,6 +271,34 @@ func (o *Operator) ResolveNamespaceForCluster(clusterName, namespace string) str
 	return o.defaultNamespace
 }
 
+// ValidateSidecarToken checks if the given token matches the sidecar-stream-token
+// in any managed cluster's secret. This is used by the sidecar gRPC server to
+// authenticate incoming sidecar connections.
+func (o *Operator) ValidateSidecarToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	o.mu.RLock()
+	configs := make([]*pgswarmv1.ClusterConfig, 0, len(o.desired))
+	for _, cfg := range o.desired {
+		configs = append(configs, cfg)
+	}
+	o.mu.RUnlock()
+
+	for _, cfg := range configs {
+		secretName := resourceName(cfg.ClusterName, "secret")
+		secret, err := o.client.CoreV1().Secrets(cfg.Namespace).Get(
+			context.Background(), secretName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		if string(secret.Data["sidecar-stream-token"]) == token {
+			return true
+		}
+	}
+	return false
+}
+
 // buildConfigStore creates a ConfigMap that stores the received ClusterConfig
 // as JSON for inspection. Named: pg-swarm-<k8sClusterName>-<pgClusterName>.
 func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
@@ -329,6 +357,15 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	cm := buildConfigMap(cfg)
 	if err := createOrUpdateConfigMap(ctx, o.client, cm); err != nil {
 		return fmt.Errorf("configmap: %w", err)
+	}
+
+	// 4b. Recovery rules ConfigMap (for failover sidecar)
+	if failoverEnabled(cfg) {
+		log.Trace().Msg("reconcile: ensuring recovery-rules configmap")
+		rrCM := buildRecoveryRulesConfigMap(cfg)
+		if err := createOrUpdateConfigMap(ctx, o.client, rrCM); err != nil {
+			return fmt.Errorf("recovery-rules configmap: %w", err)
+		}
 	}
 
 	// 5. Services
@@ -391,25 +428,25 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		go o.ensurePodLabels(cfg.Namespace, cfg.ClusterName, cfg.Replicas)
 	}
 
-	// 10. Backup sidecar RBAC and credential secrets
-	if backupEnabled(cfg) {
-		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
-		if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
-			return fmt.Errorf("backup RBAC: %w", err)
-		}
-		for _, backup := range cfg.Backups {
-			backupSecret := buildBackupCredentialSecret(cfg, backup)
-			if backupSecret != nil {
-				if err := createOrPreserveSecret(ctx, o.client, backupSecret); err != nil {
-					return fmt.Errorf("backup credential secret: %w", err)
-				}
-			}
-		}
-	} else {
-		// Cleanup backup resources if backup was detached
-		log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")
-		cleanupBackupResources(ctx, o.client, cfg.Namespace, cfg.ClusterName)
-	}
+	// TODO: Re-enable backup sidecar RBAC and credential secrets once core functionality is stable.
+	// // 10. Backup sidecar RBAC and credential secrets
+	// if backupEnabled(cfg) {
+	// 	log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
+	// 	if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
+	// 		return fmt.Errorf("backup RBAC: %w", err)
+	// 	}
+	// 	for _, backup := range cfg.Backups {
+	// 		backupSecret := buildBackupCredentialSecret(cfg, backup)
+	// 		if backupSecret != nil {
+	// 			if err := createOrPreserveSecret(ctx, o.client, backupSecret); err != nil {
+	// 				return fmt.Errorf("backup credential secret: %w", err)
+	// 			}
+	// 		}
+	// 	}
+	// } else {
+	// 	log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")
+	// 	cleanupBackupResources(ctx, o.client, cfg.Namespace, cfg.ClusterName)
+	// }
 
 	return nil
 }
@@ -472,6 +509,58 @@ func (o *Operator) StartOrphanChecker(ctx context.Context) {
 			return
 		case <-ticker.C:
 			o.CheckOrphans(ctx)
+		}
+	}
+}
+
+// StartDriftReconciler periodically checks managed StatefulSets for replica
+// count drift (e.g. manual kubectl scale) and corrects them back to the
+// desired count from the ClusterConfig.
+func (o *Operator) StartDriftReconciler(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			o.reconcileDrift(ctx)
+		}
+	}
+}
+
+func (o *Operator) reconcileDrift(ctx context.Context) {
+	o.mu.RLock()
+	snapshot := make(map[string]*pgswarmv1.ClusterConfig, len(o.desired))
+	for k, v := range o.desired {
+		snapshot[k] = v
+	}
+	o.mu.RUnlock()
+
+	for key, cfg := range snapshot {
+		sts, err := o.client.AppsV1().StatefulSets(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				log.Warn().Err(err).Str("cluster", key).Msg("drift-check: failed to get statefulset")
+			}
+			continue
+		}
+		actual := int32(0)
+		if sts.Spec.Replicas != nil {
+			actual = *sts.Spec.Replicas
+		}
+		if actual != cfg.Replicas {
+			log.Warn().
+				Str("cluster", key).
+				Int32("desired", cfg.Replicas).
+				Int32("actual", actual).
+				Msg("drift-check: replica count mismatch, correcting")
+			sts.Spec.Replicas = &cfg.Replicas
+			if _, err := o.client.AppsV1().StatefulSets(cfg.Namespace).Update(ctx, sts, metav1.UpdateOptions{}); err != nil {
+				log.Error().Err(err).Str("cluster", key).Msg("drift-check: failed to correct replicas")
+			} else {
+				log.Info().Str("cluster", key).Int32("replicas", cfg.Replicas).Msg("drift-check: replicas corrected")
+			}
 		}
 	}
 }

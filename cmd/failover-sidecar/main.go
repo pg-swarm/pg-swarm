@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/failover"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -54,6 +55,11 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to create K8s client")
 	}
 
+	recoveryRulesPath := os.Getenv("RECOVERY_RULES_PATH")
+	if recoveryRulesPath == "" {
+		recoveryRulesPath = "/etc/recovery-rules/rules.json"
+	}
+
 	mon := failover.NewMonitor(failover.Config{
 		PodName:             podName,
 		Namespace:           namespace,
@@ -64,10 +70,33 @@ func main() {
 		ReplicationPassword: replPassword,
 		PrimaryHost:         primaryHost,
 		PGPassword:          pgPassword,
+		RecoveryRulesPath:   recoveryRulesPath,
 	}, client)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	// Start sidecar connector (connects to satellite's gRPC server for remote commands)
+	satelliteAddr := os.Getenv("SATELLITE_ADDR")
+	sidecarToken := os.Getenv("SIDECAR_STREAM_TOKEN")
+	if satelliteAddr != "" && sidecarToken != "" {
+		connector := failover.NewSidecarConnector(
+			satelliteAddr,
+			sidecarToken,
+			&pgswarmv1.SidecarIdentity{
+				PodName:     podName,
+				ClusterName: clusterName,
+				Namespace:   namespace,
+			},
+			connString,
+		)
+		go func() {
+			if err := connector.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error().Err(err).Msg("sidecar connector exited with error")
+			}
+		}()
+		log.Info().Str("satellite_addr", satelliteAddr).Msg("sidecar connector started")
+	}
 
 	if err := mon.Run(ctx); err != nil {
 		log.Fatal().Err(err).Msg("failover monitor exited with error")

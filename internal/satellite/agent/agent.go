@@ -10,6 +10,7 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/satellite/health"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/logcapture"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/operator"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/sidecar"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/stream"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -36,15 +37,20 @@ type Config struct {
 	// DefaultFailoverImage is the container image for the failover sidecar
 	// when the cluster config does not specify one.
 	DefaultFailoverImage string
+	// SidecarListenAddr is the address the sidecar gRPC server listens on.
+	// Defaults to ":9091".
+	SidecarListenAddr string
 }
 
 // Agent manages the satellite lifecycle: registration, approval, and streaming.
 type Agent struct {
-	config    Config
-	identity  *Identity
-	connector *stream.Connector
-	operator  *operator.Operator
-	k8sClient *kubernetes.Clientset // nil if K8s is unavailable or secret disabled
+	config        Config
+	identity      *Identity
+	connector     *stream.Connector
+	operator      *operator.Operator
+	k8sClient     *kubernetes.Clientset // nil if K8s is unavailable or secret disabled
+	streamManager *sidecar.SidecarStreamManager
+	healthMon     *health.Monitor
 }
 
 // Identity stores the satellite's registration info.
@@ -92,6 +98,20 @@ func (a *Agent) Run(ctx context.Context) error {
 	} else {
 		log.Warn().Msg("K8s client unavailable — operator disabled, configs will be logged only")
 	}
+
+	// 2b. Create sidecar stream manager and server
+	a.streamManager = sidecar.NewSidecarStreamManager()
+	sidecarSrv := sidecar.NewServer(a.streamManager, a.validateSidecarToken)
+	go func() {
+		if err := sidecarSrv.Start(a.config.SidecarListenAddr); err != nil {
+			log.Error().Err(err).Msg("sidecar gRPC server failed")
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		sidecarSrv.Stop()
+	}()
+	log.Trace().Str("addr", a.config.SidecarListenAddr).Msg("sidecar gRPC server started")
 
 	// 3. Connect persistent stream
 	a.connector = stream.NewConnector(a.config.CentralAddr, a.identity.AuthToken)
@@ -160,7 +180,8 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// 7. Start health monitor
 	if a.operator != nil && a.k8sClient != nil {
-		mon := health.New(a.k8sClient, a.operator, 30*time.Second)
+		a.healthMon = health.New(a.k8sClient, a.operator, 30*time.Second)
+		mon := a.healthMon
 		mon.SetOnHealth(func(report *pgswarmv1.ClusterHealthReport) {
 			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
 				Payload: &pgswarmv1.SatelliteMessage_HealthReport{
@@ -186,10 +207,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		log.Trace().Msg("health monitor started")
 	}
 
-	// 8. Start orphan checker
+	// 8. Start orphan checker and drift reconciler
 	if a.operator != nil {
 		go a.operator.StartOrphanChecker(ctx)
-		log.Trace().Msg("orphan checker started")
+		go a.operator.StartDriftReconciler(ctx)
+		log.Trace().Msg("orphan checker and drift reconciler started")
 	}
 
 	log.Info().Str("satellite_id", a.identity.SatelliteID).Msg("satellite agent started")
@@ -198,7 +220,7 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // handleSwitchover handles a switchover request from central.
-func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.SwitchoverResult {
+func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest, onProgress func(int32, string, string, string, string, bool)) *pgswarmv1.SwitchoverResult {
 	log.Trace().Str("cluster", req.ClusterName).Str("target", req.TargetPod).Msg("handleSwitchover entry")
 	if a.k8sClient == nil || a.operator == nil {
 		return &pgswarmv1.SwitchoverResult{
@@ -212,21 +234,23 @@ func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.Sw
 	req.Namespace = ns
 	log.Trace().Str("namespace", ns).Msg("handleSwitchover resolved namespace")
 
-	// Read the superuser password
-	secretName := req.ClusterName + "-secret"
-	secret, err := a.k8sClient.CoreV1().Secrets(ns).Get(context.Background(), secretName, metav1.GetOptions{})
-	if err != nil {
-		return &pgswarmv1.SwitchoverResult{
-			ClusterName:  req.ClusterName,
-			ErrorMessage: fmt.Sprintf("cannot read secret %s: %v", secretName, err),
-		}
+	// Boost health monitor to fast polling during and after switchover
+	if a.healthMon != nil {
+		a.healthMon.Boost(2 * time.Minute)
 	}
-	password := string(secret.Data["superuser-password"])
-	log.Trace().Str("secret", secretName).Msg("handleSwitchover secret read")
 
-	result := health.Switchover(context.Background(), a.k8sClient, req, password)
+	result := health.Switchover(context.Background(), a.k8sClient, req, a.streamManager, health.ProgressFunc(onProgress))
 	log.Trace().Bool("success", result.Success).Msg("handleSwitchover result")
 	return result
+}
+
+// validateSidecarToken checks if the provided token matches any cluster's
+// sidecar-stream-token. Returns true if valid.
+func (a *Agent) validateSidecarToken(token string) bool {
+	if a.k8sClient == nil || a.operator == nil {
+		return false
+	}
+	return a.operator.ValidateSidecarToken(token)
 }
 
 // gatherStorageClasses queries K8s for all StorageClasses and returns a proto report.

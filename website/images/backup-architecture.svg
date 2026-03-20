@@ -1,7 +1,7 @@
 <svg viewBox="0 0 860 480" xmlns="http://www.w3.org/2000/svg" fill="none">
-  <!-- Backup Rules -->
+  <!-- Backup Profiles -->
   <rect x="30" y="20" width="180" height="160" rx="12" fill="#1a2332" stroke="#046d39" stroke-width="2"/>
-  <text x="120" y="48" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="700" font-family="Inter, sans-serif">Backup Rules</text>
+  <text x="120" y="48" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="700" font-family="Inter, sans-serif">Backup Profiles</text>
   <rect x="48" y="64" width="144" height="28" rx="5" fill="rgba(4,109,57,0.1)" stroke="rgba(4,109,57,0.3)" stroke-width="1"/>
   <text x="120" y="83" text-anchor="middle" fill="#3ddc84" font-size="11" font-family="JetBrains Mono, monospace">S3 Weekly Base</text>
   <rect x="48" y="100" width="144" height="28" rx="5" fill="rgba(4,109,57,0.1)" stroke="rgba(4,109,57,0.3)" stroke-width="1"/>
@@ -9,7 +9,7 @@
   <rect x="48" y="136" width="144" height="28" rx="5" fill="rgba(4,109,57,0.1)" stroke="rgba(4,109,57,0.3)" stroke-width="1"/>
   <text x="120" y="155" text-anchor="middle" fill="#3ddc84" font-size="11" font-family="JetBrains Mono, monospace">Local PVC + WAL</text>
 
-  <!-- Arrows: Rules -> Profile -->
+  <!-- Arrows: Profiles -> Cluster Profile -->
   <line x1="210" y1="78" x2="280" y2="78" stroke="#046d39" stroke-width="2"/>
   <line x1="210" y1="114" x2="280" y2="100" stroke="#046d39" stroke-width="2"/>
   <polygon points="280,78 272,74 272,82" fill="#046d39"/>
@@ -41,26 +41,27 @@
   <rect x="575" y="170" width="140" height="18" rx="3" fill="#0f1923"/>
   <text x="645" y="183" text-anchor="middle" fill="#8899aa" font-size="9" font-family="Inter, sans-serif">gRPC push (BackupConfig)</text>
 
-  <!-- Satellite Operator -->
+  <!-- StatefulSet Pod -->
   <rect x="460" y="210" width="370" height="140" rx="12" fill="#1a2332" stroke="rgba(255,255,255,0.12)" stroke-width="1.5"/>
-  <text x="645" y="238" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600" font-family="Inter, sans-serif">Satellite Operator</text>
+  <text x="645" y="238" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600" font-family="Inter, sans-serif">StatefulSet Pod</text>
 
-  <!-- CronJobs inside operator -->
+  <!-- Sidecar containers inside pod -->
   <rect x="478" y="252" width="100" height="36" rx="5" fill="rgba(251,146,60,0.12)" stroke="rgba(251,146,60,0.5)" stroke-width="1"/>
-  <text x="528" y="267" text-anchor="middle" fill="#fb923c" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace">CronJob</text>
-  <text x="528" y="280" text-anchor="middle" fill="#fb923c" font-size="8" font-family="JetBrains Mono, monospace">base-backup-s3</text>
+  <text x="528" y="267" text-anchor="middle" fill="#fb923c" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace">Backup Sidecar</text>
+  <text x="528" y="280" text-anchor="middle" fill="#fb923c" font-size="8" font-family="JetBrains Mono, monospace">base + logical</text>
 
-  <rect x="590" y="252" width="100" height="36" rx="5" fill="rgba(251,146,60,0.12)" stroke="rgba(251,146,60,0.5)" stroke-width="1"/>
-  <text x="640" y="267" text-anchor="middle" fill="#fb923c" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace">CronJob</text>
-  <text x="640" y="280" text-anchor="middle" fill="#fb923c" font-size="8" font-family="JetBrains Mono, monospace">logical-gcs</text>
+  <rect x="590" y="252" width="100" height="36" rx="5" fill="rgba(59,130,246,0.12)" stroke="rgba(59,130,246,0.4)" stroke-width="1"/>
+  <text x="640" y="267" text-anchor="middle" fill="#93c5fd" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace">Postgres</text>
+  <text x="640" y="280" text-anchor="middle" fill="#93c5fd" font-size="8" font-family="JetBrains Mono, monospace">archive_command</text>
 
-  <rect x="702" y="252" width="110" height="36" rx="5" fill="rgba(251,146,60,0.12)" stroke="rgba(251,146,60,0.5)" stroke-width="1"/>
-  <text x="757" y="267" text-anchor="middle" fill="#fb923c" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace">postgresql.conf</text>
-  <text x="757" y="280" text-anchor="middle" fill="#fb923c" font-size="8" font-family="JetBrains Mono, monospace">archive_command</text>
+  <rect x="702" y="252" width="110" height="36" rx="5" fill="rgba(139,92,246,0.12)" stroke="rgba(139,92,246,0.5)" stroke-width="1"/>
+  <text x="757" y="267" text-anchor="middle" fill="#a78bfa" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace">Failover</text>
+  <text x="757" y="280" text-anchor="middle" fill="#a78bfa" font-size="8" font-family="JetBrains Mono, monospace">Sidecar</text>
 
   <!-- WAL archiving label -->
   <rect x="478" y="300" width="338" height="36" rx="5" fill="rgba(4,109,57,0.1)" stroke="rgba(4,109,57,0.3)" stroke-width="1"/>
-  <text x="647" y="323" text-anchor="middle" fill="#3ddc84" font-size="11" font-family="Inter, sans-serif">Auto-configured WAL archiving + retention enforcement</text>
+  <text x="647" y="315" text-anchor="middle" fill="#3ddc84" font-size="10" font-family="Inter, sans-serif">WAL push via localhost:8442 · Scheduled backups · SQLite metadata</text>
+  <text x="647" y="330" text-anchor="middle" fill="#3ddc84" font-size="10" font-family="Inter, sans-serif">Role-aware: primary (WAL + metadata) · replica (backups)</text>
 
   <!-- Arrow down: status -->
   <line x1="645" y1="350" x2="645" y2="400" stroke="#046d39" stroke-width="2" stroke-dasharray="6,4"/>
@@ -83,7 +84,7 @@
   <text x="120" y="322" text-anchor="middle" fill="#3ddc84" font-size="11" font-family="JetBrains Mono, monospace">GCS</text>
   <text x="120" y="342" text-anchor="middle" fill="#3ddc84" font-size="11" font-family="JetBrains Mono, monospace">SFTP / Local PVC</text>
 
-  <!-- Arrow: CronJobs -> Destinations -->
+  <!-- Arrow: Backup Sidecar -> Destinations -->
   <line x1="478" y1="270" x2="210" y2="300" stroke="rgba(251,146,60,0.5)" stroke-width="1.5" stroke-dasharray="4,3"/>
   <text x="340" y="275" text-anchor="middle" fill="#8899aa" font-size="9" font-family="Inter, sans-serif">upload</text>
 </svg>

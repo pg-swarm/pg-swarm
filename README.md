@@ -62,7 +62,7 @@ The central server hosts three interfaces on a single binary:
 | Interface | Port | Purpose |
 |-----------|------|---------|
 | gRPC Server | 9090 | Bidirectional streaming with satellites (config push, health ingestion, events) |
-| REST API (GoFiber v2) | 8080 | 30+ endpoints for satellites, clusters, profiles, deployment rules, health, events, PG versions |
+| REST API (GoFiber v2) | 8080 | 60+ endpoints for satellites, clusters, profiles, deployment rules, backup profiles, recovery rules, storage tiers, health, events, WebSocket |
 | Web Dashboard | 8080 | Embedded React 19 SPA served alongside the REST API |
 
 **Key internal packages:**
@@ -90,8 +90,10 @@ A single Go binary deployed per edge Kubernetes cluster. Maintains a persistent 
   | Secret | `{name}-secret` | Superuser, replication, and app DB passwords (create-only) |
   | ServiceAccount + Role + RoleBinding | `{name}-failover` | RBAC for the failover sidecar |
 
+- **`internal/satellite/sidecar/`** — gRPC server for bidirectional streaming with failover sidecars (identity, heartbeat, command dispatch)
+- **`internal/satellite/logcapture/`** — Log capture hook for zerolog, forwards entries to central via gRPC stream
 - **`internal/satellite/health/`** — 10-second collection loop per cluster: `pg_isready`, replication lag (bytes + seconds), connections, disk usage, WAL stats, per-database sizes and cache hit ratios, table stats, slow queries (`pg_stat_statements`)
-- **`internal/satellite/health/switchover.go`** — Planned switchover orchestration (central-initiated): verify target, checkpoint, fence old primary, transfer lease, promote
+- **`internal/satellite/health/switchover.go`** — Satellite-controlled 9-step switchover orchestration with progress tracking: verify target, discover primary, check replica status, fence primary (with drain), checkpoint, transfer lease, promote, label pods, renew lease. WebSocket progress broadcasting via ops tracker.
 
 ### Failover Sidecar (`cmd/failover-sidecar`)
 
@@ -100,7 +102,9 @@ Runs as a container alongside each postgres pod in the StatefulSet. Operates aut
 - **`internal/failover/monitor.go`** — Tick loop (1s default):
   - **Primary path**: Acquire/renew Kubernetes Coordination Lease, label pod, detect split-brain (fence + demote)
   - **Replica path**: Label pod, monitor WAL receiver health, check primary reachability (TCP connect to RW service), detect timeline divergence, trigger `pg_rewind` / re-basebackup for recovery, attempt promotion if leader lease expires
-- **`internal/shared/pgfence/`** — SQL fencing (`ALTER SYSTEM SET default_transaction_read_only`, reload, kill client connections) and unfencing. Idempotent and shared between sidecar and switchover handler.
+- **`internal/failover/logwatcher.go`** — Real-time PG log monitoring via K8s log API. 40+ recovery patterns across 9 categories (data corruption, OOM, WAL issues, replication failures, etc.). Action types: restart, rewind, rebasebackup, event, exec. Includes cooldown, deduplication, and action mutex.
+- **`internal/failover/connector.go`** — Bidirectional gRPC streaming to satellite. Persistent connection with exponential backoff. Command protocol: fence, checkpoint, promote, unfence, status.
+- **`internal/shared/pgfence/`** — SQL fencing (`ALTER SYSTEM SET default_transaction_read_only`, reload, kill client connections) and unfencing. `FencePrimaryWithOpts` supports configurable drain timeout. Idempotent and shared between sidecar and switchover handler.
 
 ### Backup Sidecar (`cmd/backup-sidecar`)
 
@@ -127,12 +131,15 @@ React 19 SPA built with Vite and JSX, embedded into the central binary via Go's 
 | Page | Purpose |
 |------|---------|
 | Overview | Stat cards, recent activity |
-| Satellites | Approve/reject, label editing, state badges |
-| Profiles | 6-tab editor (General, Volumes, Resources, PostgreSQL params, HBA Rules, Databases) |
+| Satellites | Approve/reject, label editing, state badges, log viewer link |
+| Profiles | 6-tab editor (General, Volumes, Resources, PostgreSQL params, HBA Rules, Databases) with backup profile attach/detach |
 | Deployment Rules | Rule CRUD with expandable cluster lists |
-| Clusters | Instance table, disk/WAL breakdown, database sizes, cache hit ratios, slow queries, switchover |
+| Clusters | Cluster cards with instance table, disk/WAL breakdown, database sizes, cache hit ratios, slow queries, switchover |
+| Cluster Detail | Full-page view with tabs: Instances, Backups, Events |
+| Backup Profiles | Backup profile CRUD, schedule configuration, destination settings |
 | Events | Event log with severity filtering |
-| Admin | PostgreSQL version registry |
+| Satellite Logs | Terminal-style log viewer with SSE streaming, level filter, remote log level control |
+| Admin | 4 tabs: Storage Tiers, Image Variants, PG Versions, Recovery Rules |
 
 ### Protobuf (`api/proto/v1/`)
 
@@ -142,6 +149,7 @@ React 19 SPA built with Vite and JSX, embedded into the central binary via Go's 
 | `registration.proto` | `Register` + `CheckApproval` unary RPCs |
 | `config.proto` | `SatelliteStreamService.Connect` bidirectional streaming, `ClusterConfig`, `SwitchoverRequest` |
 | `health.proto` | `ClusterHealthReport`, `InstanceHealth` with WAL stats, table stats, slow queries, database stats |
+| `backup.proto` | `BackupConfig`, `BackupStatusReport`, `RestoreCommand`, `RestoreStatusReport`, destination types (S3, GCS, SFTP, local) |
 
 ---
 
@@ -154,11 +162,19 @@ React 19 SPA built with Vite and JSX, embedded into the central binary via Go's 
 - Kubernetes operator builds complete PG clusters from JSON configs (StatefulSet, Services, ConfigMap, Secret, RBAC)
 - Automatic failover via per-pod sidecar: leader lease election, split-brain detection with SQL fencing, demotion via K8s exec
 - Automatic replica recovery after failover: timeline divergence detection, `pg_rewind` with `pg_basebackup` fallback
-- Planned switchover (central-initiated): checkpoint, fence, lease transfer, promote
+- Satellite-controlled planned switchover: 9-step orchestration with progress tracking (verify target, discover primary, check replica status, fence with drain, checkpoint, transfer lease, promote, label pods, renew lease)
 - Rich health monitoring: replication lag, connections, disk, WAL stats, per-database cache hit ratios, table stats, slow queries (`pg_stat_statements`)
 - Backup sidecar: role-aware (primary/replica), WAL archiving via HTTP, scheduled base/incremental/logical backups, SQLite metadata, retention
+- Backup profiles with central CRUD, attach/detach to cluster profiles, backup inventory browsing, restore operations
+- Sidecar streaming: bidirectional gRPC between failover sidecars and satellite for command dispatch (fence, checkpoint, promote, unfence, status)
+- Log-based recovery: real-time PG log monitoring with 40+ recovery patterns in 9 categories, configurable actions (restart, rewind, rebasebackup, event, exec)
+- Recovery rule set management: central CRUD with dashboard editor, pattern sandbox
+- Satellite log streaming: real-time log forwarding to central with SSE fan-out, remote log level control
+- WebSocket hub for real-time state push with polling fallback
+- Storage tier management and satellite tier mappings
+- Image variant management (postgres base images)
 - Profiles and deployment rules for fleet-scale management
-- Web dashboard with 7 pages and 10-second auto-refresh
+- Web dashboard with 10 pages and 10-second auto-refresh
 - Docker Compose for local development
 - Kubernetes deployment via Kustomize (base + minikube overlay)
 

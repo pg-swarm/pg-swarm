@@ -61,6 +61,7 @@ type Config struct {
 	PrimaryHost         string        // RW service DNS for reachability check
 	PGPassword          string        // superuser password for reachability check
 	LeaseDuration       time.Duration // configurable, default 5s
+	RecoveryRulesPath   string        // path to mounted recovery rules JSON file
 }
 
 // Monitor watches the local PostgreSQL instance and manages leader election.
@@ -119,6 +120,12 @@ func (m *Monitor) Run(ctx context.Context) error {
 		Str("cluster", m.cfg.ClusterName).
 		Dur("interval", m.cfg.Interval).
 		Msg("failover monitor starting")
+
+	// Start log watcher for recovery rules (non-blocking)
+	if m.cfg.RecoveryRulesPath != "" {
+		lw := NewLogWatcher(m, m.client, m.cfg.RecoveryRulesPath, m.cfg.PodName, m.cfg.Namespace)
+		go lw.Run(ctx)
+	}
 
 	ticker := time.NewTicker(m.cfg.Interval)
 	defer ticker.Stop()
@@ -244,14 +251,28 @@ func (m *Monitor) handlePrimary(ctx context.Context, conn *pgx.Conn) {
 }
 
 // doFence calls the fence function (real or injected for tests).
+// It retries up to 3 times with 500ms between attempts.
 func (m *Monitor) doFence(ctx context.Context, conn *pgx.Conn) {
 	fence := m.fenceFunc
 	if fence == nil {
 		fence = pgfence.FencePrimary
 	}
-	if err := fence(ctx, conn); err != nil {
-		log.Error().Err(err).Msg("fencing failed")
+	const maxRetries = 3
+	var err error
+	for i := range maxRetries {
+		if err = fence(ctx, conn); err == nil {
+			return
+		}
+		log.Warn().Err(err).Int("attempt", i+1).Msg("fence attempt failed")
+		if i < maxRetries-1 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
 	}
+	log.Error().Err(err).Msg("fencing failed after retries")
 }
 
 // doDemote calls the demote function (real or injected for tests).
