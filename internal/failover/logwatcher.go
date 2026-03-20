@@ -25,9 +25,11 @@ type RecoveryRule struct {
 	Severity        string `json:"severity"`
 	Action          string `json:"action"`
 	ExecCommand     string `json:"exec_command,omitempty"`
-	CooldownSeconds int32  `json:"cooldown_seconds"`
-	Enabled         bool   `json:"enabled"`
-	Category        string `json:"category"`
+	CooldownSeconds        int32  `json:"cooldown_seconds"`
+	Enabled                bool   `json:"enabled"`
+	Category               string `json:"category"`
+	Threshold              int32  `json:"threshold"`
+	ThresholdWindowSeconds int32  `json:"threshold_window_seconds"`
 }
 
 // compiledRule is a RecoveryRule with a pre-compiled regexp.
@@ -59,6 +61,8 @@ type LogWatcher struct {
 	actionRunning string
 	pendingAction *compiledRule
 	rulesModTime  time.Time
+
+	matchTimes map[string][]time.Time // per-rule sliding window of match timestamps
 }
 
 // NewLogWatcher creates a log watcher that reads rules from the given file path.
@@ -69,7 +73,8 @@ func NewLogWatcher(mon *Monitor, client kubernetes.Interface, rulesPath, podName
 		rulesPath: rulesPath,
 		podName:   podName,
 		namespace: namespace,
-		cooldowns: make(map[string]time.Time),
+		cooldowns:  make(map[string]time.Time),
+		matchTimes: make(map[string][]time.Time),
 	}
 }
 
@@ -196,6 +201,34 @@ func (lw *LogWatcher) matchLine(line string) {
 			if time.Since(last) < time.Duration(r.CooldownSeconds)*time.Second {
 				continue
 			}
+		}
+
+		// Threshold check: count matches within the window
+		thresh := r.Threshold
+		if thresh <= 0 {
+			thresh = 1 // default: fire on first match
+		}
+		if thresh > 1 && r.ThresholdWindowSeconds > 0 {
+			window := time.Duration(r.ThresholdWindowSeconds) * time.Second
+			now := time.Now()
+			cutoff := now.Add(-window)
+
+			// Append this match, prune old entries
+			times := lw.matchTimes[r.Name]
+			times = append(times, now)
+			pruned := times[:0]
+			for _, t := range times {
+				if t.After(cutoff) {
+					pruned = append(pruned, t)
+				}
+			}
+			lw.matchTimes[r.Name] = pruned
+
+			if int32(len(pruned)) < thresh {
+				continue // threshold not yet reached
+			}
+			// Threshold breached — clear the window and fire
+			lw.matchTimes[r.Name] = nil
 		}
 
 		lw.cooldowns[r.Name] = time.Now()

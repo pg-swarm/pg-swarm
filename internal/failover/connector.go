@@ -2,10 +2,12 @@ package failover
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -189,17 +191,29 @@ func (c *SidecarConnector) handlePromote(ctx context.Context, cmd *pgswarmv1.Sid
 	}
 	defer conn.Close(ctx)
 
+	promoteAmbiguous := false
 	if _, err := conn.Exec(ctx, "SELECT pg_promote()"); err != nil {
-		result.Success = false
-		result.Error = fmt.Sprintf("pg_promote: %v", err)
-		return result
+		// 57P01 = admin_shutdown: PG terminated the connection during promotion.
+		// The promote signal was likely delivered; fall through to poll loop.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "57P01" {
+			promoteAmbiguous = true
+			log.Warn().Err(err).Msg("pg_promote() connection terminated during promotion — polling for recovery exit")
+		} else {
+			result.Success = false
+			result.Error = fmt.Sprintf("pg_promote: %v", err)
+			return result
+		}
 	}
 
-	// Poll until promotion completes or timeout
+	// Close the original connection — PG resets connections during role change.
+	conn.Close(ctx)
+
+	// Poll until promotion completes or timeout, reconnecting each tick.
 	promoteCmd := cmd.GetPromote()
 	waitTimeout := time.Duration(promoteCmd.WaitTimeoutSeconds) * time.Second
 	if waitTimeout <= 0 {
-		waitTimeout = 15 * time.Second
+		waitTimeout = 60 * time.Second
 	}
 
 	deadline := time.After(waitTimeout)
@@ -210,15 +224,25 @@ func (c *SidecarConnector) handlePromote(ctx context.Context, cmd *pgswarmv1.Sid
 		select {
 		case <-deadline:
 			result.Success = false
-			result.Error = "pg_promote() called but target did not exit recovery within timeout"
+			if promoteAmbiguous {
+				result.Error = "pg_promote() connection was terminated (57P01) and target did not exit recovery within timeout — promotion may not have been delivered"
+			} else {
+				result.Error = "pg_promote() called but target did not exit recovery within timeout"
+			}
 			return result
 		case <-ctx.Done():
 			result.Success = false
 			result.Error = ctx.Err().Error()
 			return result
 		case <-ticker.C:
+			pollConn, err := pgx.Connect(ctx, c.connString)
+			if err != nil {
+				continue // PG may still be restarting
+			}
 			var stillRecovery bool
-			if err := conn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&stillRecovery); err == nil && !stillRecovery {
+			err = pollConn.QueryRow(ctx, "SELECT pg_is_in_recovery()").Scan(&stillRecovery)
+			pollConn.Close(ctx)
+			if err == nil && !stillRecovery {
 				return result // success — no longer in recovery
 			}
 		}

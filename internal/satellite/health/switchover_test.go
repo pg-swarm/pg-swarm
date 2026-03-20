@@ -187,7 +187,7 @@ func TestSwitchover_Success(t *testing.T) {
 		TargetPod:   "testdb-1",
 	}
 
-	result := Switchover(context.Background(), client, req, manager)
+	result := Switchover(context.Background(), client, req, manager, nil)
 	if !result.Success {
 		t.Fatalf("expected success, got error: %s", result.ErrorMessage)
 	}
@@ -204,7 +204,7 @@ func TestSwitchover_TargetNotReplica(t *testing.T) {
 		TargetPod:   "testdb-0", // this is the primary
 	}
 
-	result := Switchover(context.Background(), client, req, manager)
+	result := Switchover(context.Background(), client, req, manager, nil)
 	if result.Success {
 		t.Fatal("expected failure for non-replica target")
 	}
@@ -224,7 +224,7 @@ func TestSwitchover_SidecarNotConnected(t *testing.T) {
 		TargetPod:   "testdb-1",
 	}
 
-	result := Switchover(context.Background(), client, req, manager)
+	result := Switchover(context.Background(), client, req, manager, nil)
 	if result.Success {
 		t.Fatal("expected failure when sidecar not connected")
 	}
@@ -255,7 +255,7 @@ func TestSwitchover_FenceFails_Rollback(t *testing.T) {
 		TargetPod:   "testdb-1",
 	}
 
-	result := Switchover(context.Background(), client, req, manager)
+	result := Switchover(context.Background(), client, req, manager, nil)
 	if result.Success {
 		t.Fatal("expected failure when fence fails")
 	}

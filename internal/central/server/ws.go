@@ -89,6 +89,27 @@ type wsMessage struct {
 	Data interface{} `json:"data"`
 }
 
+// BroadcastJSON sends a targeted JSON message to all WS clients immediately
+// (no debounce). Used for switchover_progress and switchover_complete messages.
+func (h *WSHub) BroadcastJSON(msgType string, data interface{}) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.clients) == 0 {
+		return
+	}
+	msg, err := json.Marshal(wsMessage{Type: msgType, Data: data})
+	if err != nil {
+		log.Error().Err(err).Msg("ws: marshal broadcast")
+		return
+	}
+	for c := range h.clients {
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+}
+
 // broadcast fetches current state and pushes it to all clients.
 func (h *WSHub) broadcast() {
 	h.mu.RLock()
@@ -154,6 +175,12 @@ func (h *WSHub) fetchState() map[string]interface{} {
 	}
 	if v, err := s.ListRecoveryRuleSets(ctx); err == nil {
 		state["recoveryRuleSets"] = v
+	}
+
+	if h.server.opsTracker != nil {
+		if ops := h.server.opsTracker.GetActiveOps(); len(ops) > 0 {
+			state["activeOperations"] = ops
+		}
 	}
 
 	return state

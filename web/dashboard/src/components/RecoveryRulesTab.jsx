@@ -226,7 +226,7 @@ function RuleSetEditor({ ruleSet, onChange, onSave, onCancel, isNew }) {
   }
 
   function startAddRule() {
-    setEditingRule({ name: '', pattern: '', severity: 'warning', action: 'event', cooldown_seconds: 60, exec_command: '', enabled: true, builtin: false, category: 'Custom' });
+    setEditingRule({ name: '', pattern: '', severity: 'warning', action: 'event', cooldown_seconds: 60, exec_command: '', enabled: true, builtin: false, category: 'Custom', threshold: 1, threshold_window_seconds: 0 });
     setEditingRuleIndex(-1);
     setPatternError('');
     setTestResult(null);
@@ -337,6 +337,7 @@ function RuleSetEditor({ ruleSet, onChange, onSave, onCancel, isNew }) {
                         <th style={{ width: 66 }}>Severity</th>
                         <th style={{ width: 90 }}>Action</th>
                         <th style={{ width: 56 }}>CD</th>
+                        <th style={{ width: 64 }}>Thresh</th>
                         <th style={{ width: 90 }}></th>
                       </tr>
                     </thead>
@@ -352,6 +353,7 @@ function RuleSetEditor({ ruleSet, onChange, onSave, onCancel, isNew }) {
                             <td style={{ whiteSpace: 'nowrap' }}><span className={'badge ' + (SEV_CLASS[rule.severity] || '')} style={{ fontSize: 10 }}>{rule.severity}</span></td>
                             <td style={{ whiteSpace: 'nowrap' }}><span className={'badge ' + (ACT_CLASS[rule.action] || '')} style={{ fontSize: 10 }}>{ACT_LABEL[rule.action] || rule.action}</span></td>
                             <td style={{ fontSize: 11, whiteSpace: 'nowrap' }}>{formatCooldown(rule.cooldown_seconds)}</td>
+                            <td style={{ fontSize: 11, whiteSpace: 'nowrap' }}>{rule.threshold > 1 ? `≥${rule.threshold} / ${rule.threshold_window_seconds}s` : '—'}</td>
                             <td>
                               <div className="actions" style={{ display: 'flex', gap: 4 }}>
                                 {rule.builtin ? (
@@ -418,6 +420,20 @@ function RuleSetEditor({ ruleSet, onChange, onSave, onCancel, isNew }) {
                   <label>Cooldown (seconds)</label>
                   <input className="input" type="number" min="0" value={editingRule.cooldown_seconds}
                     onChange={e => setEditingRule(r => ({ ...r, cooldown_seconds: parseInt(e.target.value) || 0 }))} />
+                </div>
+              </div>
+              <div className="form-grid" style={{ marginTop: 12 }}>
+                <div className="form-row">
+                  <label>Threshold</label>
+                  <input className="input" type="number" min="1" value={editingRule.threshold || 1}
+                    onChange={e => setEditingRule(r => ({ ...r, threshold: parseInt(e.target.value) || 1 }))} />
+                  <span className="muted" style={{ fontSize: 11 }}>Number of matches required before firing</span>
+                </div>
+                <div className="form-row">
+                  <label>Window (seconds)</label>
+                  <input className="input" type="number" min="0" value={editingRule.threshold_window_seconds || 0}
+                    onChange={e => setEditingRule(r => ({ ...r, threshold_window_seconds: parseInt(e.target.value) || 0 }))} />
+                  <span className="muted" style={{ fontSize: 11 }}>Time window for counting matches (0 = single match)</span>
                 </div>
               </div>
               {editingRule.action === 'exec' && (

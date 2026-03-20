@@ -513,6 +513,58 @@ func (o *Operator) StartOrphanChecker(ctx context.Context) {
 	}
 }
 
+// StartDriftReconciler periodically checks managed StatefulSets for replica
+// count drift (e.g. manual kubectl scale) and corrects them back to the
+// desired count from the ClusterConfig.
+func (o *Operator) StartDriftReconciler(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			o.reconcileDrift(ctx)
+		}
+	}
+}
+
+func (o *Operator) reconcileDrift(ctx context.Context) {
+	o.mu.RLock()
+	snapshot := make(map[string]*pgswarmv1.ClusterConfig, len(o.desired))
+	for k, v := range o.desired {
+		snapshot[k] = v
+	}
+	o.mu.RUnlock()
+
+	for key, cfg := range snapshot {
+		sts, err := o.client.AppsV1().StatefulSets(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				log.Warn().Err(err).Str("cluster", key).Msg("drift-check: failed to get statefulset")
+			}
+			continue
+		}
+		actual := int32(0)
+		if sts.Spec.Replicas != nil {
+			actual = *sts.Spec.Replicas
+		}
+		if actual != cfg.Replicas {
+			log.Warn().
+				Str("cluster", key).
+				Int32("desired", cfg.Replicas).
+				Int32("actual", actual).
+				Msg("drift-check: replica count mismatch, correcting")
+			sts.Spec.Replicas = &cfg.Replicas
+			if _, err := o.client.AppsV1().StatefulSets(cfg.Namespace).Update(ctx, sts, metav1.UpdateOptions{}); err != nil {
+				log.Error().Err(err).Str("cluster", key).Msg("drift-check: failed to correct replicas")
+			} else {
+				log.Info().Str("cluster", key).Int32("replicas", cfg.Replicas).Msg("drift-check: replicas corrected")
+			}
+		}
+	}
+}
+
 // ensurePodLabels polls until all expected pods have a role label.
 // Used when failover is disabled and no sidecar will label them.
 func (o *Operator) ensurePodLabels(namespace, clusterName string, replicas int32) {

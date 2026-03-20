@@ -24,22 +24,24 @@ import (
 
 // RESTServer handles the REST API endpoints for the central server.
 type RESTServer struct {
-	store     store.Store
-	registry  *registry.Registry
-	streams   *StreamManager
-	logBuffer *LogBuffer
-	app       *fiber.App
-	wsHub     *WSHub
+	store      store.Store
+	registry   *registry.Registry
+	streams    *StreamManager
+	logBuffer  *LogBuffer
+	opsTracker *OpsTracker
+	app        *fiber.App
+	wsHub      *WSHub
 }
 
 // NewRESTServer creates a new RESTServer.
-func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager, lb *LogBuffer) *RESTServer {
+func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager, lb *LogBuffer, ot *OpsTracker) *RESTServer {
 	srv := &RESTServer{
-		store:     s,
-		registry:  reg,
-		streams:   sm,
-		logBuffer: lb,
-		app:       fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
+		store:      s,
+		registry:   reg,
+		streams:    sm,
+		logBuffer:  lb,
+		opsTracker: ot,
+		app:        fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
 	}
 	srv.wsHub = newWSHub(srv)
 	go srv.wsHub.Run()
@@ -56,6 +58,11 @@ func (s *RESTServer) Start(addr string) error {
 // Shutdown gracefully shuts down the HTTP server.
 func (s *RESTServer) Shutdown() error {
 	return s.app.Shutdown()
+}
+
+// GetWSHub returns the WebSocket hub for cross-server wiring.
+func (s *RESTServer) GetWSHub() *WSHub {
+	return s.wsHub
 }
 
 func (s *RESTServer) setupRoutes() {
@@ -552,10 +559,16 @@ func (s *RESTServer) switchoverCluster(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "cluster has no satellite"})
 	}
 
+	operationID := uuid.New().String()
 	req := &pgswarmv1.SwitchoverRequest{
 		ClusterName: cfg.Name,
 		Namespace:   cfg.Namespace,
 		TargetPod:   body.TargetPod,
+		OperationId: operationID,
+	}
+
+	if s.opsTracker != nil {
+		s.opsTracker.Start(operationID, cfg.Name, "", body.TargetPod)
 	}
 
 	if err := s.streams.PushSwitchover(*cfg.SatelliteID, req); err != nil {
@@ -563,8 +576,8 @@ func (s *RESTServer) switchoverCluster(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	log.Info().Str("cluster", cfg.Name).Str("target", body.TargetPod).Msg("switchover request sent")
-	return c.JSON(fiber.Map{"status": "switchover initiated", "target_pod": body.TargetPod})
+	log.Info().Str("cluster", cfg.Name).Str("target", body.TargetPod).Str("operation_id", operationID).Msg("switchover request sent")
+	return c.JSON(fiber.Map{"status": "switchover initiated", "target_pod": body.TargetPod, "operation_id": operationID})
 }
 
 func (s *RESTServer) updateSatelliteLabels(c *fiber.Ctx) error {
