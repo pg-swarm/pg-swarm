@@ -93,10 +93,15 @@ func Switchover(ctx context.Context, client kubernetes.Interface, req *pgswarmv1
 		log.Warn().Err(err).Msg("checkpoint on primary failed (proceeding anyway)")
 	}
 
-	// 4b. Fence the old primary — block new writes and terminate client connections
+	// 4b. Fence the old primary — block new writes and terminate client connections.
+	// Uses graceful drain (5s for in-flight transactions) and aborts on failure
+	// to prevent split-brain (two writable primaries).
 	log.Trace().Msg("Switchover: fencing old primary")
-	if err := pgfence.FencePrimary(ctx, primaryConn); err != nil {
-		log.Warn().Err(err).Msg("fencing old primary failed (proceeding with switchover)")
+	if err := pgfence.FencePrimaryWithOpts(ctx, primaryConn, pgfence.FenceOpts{
+		DrainTimeout: 5 * time.Second,
+	}); err != nil {
+		result.ErrorMessage = fmt.Sprintf("fencing old primary failed, aborting switchover: %v", err)
+		return result
 	}
 
 	// 5. Transfer the leader lease to the target pod
