@@ -205,10 +205,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		log.Trace().Msg("health monitor started")
 	}
 
-	// 8. Start orphan checker
+	// 8. Start orphan checker and drift reconciler
 	if a.operator != nil {
 		go a.operator.StartOrphanChecker(ctx)
-		log.Trace().Msg("orphan checker started")
+		go a.operator.StartDriftReconciler(ctx)
+		log.Trace().Msg("orphan checker and drift reconciler started")
 	}
 
 	log.Info().Str("satellite_id", a.identity.SatelliteID).Msg("satellite agent started")
@@ -217,7 +218,7 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // handleSwitchover handles a switchover request from central.
-func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.SwitchoverResult {
+func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest, onProgress func(int32, string, string, string, string, bool)) *pgswarmv1.SwitchoverResult {
 	log.Trace().Str("cluster", req.ClusterName).Str("target", req.TargetPod).Msg("handleSwitchover entry")
 	if a.k8sClient == nil || a.operator == nil {
 		return &pgswarmv1.SwitchoverResult{
@@ -231,7 +232,7 @@ func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest) *pgswarmv1.Sw
 	req.Namespace = ns
 	log.Trace().Str("namespace", ns).Msg("handleSwitchover resolved namespace")
 
-	result := health.Switchover(context.Background(), a.k8sClient, req, a.streamManager)
+	result := health.Switchover(context.Background(), a.k8sClient, req, a.streamManager, health.ProgressFunc(onProgress))
 	log.Trace().Bool("success", result.Success).Msg("handleSwitchover result")
 	return result
 }

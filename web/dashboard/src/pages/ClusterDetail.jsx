@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import MiniHeader from '../components/MiniHeader';
+import SwitchoverProgressModal from '../components/SwitchoverProgressModal';
+import { useData } from '../context/DataContext';
 import { api, parseSpec, timeAgo } from '../api';
 import {
   RoleBadge, PgStatusDot, LagDot, ConnBar, InstanceSummary, KV,
@@ -43,9 +45,36 @@ export default function ClusterDetail() {
   const [restores, setRestores] = useState([]);
   const [busy, setBusy] = useState(false);
   const [detailInstId, setDetailInstId] = useState(null);
-  const [switchoverTarget, setSwitchoverTarget] = useState(null);
+  const [switchoverOpId, setSwitchoverOpId] = useState(null);
+  const [switchoverOpLocal, setSwitchoverOpLocal] = useState(null);
+  const [progressModalVisible, setProgressModalVisible] = useState(false);
   const [activeTab, setActiveTab] = useState('instances');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const { activeOperations } = useData();
+  const mockTimerRef = useRef(null);
+
+  // Merge local switchover state with live WS data
+  const switchoverOp = switchoverOpId
+    ? (() => {
+        const ws = activeOperations?.[switchoverOpId] || {};
+        const localLog = switchoverOpLocal?.log || [];
+        const wsLog = ws.log || [];
+        // Use WS log if available (live data), else fall back to local (mock)
+        const mergedLog = wsLog.length > 0 ? wsLog : localLog;
+        return {
+          ...switchoverOpLocal,
+          ...ws,
+          primary_pod: ws.primary_pod || switchoverOpLocal?.primary_pod,
+          target_pod: ws.target_pod || switchoverOpLocal?.target_pod,
+          log: mergedLog,
+        };
+      })()
+    : null;
+
+  // Clean up mock timer on unmount
+  useEffect(() => {
+    return () => { if (mockTimerRef.current) clearInterval(mockTimerRef.current); };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -144,21 +173,87 @@ export default function ClusterDetail() {
 
   function requestSwitchover(targetPod) {
     const currentPrimary = instances.find(i => i.role === 'primary');
-    setSwitchoverTarget({ clusterId: cluster.id, targetPod, currentPrimary: currentPrimary?.pod_name });
+    const opLocal = {
+      operation_id: null,
+      cluster_name: cluster.name,
+      primary_pod: currentPrimary?.pod_name,
+      target_pod: targetPod,
+      done: false, success: false, error: null,
+      started: false, steps: {}, log: [],
+    };
+    setSwitchoverOpLocal(opLocal);
+    setSwitchoverOpId('pending-' + Date.now());
+    setProgressModalVisible(true);
   }
 
-  async function confirmSwitchover() {
-    if (!switchoverTarget) return;
-    const { clusterId, targetPod } = switchoverTarget;
-    setSwitchoverTarget(null);
-    setBusy(true);
+  function startMockSimulation(opLocal) {
+    const stepDefs = [
+      { step: 1, name: 'verify_target', pod: opLocal.target_pod, detail: 'role=replica, pod ready' },
+      { step: 2, name: 'find_primary', pod: opLocal.primary_pod, detail: `primary: ${opLocal.primary_pod}` },
+      { step: 3, name: 'check_status', pod: opLocal.target_pod, detail: 'in_recovery=true' },
+      { step: 4, name: 'fence_primary', pod: opLocal.primary_pod, detail: 'fenced, connections drained' },
+      { step: 5, name: 'checkpoint', pod: opLocal.primary_pod, detail: 'checkpoint completed' },
+      { step: 6, name: 'transfer_lease', pod: opLocal.target_pod, detail: `lease ${opLocal.cluster_name}-leader transferred` },
+      { step: 7, name: 'promote', pod: opLocal.target_pod, detail: 'pg_promote() succeeded, exited recovery' },
+      { step: 8, name: 'label_pods', pod: opLocal.target_pod, detail: `${opLocal.target_pod}=primary, ${opLocal.primary_pod}=replica` },
+      { step: 9, name: 'renew_lease', pod: opLocal.target_pod, detail: `lease renewed for ${opLocal.target_pod}` },
+    ];
+    let idx = 0;
+    let phase = 'starting';
+
+    mockTimerRef.current = setInterval(() => {
+      const def = stepDefs[idx];
+      const ts = new Date().toISOString();
+      setSwitchoverOpLocal(prev => {
+        if (!prev) return prev;
+        const newSteps = { ...prev.steps };
+        newSteps[def.step] = {
+          step: def.step, step_name: def.name, status: phase,
+          target_pod: def.pod, error_message: phase === 'completed' ? def.detail : '',
+          ponr: def.step >= 7,
+        };
+        const logEntry = {
+          step: def.step, step_name: def.name, status: phase,
+          target_pod: def.pod, detail: phase === 'completed' ? def.detail : '',
+          ponr: def.step >= 7, timestamp: ts,
+        };
+        const newLog = [...(prev.log || []), logEntry];
+        if (phase === 'completed' && idx === stepDefs.length - 1) {
+          clearInterval(mockTimerRef.current);
+          mockTimerRef.current = null;
+          return { ...prev, steps: newSteps, log: newLog, done: true, success: true };
+        }
+        return { ...prev, steps: newSteps, log: newLog };
+      });
+      if (phase === 'starting') {
+        phase = 'completed';
+      } else {
+        phase = 'starting';
+        idx++;
+      }
+    }, 600);
+  }
+
+  async function startSwitchover() {
+    if (!switchoverOpLocal || switchoverOpLocal.started) return;
+    const targetPod = switchoverOpLocal.target_pod;
+
+    const updated = { ...switchoverOpLocal, started: true };
+    let useMock = false;
     try {
-      await api.switchover(clusterId, targetPod);
-      refresh();
-      setTimeout(() => { refresh(); setBusy(false); }, 12000);
-    } catch (e) {
-      alert('Switchover failed: ' + e.message);
-      setBusy(false);
+      const resp = await api.switchover(cluster.id, targetPod);
+      updated.operation_id = resp.operation_id || ('mock-' + Date.now());
+      useMock = !resp.operation_id;
+    } catch {
+      updated.operation_id = 'mock-' + Date.now();
+      useMock = true;
+    }
+
+    setSwitchoverOpLocal(updated);
+    setSwitchoverOpId(updated.operation_id);
+
+    if (useMock) {
+      startMockSimulation(updated);
     }
   }
 
@@ -321,17 +416,35 @@ export default function ClusterDetail() {
                                 <td className="mono muted">{inst.timeline_id || '-'}</td>
                                 {hasFailover && (
                                   <td>
-                                    {inst.role === 'replica' && inst.ready && (
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); requestSwitchover(inst.pod_name); }}
-                                        disabled={busy}
-                                        title="Promote to primary"
-                                        className="cd-promote-btn"
-                                      >
-                                        <ArrowUpRight size={11} />
-                                        {busy ? '...' : 'Promote'}
-                                      </button>
-                                    )}
+                                    {inst.role === 'replica' && inst.ready && (() => {
+                                      const isActiveTarget = switchoverOp && !switchoverOp.done && switchoverOp.target_pod === inst.pod_name;
+                                      const switchoverBusy = switchoverOp && !switchoverOp.done;
+                                      if (isActiveTarget) {
+                                        const isRunning = switchoverOpLocal?.started;
+                                        return (
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); setProgressModalVisible(true); }}
+                                            className="cd-promote-btn cd-progress-btn"
+                                          >
+                                            {isRunning
+                                              ? <><Loader size={11} className="so-spin" /> See Progress</>
+                                              : <><ArrowUpRight size={11} /> Pending</>
+                                            }
+                                          </button>
+                                        );
+                                      }
+                                      return (
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); requestSwitchover(inst.pod_name); }}
+                                          disabled={busy || switchoverBusy}
+                                          title="Promote to primary"
+                                          className="cd-promote-btn"
+                                        >
+                                          <ArrowUpRight size={11} />
+                                          {busy ? '...' : 'Promote'}
+                                        </button>
+                                      );
+                                    })()}
                                   </td>
                                 )}
                               </tr>
@@ -527,12 +640,19 @@ export default function ClusterDetail() {
         </div>
       </div>
 
-      {/* Switchover confirmation modal */}
-      {switchoverTarget && (
-        <SwitchoverConfirmModal
-          target={switchoverTarget}
-          onConfirm={confirmSwitchover}
-          onCancel={() => setSwitchoverTarget(null)}
+      {/* Switchover progress modal */}
+      {switchoverOp && progressModalVisible && (
+        <SwitchoverProgressModal
+          operation={switchoverOp}
+          instances={instances}
+          onStart={startSwitchover}
+          onClose={() => {
+            setProgressModalVisible(false);
+            if (!switchoverOpLocal?.started || switchoverOp.done) {
+              setSwitchoverOpId(null);
+              setSwitchoverOpLocal(null);
+            }
+          }}
         />
       )}
 
@@ -840,56 +960,3 @@ function DiskBarDark({ label, bytes, total, color }) {
   );
 }
 
-/* ── Switchover Confirm Modal ───────────────────────── */
-
-function SwitchoverConfirmModal({ target, onConfirm, onCancel }) {
-  return (
-    <div className="confirm-overlay" onClick={onCancel}>
-      <div className="confirm-modal switchover-modal" onClick={e => e.stopPropagation()}>
-        <div className="confirm-header switchover-header">
-          <h3><AlertTriangle size={18} className="switchover-warn-icon" /> Planned Switchover</h3>
-          <button className="modal-close" onClick={onCancel}><X size={18} /></button>
-        </div>
-        <div className="confirm-body">
-          <div className="switchover-detail">
-            <div className="switchover-flow">
-              <div className="switchover-node">
-                <Crown size={16} className="switchover-icon-primary" />
-                <span className="switchover-label">Current Primary</span>
-                <span className="mono switchover-pod">{target.currentPrimary || 'unknown'}</span>
-                <span className="switchover-action">will be demoted to replica</span>
-              </div>
-              <div className="switchover-arrow">
-                <ArrowUpRight size={20} />
-              </div>
-              <div className="switchover-node">
-                <ArrowUpRight size={16} className="switchover-icon-promote" />
-                <span className="switchover-label">New Primary</span>
-                <span className="mono switchover-pod">{target.targetPod}</span>
-                <span className="switchover-action">will be promoted to primary</span>
-              </div>
-            </div>
-          </div>
-          <div className="switchover-steps">
-            <h5>What will happen:</h5>
-            <ol>
-              <li>A CHECKPOINT will be issued on the current primary to flush all WAL</li>
-              <li>The current primary will be fenced (writes blocked, client connections terminated)</li>
-              <li>The leader lease will be transferred to <strong>{target.targetPod}</strong></li>
-              <li>The target replica will be promoted via <code>pg_promote()</code></li>
-              <li>The old primary will automatically demote to a replica</li>
-            </ol>
-          </div>
-          <div className="switchover-warning">
-            <AlertTriangle size={14} />
-            <span>Applications connected to the database will experience a brief downtime during the switchover. New connections will be routed to the new primary once promotion is complete.</span>
-          </div>
-        </div>
-        <div className="confirm-footer">
-          <button className="btn-sm" onClick={onCancel}>Cancel</button>
-          <button className="btn-sm btn-danger" onClick={onConfirm}>Confirm Switchover</button>
-        </div>
-      </div>
-    </div>
-  );
-}

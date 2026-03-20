@@ -43,8 +43,11 @@ func main() {
 	// Initialize components
 	pgStore := store.NewPostgresStore(pool)
 	reg := registry.New(pgStore)
+	opsTracker := server.NewOpsTracker()
 	grpcServer := server.NewGRPCServer(reg, pgStore)
-	restServer := server.NewRESTServer(pgStore, reg, grpcServer.GetStreams(), grpcServer.GetLogBuffer())
+	restServer := server.NewRESTServer(pgStore, reg, grpcServer.GetStreams(), grpcServer.GetLogBuffer(), opsTracker)
+	grpcServer.SetWSHub(restServer.GetWSHub())
+	grpcServer.SetOpsTracker(opsTracker)
 
 	// Start gRPC server
 	go func() {

@@ -23,6 +23,7 @@ message SatelliteMessage {
     LogEntry log_entry = 7;
     BackupStatusReport backup_status = 8;
     RestoreStatusReport restore_status = 9;
+    SwitchoverProgress switchover_progress = 10;
   }
 }
 
@@ -55,6 +56,7 @@ message SwitchoverRequest {
   string cluster_name = 1;
   string namespace = 2;
   string target_pod = 3; // pod to promote (must be a replica)
+  string operation_id = 4; // unique operation ID for progress tracking
 }
 
 // SwitchoverResult is sent back by the satellite after a switchover attempt.
@@ -62,6 +64,20 @@ message SwitchoverResult {
   string cluster_name = 1;
   bool success = 2;
   string error_message = 3;
+  string operation_id = 4; // echoed from SwitchoverRequest
+}
+
+// SwitchoverProgress reports step-by-step progress during a switchover.
+message SwitchoverProgress {
+  string operation_id = 1;
+  string cluster_name = 2;
+  int32 step = 3;
+  string step_name = 4;
+  string status = 5;       // pending, starting, completed, failed, rolling_back
+  string target_pod = 6;
+  string error_message = 7;
+  bool point_of_no_return = 8;
+  google.protobuf.Timestamp timestamp = 9;
 }
 
 message StorageClassReport {
