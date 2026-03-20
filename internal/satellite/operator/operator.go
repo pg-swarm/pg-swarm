@@ -331,6 +331,15 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		return fmt.Errorf("configmap: %w", err)
 	}
 
+	// 4b. Recovery rules ConfigMap (for failover sidecar)
+	if failoverEnabled(cfg) {
+		log.Trace().Msg("reconcile: ensuring recovery-rules configmap")
+		rrCM := buildRecoveryRulesConfigMap(cfg)
+		if err := createOrUpdateConfigMap(ctx, o.client, rrCM); err != nil {
+			return fmt.Errorf("recovery-rules configmap: %w", err)
+		}
+	}
+
 	// 5. Services
 	log.Trace().Msg("reconcile: ensuring services")
 	if err := createOrUpdateService(ctx, o.client, buildHeadlessService(cfg)); err != nil {
@@ -391,25 +400,25 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		go o.ensurePodLabels(cfg.Namespace, cfg.ClusterName, cfg.Replicas)
 	}
 
-	// 10. Backup sidecar RBAC and credential secrets
-	if backupEnabled(cfg) {
-		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
-		if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
-			return fmt.Errorf("backup RBAC: %w", err)
-		}
-		for _, backup := range cfg.Backups {
-			backupSecret := buildBackupCredentialSecret(cfg, backup)
-			if backupSecret != nil {
-				if err := createOrPreserveSecret(ctx, o.client, backupSecret); err != nil {
-					return fmt.Errorf("backup credential secret: %w", err)
-				}
-			}
-		}
-	} else {
-		// Cleanup backup resources if backup was detached
-		log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")
-		cleanupBackupResources(ctx, o.client, cfg.Namespace, cfg.ClusterName)
-	}
+	// TODO: Re-enable backup sidecar RBAC and credential secrets once core functionality is stable.
+	// // 10. Backup sidecar RBAC and credential secrets
+	// if backupEnabled(cfg) {
+	// 	log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
+	// 	if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
+	// 		return fmt.Errorf("backup RBAC: %w", err)
+	// 	}
+	// 	for _, backup := range cfg.Backups {
+	// 		backupSecret := buildBackupCredentialSecret(cfg, backup)
+	// 		if backupSecret != nil {
+	// 			if err := createOrPreserveSecret(ctx, o.client, backupSecret); err != nil {
+	// 				return fmt.Errorf("backup credential secret: %w", err)
+	// 			}
+	// 		}
+	// 	}
+	// } else {
+	// 	log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")
+	// 	cleanupBackupResources(ctx, o.client, cfg.Namespace, cfg.ClusterName)
+	// }
 
 	return nil
 }

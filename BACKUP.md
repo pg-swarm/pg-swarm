@@ -301,3 +301,87 @@ GET    /api/v1/backups/:id                       Get single backup record
 POST   /api/v1/clusters/:id/restore              Initiate a restore
 GET    /api/v1/clusters/:id/restores             List cluster restore operations
 ```
+
+---
+
+## Backup sequence
+
+### 1. Init container (`pg-init`)
+
+**Primary (ordinal 0) — first boot:**
+- `initdb` → starts PG locally → creates `repl_user`, `backup_user`, app databases → stops PG
+- Copies ConfigMap `postgresql.conf` / `pg_hba.conf` into PGDATA
+- `archive_command` is set to `cp %p /wal-staging/%f` (staging emptyDir shared with backup sidecar)
+
+**Replica (ordinal > 0) — first boot:**
+- Waits for primary, runs `pg_basebackup -R -Xs`
+- Copies ConfigMap into PGDATA
+- Injects `restore_command` into `postgresql.auto.conf` — a shell script that writes the WAL name to `/wal-restore/.request` and polls until the sidecar places the file at `/wal-restore/<name>`
+
+**Any pod — re-init / restart (PGDATA already exists):**
+- Copies config only
+- If `standby.signal` present → checks for timeline divergence → runs `pg_rewind` or falls back to `pg_basebackup`
+- Writes `standby.signal` + `primary_conninfo` pointing to the RW service
+
+---
+
+### 2. Wrapper script (main container loop)
+
+Before PG starts each iteration:
+- `pg_swarm_recover()`: detects timeline divergence → `pg_rewind` → WAL cleanup (REDO segment + checkpoint record segment) → falls back to `pg_basebackup` if rewind fails
+- Checks `.pg-swarm-needs-basebackup` marker (set by failover sidecar or backup sidecar)
+- Final guard: verifies checkpoint WAL segment exists before handing off to `docker-entrypoint.sh`
+
+Then PG starts. On exit → loop repeats.
+
+---
+
+### 3. Backup sidecar (`Run()`)
+
+Starts concurrently with PG in the same pod.
+
+```
+startup
+  ├── destination.NewFromEnv()         — S3/GCS/SFTP/local
+  ├── go WatchWALRestore()             — MUST start before detectRole()
+  │     polls /wal-restore/.request every 500ms
+  │     downloads+decompresses WAL from dest → /wal-restore/<name>
+  │     (needed so restore_command doesn't deadlock PG during recovery)
+  └── detectRole()                     — retries pg_is_in_recovery() for up to 60s
+```
+
+**If primary:**
+```
+activatePrimary()
+  ├── download or create backups.db (SQLite metadata) from dest
+  ├── ensure active backup set exists
+  ├── go WatchWALStaging()   — polls /wal-staging/ every 1s
+  │     compress + upload WAL → dest/wal/<name>.gz
+  │     record segment in metadata
+  │     delete local copy
+  ├── go api.Start(:8442)    — /backup/complete, /healthz, legacy push/fetch
+  └── NewRetentionWorker()   — prunes old backup sets
+```
+
+**If replica:**
+```
+activateReplica()
+  ├── go api.Start(:8442)    — /healthz only
+  ├── NewNotifier()          — reaches primary sidecar HTTP API
+  └── go scheduler.Run()
+        ├── immediate: RunBaseBackup() (if BASE_SCHEDULE configured)
+        ├── baseTicker  → RunBaseBackup()      (pg_basebackup to dest)
+        ├── incrTicker  → RunIncrBackup()      (PG 17+ incremental)
+        └── logicTicker → RunLogicalBackup()   (pg_dump per database)
+```
+
+**Role-change watcher** (every 10s): calls `pg_is_in_recovery()` → if role changed, `deactivate()` → `activateRole()` with new role. This is how the sidecar transitions after a failover (replica → primary).
+
+---
+
+### Key shared volumes (emptyDir, pod-scoped)
+
+| Volume | Direction | Who writes | Who reads |
+|---|---|---|---|
+| `/wal-staging` | PG → sidecar | PG `archive_command` | `WatchWALStaging` |
+| `/wal-restore` | sidecar → PG | `WatchWALRestore` | PG `restore_command` |

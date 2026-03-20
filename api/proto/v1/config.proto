@@ -112,6 +112,7 @@ message ClusterConfig {
   bool paused = 16;                              // when true, RW service is removed (read-only mode)
   bool deletion_protection = 17;                  // when true, PVCs get a finalizer to prevent accidental deletion
   repeated BackupConfig backups = 18;              // backup profile configs (one per attached backup profile)
+  repeated RecoveryRule recovery_rules = 19;       // log-based recovery rules for failover sidecar
 }
 
 message PostgresSpec {
@@ -161,6 +162,17 @@ message FailoverSpec {
   bool enabled = 1;
   int32 health_check_interval_seconds = 2; // default 5
   string sidecar_image = 3;                // default: pg-swarm-failover:latest
+}
+
+message RecoveryRule {
+  string name = 1;
+  string pattern = 2;           // regex matched against each PG log line
+  string severity = 3;          // critical, error, warning, info
+  string action = 4;            // restart, rewind, rebasebackup, event, exec
+  string exec_command = 5;      // only used when action=exec
+  int32  cooldown_seconds = 6;
+  bool   enabled = 7;
+  string category = 8;          // grouping label for UI display
 }
 
 message DeleteCluster {

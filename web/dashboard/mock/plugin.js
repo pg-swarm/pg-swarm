@@ -14,6 +14,7 @@ import {
   storageTiers,
   backups,
   restores,
+  recoveryRuleSets,
   generateLogs,
 } from './data.js';
 
@@ -42,6 +43,7 @@ export default function mockApiPlugin() {
     postgresVariants: [...postgresVariants],
     backupProfiles: [...backupProfiles],
     storageTiers: [...storageTiers],
+    recoveryRuleSets: recoveryRuleSets.map(rs => ({ ...rs, rules: rs.rules.map(r => ({ ...r })) })),
   };
 
   return {
@@ -354,6 +356,39 @@ export default function mockApiPlugin() {
         if (path.match(/^\/storage-tiers\/[^/]+$/) && method === 'DELETE') {
           const id = path.split('/')[2];
           state.storageTiers = state.storageTiers.filter((t) => t.id !== id);
+          return json(res, { ok: true });
+        }
+
+        // ---- Recovery Rule Sets ----
+        if (path === '/recovery-rule-sets' && method === 'GET') {
+          return json(res, state.recoveryRuleSets);
+        }
+        if (path === '/recovery-rule-sets' && method === 'POST') {
+          body(req).then((b) => {
+            const rs = { id: 'rs-' + Date.now(), created_at: new Date().toISOString(), updated_at: new Date().toISOString(), builtin: false, ...b };
+            state.recoveryRuleSets.push(rs);
+            json(res, rs, 201);
+          });
+          return;
+        }
+        if (path.match(/^\/recovery-rule-sets\/[^/]+$/) && method === 'GET') {
+          const id = path.split('/')[2];
+          return json(res, state.recoveryRuleSets.find((rs) => rs.id === id) || { error: 'not found' });
+        }
+        if (path.match(/^\/recovery-rule-sets\/[^/]+$/) && method === 'PUT') {
+          const id = path.split('/')[2];
+          body(req).then((b) => {
+            const idx = state.recoveryRuleSets.findIndex((rs) => rs.id === id);
+            if (idx >= 0) { Object.assign(state.recoveryRuleSets[idx], b, { updated_at: new Date().toISOString() }); json(res, state.recoveryRuleSets[idx]); }
+            else json(res, { error: 'not found' }, 404);
+          });
+          return;
+        }
+        if (path.match(/^\/recovery-rule-sets\/[^/]+$/) && method === 'DELETE') {
+          const id = path.split('/')[2];
+          const rs = state.recoveryRuleSets.find((r) => r.id === id);
+          if (rs && rs.builtin) return json(res, { error: 'cannot delete built-in rule set' }, 400);
+          state.recoveryRuleSets = state.recoveryRuleSets.filter((r) => r.id !== id);
           return json(res, { ok: true });
         }
 

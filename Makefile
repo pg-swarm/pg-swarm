@@ -141,7 +141,7 @@ minikube-build-backup: ## Build backup sidecar image and load into minikube
 		-f $(DOCKERFILE_DIR)/Dockerfile.backup-sidecar \
 		-t $(DOCKER_REPO)/pg-swarm-backup-sidecar:$(IMAGE_TAG) --load .
 
-minikube-build-all: minikube-build-central minikube-build-satellite minikube-build-failover minikube-build-backup ## Build all images and load into minikube
+minikube-build-all: minikube-build-central minikube-build-satellite minikube-build-failover # minikube-build-backup ## Build all images and load into minikube
 
 # ── Kubernetes ───────────────────────────────────────────────────────────────
 

@@ -116,6 +116,11 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/storage-tiers", s.createStorageTier)
 	api.Put("/storage-tiers/:id", s.updateStorageTier)
 	api.Delete("/storage-tiers/:id", s.deleteStorageTier)
+	api.Get("/recovery-rule-sets", s.listRecoveryRuleSets)
+	api.Post("/recovery-rule-sets", s.createRecoveryRuleSet)
+	api.Get("/recovery-rule-sets/:id", s.getRecoveryRuleSet)
+	api.Put("/recovery-rule-sets/:id", s.updateRecoveryRuleSet)
+	api.Delete("/recovery-rule-sets/:id", s.deleteRecoveryRuleSet)
 	api.Get("/satellites/:id/logs", s.getSatelliteLogs)
 	api.Get("/satellites/:id/logs/stream", s.streamSatelliteLogs)
 	api.Post("/satellites/:id/log-level", s.setSatelliteLogLevel)
@@ -680,6 +685,80 @@ func (s *RESTServer) deleteStorageTier(c *fiber.Ctx) error {
 	if err := s.store.DeleteStorageTier(c.Context(), id); err != nil {
 		log.Error().Err(err).Msg("failed to delete storage tier")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete storage tier"})
+	}
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+// ── Recovery Rule Sets ──────────────────────────────────────────────────────
+
+func (s *RESTServer) listRecoveryRuleSets(c *fiber.Ctx) error {
+	sets, err := s.store.ListRecoveryRuleSets(c.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list recovery rule sets")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list recovery rule sets"})
+	}
+	if sets == nil {
+		sets = []*models.RecoveryRuleSet{}
+	}
+	return c.JSON(sets)
+}
+
+func (s *RESTServer) createRecoveryRuleSet(c *fiber.Ctx) error {
+	var rs models.RecoveryRuleSet
+	if err := c.BodyParser(&rs); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if rs.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	rs.Builtin = false // users cannot create built-in rule sets
+	if err := s.store.CreateRecoveryRuleSet(c.Context(), &rs); err != nil {
+		log.Error().Err(err).Msg("failed to create recovery rule set")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create recovery rule set"})
+	}
+	return c.Status(fiber.StatusCreated).JSON(rs)
+}
+
+func (s *RESTServer) getRecoveryRuleSet(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	rs, err := s.store.GetRecoveryRuleSet(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+	}
+	return c.JSON(rs)
+}
+
+func (s *RESTServer) updateRecoveryRuleSet(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	var rs models.RecoveryRuleSet
+	if err := c.BodyParser(&rs); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	rs.ID = id
+	if rs.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	if err := s.store.UpdateRecoveryRuleSet(c.Context(), &rs); err != nil {
+		log.Error().Err(err).Msg("failed to update recovery rule set")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update recovery rule set"})
+	}
+	return c.JSON(rs)
+}
+
+func (s *RESTServer) deleteRecoveryRuleSet(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	if err := s.store.DeleteRecoveryRuleSet(c.Context(), id); err != nil {
+		log.Error().Err(err).Msg("failed to delete recovery rule set")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete recovery rule set"})
 	}
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
@@ -1626,6 +1705,38 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 				bc := buildProtoBackupConfig(ruleSpec)
 				bc.BackupProfileId = rule.ID.String()
 				protoConfig.Backups = append(protoConfig.Backups, bc)
+			}
+		}
+	}
+
+	// Resolve recovery rules from profile's recovery_rule_set_id
+	if cfg.ProfileID != nil {
+		if p, err := st.GetProfile(context.Background(), *cfg.ProfileID); err == nil && p.RecoveryRuleSetID != nil {
+			if rs, err := st.GetRecoveryRuleSet(context.Background(), *p.RecoveryRuleSetID); err == nil && rs.Config != nil {
+				var rules []struct {
+					Name            string `json:"name"`
+					Pattern         string `json:"pattern"`
+					Severity        string `json:"severity"`
+					Action          string `json:"action"`
+					ExecCommand     string `json:"exec_command"`
+					CooldownSeconds int32  `json:"cooldown_seconds"`
+					Enabled         bool   `json:"enabled"`
+					Category        string `json:"category"`
+				}
+				if err := json.Unmarshal(rs.Config, &rules); err == nil {
+					for _, r := range rules {
+						protoConfig.RecoveryRules = append(protoConfig.RecoveryRules, &pgswarmv1.RecoveryRule{
+							Name:            r.Name,
+							Pattern:         r.Pattern,
+							Severity:        r.Severity,
+							Action:          r.Action,
+							ExecCommand:     r.ExecCommand,
+							CooldownSeconds: r.CooldownSeconds,
+							Enabled:         r.Enabled,
+							Category:        r.Category,
+						})
+					}
+				}
 			}
 		}
 	}

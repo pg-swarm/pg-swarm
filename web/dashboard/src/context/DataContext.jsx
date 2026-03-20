@@ -6,7 +6,7 @@ const DataContext = createContext(null);
 const EMPTY = {
   satellites: [], clusters: [], health: [], events: [], profiles: [],
   deploymentRules: [], postgresVersions: [], postgresVariants: [],
-  backupProfiles: [], storageTiers: [],
+  backupProfiles: [], storageTiers: [], recoveryRuleSets: [],
 };
 
 function wsUrl() {
@@ -25,8 +25,8 @@ export function DataProvider({ children }) {
   const refresh = useCallback(async () => {
     try {
       const safe = (p) => p.catch(() => null);
-      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupProfiles, storageTiers] = await Promise.all([
-        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.backupProfiles()), safe(api.storageTiers()),
+      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupProfiles, storageTiers, recoveryRuleSets] = await Promise.all([
+        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.backupProfiles()), safe(api.storageTiers()), safe(api.recoveryRuleSets()),
       ]);
       setData({
         satellites:        satellites || [],
@@ -39,6 +39,7 @@ export function DataProvider({ children }) {
         postgresVariants:  postgresVariants || [],
         backupProfiles:    backupProfiles || [],
         storageTiers:      storageTiers || [],
+        recoveryRuleSets:  recoveryRuleSets || [],
       });
       setLastRefresh(new Date());
     } catch (err) {
@@ -74,6 +75,7 @@ export function DataProvider({ children }) {
       postgresVariants:  state.postgresVariants || [],
       backupProfiles:    state.backupProfiles || [],
       storageTiers:      state.storageTiers || [],
+      recoveryRuleSets:  state.recoveryRuleSets || [],
     });
     setLastRefresh(new Date());
   }, []);

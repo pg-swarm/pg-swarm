@@ -54,6 +54,11 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to create K8s client")
 	}
 
+	recoveryRulesPath := os.Getenv("RECOVERY_RULES_PATH")
+	if recoveryRulesPath == "" {
+		recoveryRulesPath = "/etc/recovery-rules/rules.json"
+	}
+
 	mon := failover.NewMonitor(failover.Config{
 		PodName:             podName,
 		Namespace:           namespace,
@@ -64,6 +69,7 @@ func main() {
 		ReplicationPassword: replPassword,
 		PrimaryHost:         primaryHost,
 		PGPassword:          pgPassword,
+		RecoveryRulesPath:   recoveryRulesPath,
 	}, client)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
