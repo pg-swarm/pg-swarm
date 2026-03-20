@@ -550,7 +550,7 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
   async function confirmSave() {
     setSaving(true);
     try {
-      await onSave(pendingAttach);
+      await onSave();
     } finally {
       setSaving(false);
     }
