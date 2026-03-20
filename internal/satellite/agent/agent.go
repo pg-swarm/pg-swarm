@@ -50,6 +50,7 @@ type Agent struct {
 	operator      *operator.Operator
 	k8sClient     *kubernetes.Clientset // nil if K8s is unavailable or secret disabled
 	streamManager *sidecar.SidecarStreamManager
+	healthMon     *health.Monitor
 }
 
 // Identity stores the satellite's registration info.
@@ -179,7 +180,8 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// 7. Start health monitor
 	if a.operator != nil && a.k8sClient != nil {
-		mon := health.New(a.k8sClient, a.operator, 30*time.Second)
+		a.healthMon = health.New(a.k8sClient, a.operator, 30*time.Second)
+		mon := a.healthMon
 		mon.SetOnHealth(func(report *pgswarmv1.ClusterHealthReport) {
 			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
 				Payload: &pgswarmv1.SatelliteMessage_HealthReport{
@@ -231,6 +233,11 @@ func (a *Agent) handleSwitchover(req *pgswarmv1.SwitchoverRequest, onProgress fu
 	ns := a.operator.ResolveNamespaceForCluster(req.ClusterName, req.Namespace)
 	req.Namespace = ns
 	log.Trace().Str("namespace", ns).Msg("handleSwitchover resolved namespace")
+
+	// Boost health monitor to fast polling during and after switchover
+	if a.healthMon != nil {
+		a.healthMon.Boost(2 * time.Minute)
+	}
 
 	result := health.Switchover(context.Background(), a.k8sClient, req, a.streamManager, health.ProgressFunc(onProgress))
 	log.Trace().Bool("success", result.Success).Msg("handleSwitchover result")

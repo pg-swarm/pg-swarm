@@ -53,19 +53,29 @@ export default function ClusterDetail() {
   const { activeOperations } = useData();
   const mockTimerRef = useRef(null);
 
-  // Merge local switchover state with live WS data
+  // Merge local switchover state with live WS data.
+  // Local state (mock) is the baseline; WS data (live) enriches it.
+  // steps and log are merged per-key so neither source can blank the other.
   const switchoverOp = switchoverOpId
     ? (() => {
+        const local = switchoverOpLocal || {};
         const ws = activeOperations?.[switchoverOpId] || {};
-        const localLog = switchoverOpLocal?.log || [];
-        const wsLog = ws.log || [];
-        // Use WS log if available (live data), else fall back to local (mock)
+        const localSteps = local.steps || {};
+        const wsSteps = ws.steps || {};
+        const mergedSteps = { ...localSteps };
+        for (const k of Object.keys(wsSteps)) {
+          mergedSteps[k] = { ...localSteps[k], ...wsSteps[k] };
+        }
+        const localLog = Array.isArray(local.log) ? local.log : [];
+        const wsLog = Array.isArray(ws.log) ? ws.log : [];
         const mergedLog = wsLog.length > 0 ? wsLog : localLog;
         return {
-          ...switchoverOpLocal,
+          ...local,
           ...ws,
-          primary_pod: ws.primary_pod || switchoverOpLocal?.primary_pod,
-          target_pod: ws.target_pod || switchoverOpLocal?.target_pod,
+          primary_pod: ws.primary_pod || local.primary_pod,
+          target_pod: ws.target_pod || local.target_pod,
+          started: local.started || ws.started,
+          steps: mergedSteps,
           log: mergedLog,
         };
       })()

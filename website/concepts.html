@@ -49,6 +49,10 @@
       <a href="#deployment-rules" class="docs-link">Deployment Rules</a>
       <a href="#backup-profiles" class="docs-link">Backup Profiles</a>
       <a href="#failover-sidecar" class="docs-link">Failover Sidecar</a>
+      <a href="#sidecar-streaming" class="docs-link">Sidecar Streaming</a>
+      <a href="#log-watcher" class="docs-link">Log Watcher</a>
+      <a href="#recovery-rules" class="docs-link">Recovery Rules</a>
+      <a href="#storage-tiers" class="docs-link">Storage Tiers</a>
       <a href="#grpc-streaming" class="docs-link">gRPC Streaming</a>
 
       <h4>PostgreSQL Internals</h4>
@@ -80,7 +84,7 @@
       <p>The central server is the brain of PG-Swarm. It runs as a single binary (<code>cmd/central</code>) and exposes three interfaces:</p>
       <ul>
         <li><strong>gRPC server (:9090)</strong> — accepts persistent bidirectional streams from satellites. Pushes cluster configurations, receives health reports, backup statuses, and event notifications.</li>
-        <li><strong>REST API (:8080)</strong> — 30+ endpoints for managing satellites, cluster profiles, deployment rules, backup profiles, and restore operations. Used by the dashboard and any external tooling.</li>
+        <li><strong>REST API (:8080)</strong> — 60+ endpoints for managing satellites, cluster profiles, deployment rules, backup profiles, recovery rule sets, storage tiers, image variants, and restore operations. WebSocket endpoint for real-time state push. Used by the dashboard and any external tooling.</li>
         <li><strong>Embedded dashboard</strong> — React SPA served from the same binary. No separate web server needed.</li>
       </ul>
       <p>Central stores all metadata in a PostgreSQL database with auto-migrations. When it starts, it runs any pending migration files in order, so schema updates are automatic.</p>
@@ -111,7 +115,7 @@
         <li>Create or update StatefulSet</li>
         <li>Reconcile PVC finalizers (for deletion protection)</li>
         <li>Label pods with roles (best-effort)</li>
-        <li>Reconcile backup CronJobs and credential Secrets</li>
+        <li>Add backup sidecar container to StatefulSet when backup profiles are attached</li>
       </ol>
       <p>Each config has a <code>config_version</code> number. The operator tracks the last applied version per cluster and skips duplicate pushes — this makes reconciliation idempotent.</p>
     </article>
@@ -138,7 +142,7 @@ Namespace: "databases"</code></pre>
       <h3>Backup Profiles</h3>
       <p>A backup profile defines <strong>what</strong> to back up, <strong>where</strong> to store it, <strong>when</strong> to run, and <strong>how long</strong> to retain. Each profile is either physical or logical — not both.</p>
       <p>A cluster profile can have at most <strong>one physical backup profile</strong> (base backup + optional WAL archiving + optional incrementals) and <strong>one logical backup profile</strong> (pg_dump) attached. This ensures there's no conflict over PostgreSQL's single <code>archive_command</code>.</p>
-      <p>When a backup profile is attached or detached, all clusters using that cluster profile are automatically re-pushed to their satellites, creating or removing CronJobs as needed — with zero impact on running PostgreSQL pods.</p>
+      <p>When a backup profile is attached or detached, all clusters using that cluster profile are automatically re-pushed to their satellites, adding or removing the backup sidecar container in the StatefulSet as needed.</p>
     </article>
 
     <article class="concept" id="failover-sidecar">
@@ -149,8 +153,59 @@ Namespace: "databases"</code></pre>
         <li><strong>Promotion</strong>: the first replica to acquire the expired lease calls <code>pg_promote()</code> and relabels its pod as <code>pg-swarm.io/role=primary</code>.</li>
         <li><strong>SQL fencing</strong>: if a split-brain is detected (two pods think they're primary), the sidecar immediately blocks writes on the old primary by revoking connection permissions and terminating active sessions.</li>
         <li><strong>Demotion</strong>: the old primary is stopped, its timeline is recovered via pg_rewind, and it restarts as a standby — all without a Kubernetes container restart.</li>
+        <li><strong>Log watcher</strong>: real-time PostgreSQL log monitoring via K8s log API. 40+ recovery patterns across 9 categories (data corruption, OOM, WAL issues, replication failures, etc.) with configurable actions (restart, rewind, rebasebackup, event).</li>
+        <li><strong>Sidecar streaming</strong>: bidirectional gRPC connection to the satellite agent. Receives commands (fence, checkpoint, promote, unfence, status) during switchover and returns typed results. Persistent connection with exponential backoff.</li>
       </ul>
       <p>The entire failover process — detection, promotion, service rerouting — takes under 5 seconds after the lease expires.</p>
+    </article>
+
+    <article class="concept" id="sidecar-streaming">
+      <h3>Sidecar Streaming</h3>
+      <p>Each failover sidecar maintains a <strong>bidirectional gRPC stream</strong> to the satellite agent running on the same edge cluster. This enables the satellite to dispatch commands directly to specific pods during switchover and other operations.</p>
+      <p><strong>How it works:</strong></p>
+      <ol>
+        <li>On startup, the sidecar connects to the satellite's <code>SidecarStreamService</code> and sends a <code>SidecarIdentity</code> message with its pod name, cluster name, and namespace.</li>
+        <li>The satellite's stream manager registers the connection, keyed by pod name.</li>
+        <li>The sidecar sends heartbeats every 10 seconds to keep the connection alive.</li>
+        <li>During switchover, the satellite looks up the target sidecar by pod name and sends commands (<code>fence</code>, <code>checkpoint</code>, <code>promote</code>, <code>unfence</code>, <code>status</code>).</li>
+        <li>The sidecar executes the command locally and returns a typed <code>CommandResult</code> with success/error and output.</li>
+      </ol>
+      <p>If the connection drops, the sidecar reconnects with exponential backoff (1s to 30s). This replaces the previous approach of K8s exec for switchover commands, providing lower latency and a typed command/result protocol.</p>
+    </article>
+
+    <article class="concept" id="log-watcher">
+      <h3>Log Watcher</h3>
+      <p>The log watcher (<code>internal/failover/logwatcher.go</code>) monitors PostgreSQL's log output in real-time via the Kubernetes log API. It matches log lines against <strong>40+ recovery patterns</strong> across 9 categories and triggers automated recovery actions.</p>
+      <p><strong>Pattern categories:</strong></p>
+      <ul>
+        <li><strong>Data corruption</strong> — checksum failures, invalid page headers &rarr; re-basebackup</li>
+        <li><strong>OOM</strong> — out of memory, kill process &rarr; restart</li>
+        <li><strong>WAL issues</strong> — WAL segment not found, timeline mismatch &rarr; rewind</li>
+        <li><strong>Replication failures</strong> — replication terminated, primary connection lost &rarr; event</li>
+        <li><strong>Configuration, connection, storage, tablespace, extension</strong> errors &rarr; event</li>
+      </ul>
+      <p><strong>Action types:</strong> <code>restart</code> (stop/start PG), <code>rewind</code> (pg_rewind), <code>rebasebackup</code> (full re-sync), <code>event</code> (report to central), <code>exec</code> (custom command).</p>
+      <p><strong>Safety:</strong> Cooldown periods prevent action storms, pattern deduplication prevents the same log line from triggering twice, and an action mutex ensures only one recovery action runs at a time.</p>
+    </article>
+
+    <article class="concept" id="recovery-rules">
+      <h3>Recovery Rules</h3>
+      <p>Recovery rules are centrally managed sets of log patterns and their associated actions. Instead of hardcoding patterns in the sidecar, administrators can create, edit, and attach <strong>recovery rule sets</strong> to clusters via the dashboard.</p>
+      <p>Each rule set contains rules with:</p>
+      <ul>
+        <li><strong>Pattern</strong> — a regex to match against PostgreSQL log lines</li>
+        <li><strong>Action</strong> — what to do when the pattern matches (restart, rewind, rebasebackup, event, exec)</li>
+        <li><strong>Cooldown</strong> — minimum time between action triggers for this pattern</li>
+      </ul>
+      <p>The dashboard's Recovery Rules editor (in the Admin page) provides inline rule editing and a <strong>pattern sandbox</strong> for testing regex patterns against sample log lines before deploying them to clusters.</p>
+      <p>Rule sets are managed via REST API (<code>/api/v1/recovery-rule-sets</code>) and attached to clusters via the <code>recovery_rule_set</code> field in <code>ClusterConfig</code>.</p>
+    </article>
+
+    <article class="concept" id="storage-tiers">
+      <h3>Storage Tiers</h3>
+      <p>Storage tiers provide an abstraction layer between cluster profiles and Kubernetes StorageClasses. Instead of hardcoding a StorageClass name in a profile (which varies across edge clusters), you reference a <strong>storage tier</strong> like "fast-ssd" or "standard".</p>
+      <p>Each satellite has <strong>tier mappings</strong> that map abstract tier names to actual StorageClasses available on that cluster. When the satellite receives a ClusterConfig referencing a storage tier, the operator resolves it to the mapped StorageClass.</p>
+      <p>This enables a single profile to work across hundreds of edge clusters, each with different storage providers and class names.</p>
     </article>
 
     <article class="concept" id="grpc-streaming">
@@ -313,14 +368,13 @@ recovery_target_action = 'promote'</code></pre>
     <article class="concept" id="base-backup">
       <h3>Base Backup (Full Physical)</h3>
       <p>A base backup is a complete binary copy of the PostgreSQL data directory, taken using <code>pg_basebackup</code>. It captures everything: tables, indexes, configuration, transaction logs.</p>
-      <p><strong>PG-Swarm runs this as a Kubernetes CronJob</strong> on the schedule defined in the backup profile (e.g., daily at 4 AM). The CronJob:</p>
+      <p><strong>PG-Swarm runs this via the backup sidecar</strong> on the schedule defined in the backup profile (e.g., daily at 4 AM). The sidecar (running on the replica pod):</p>
       <ol>
-        <li>Downloads the SQLite metadata DB from the destination (or creates a new one).</li>
-        <li>Records the backup start in the <code>backups</code> table.</li>
-        <li>Runs <code>pg_basebackup -Ft -z -Xs -P</code> — tar format, gzip compressed, streaming WAL, with progress.</li>
-        <li>Uploads the compressed backup to the destination.</li>
+        <li>Records the backup start in the SQLite metadata DB (<code>backups.db</code>).</li>
+        <li>Runs <code>pg_basebackup -Ft -z -Xs -P</code> against localhost — tar format, gzip compressed, streaming WAL, with progress.</li>
+        <li>Uploads the compressed backup to the configured destination (S3, GCS, SFTP, or local PVC).</li>
         <li>Stores the <code>backup_manifest</code> (PG 13+) in the metadata DB for future incremental references.</li>
-        <li>Records completion (size, status) and uploads the metadata DB back.</li>
+        <li>Records completion (size, status) and notifies the primary sidecar for metadata sync.</li>
       </ol>
       <p>A full base backup on its own lets you restore to <strong>the exact point the backup was taken</strong>. To restore to any arbitrary point in time, you also need WAL archives.</p>
     </article>
@@ -340,7 +394,7 @@ Day 1, 6:00 AM  &rarr;  Incremental (only blocks changed since 5 AM)
 Day 2, 4:00 AM  &rarr;  New full base backup (resets the chain)
 Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
       <p>To restore from an incremental, you use <code>pg_combinebackup</code> to merge the full base with all incrementals in the chain.</p>
-      <p><strong>First-run behavior:</strong> If no previous manifest exists in the metadata DB (first run), the incremental CronJob automatically takes a full base backup instead.</p>
+      <p><strong>First-run behavior:</strong> If no previous manifest exists in the metadata DB (first run), the backup sidecar automatically takes a full base backup instead.</p>
     </article>
 
     <article class="concept" id="logical-backup">
@@ -384,7 +438,7 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
           <tr><td><code>wal_segments</code></td><td>Archived WAL segment inventory</td></tr>
         </tbody>
       </table>
-      <p><strong>Workflow:</strong> Each CronJob downloads <code>backups.db</code>, updates it, uploads it back. The metadata is co-located with the data — no external database dependency.</p>
+      <p><strong>Workflow:</strong> The backup sidecar maintains <code>backups.db</code> locally at each destination, updating it after each backup operation. The metadata is co-located with the data — no external database dependency.</p>
       <p>The <code>parent_id</code> column tracks the incremental chain: <code>full-1 &larr; incr-2 &larr; incr-3</code>. For restore, walk the chain back to the base.</p>
     </article>
 

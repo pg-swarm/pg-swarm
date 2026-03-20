@@ -445,6 +445,7 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [pgSearch, setPgSearch] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState({});
 
@@ -546,9 +547,13 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
     setShowConfirm(true);
   }
 
-  function confirmSave() {
-    setShowConfirm(false);
-    onSave(pendingAttach);
+  async function confirmSave() {
+    setSaving(true);
+    try {
+      await onSave(pendingAttach);
+    } finally {
+      setSaving(false);
+    }
   }
 
   // Count non-default pg_params for badge
@@ -934,6 +939,7 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
           changedParams={changedParams}
           onConfirm={confirmSave}
           onCancel={() => setShowConfirm(false)}
+          saving={saving}
         />
       )}
     </div>
@@ -968,7 +974,7 @@ function ProfileView({ state, onClose }) {
 
 // ── Confirmation Report ─────────────────────────────────────────────────────
 
-function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOnly }) {
+function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOnly, saving }) {
   const content = (
     <>
       <div className="confirm-header">
@@ -1051,8 +1057,8 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOn
 
         {!readOnly && (
           <div className="confirm-footer">
-            <button className="btn btn-approve" onClick={onConfirm}>Confirm & Save</button>
-            <button className="btn btn-reject" onClick={onCancel}>Back to Editing</button>
+            <button className="btn btn-approve" onClick={onConfirm} disabled={saving}>{saving ? 'Saving...' : 'Confirm & Save'}</button>
+            <button className="btn btn-reject" onClick={onCancel} disabled={saving}>Back to Editing</button>
           </div>
         )}
     </>
