@@ -271,6 +271,34 @@ func (o *Operator) ResolveNamespaceForCluster(clusterName, namespace string) str
 	return o.defaultNamespace
 }
 
+// ValidateSidecarToken checks if the given token matches the sidecar-stream-token
+// in any managed cluster's secret. This is used by the sidecar gRPC server to
+// authenticate incoming sidecar connections.
+func (o *Operator) ValidateSidecarToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	o.mu.RLock()
+	configs := make([]*pgswarmv1.ClusterConfig, 0, len(o.desired))
+	for _, cfg := range o.desired {
+		configs = append(configs, cfg)
+	}
+	o.mu.RUnlock()
+
+	for _, cfg := range configs {
+		secretName := resourceName(cfg.ClusterName, "secret")
+		secret, err := o.client.CoreV1().Secrets(cfg.Namespace).Get(
+			context.Background(), secretName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		if string(secret.Data["sidecar-stream-token"]) == token {
+			return true
+		}
+	}
+	return false
+}
+
 // buildConfigStore creates a ConfigMap that stores the received ClusterConfig
 // as JSON for inspection. Named: pg-swarm-<k8sClusterName>-<pgClusterName>.
 func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
