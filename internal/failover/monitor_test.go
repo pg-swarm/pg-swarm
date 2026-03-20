@@ -922,3 +922,41 @@ func TestHandlePrimary_LeaseError_FencesButDoesNotDemote(t *testing.T) {
 		t.Fatal("demoteFunc should NOT be called on lease errors — can't determine new primary")
 	}
 }
+
+func TestDoFence_RetriesOnFailure(t *testing.T) {
+	var callCount atomic.Int32
+	mon := &Monitor{
+		fenceFunc: func(_ context.Context, _ pgfence.PGExecer) error {
+			n := callCount.Add(1)
+			if n < 3 {
+				return fmt.Errorf("fence attempt %d failed", n)
+			}
+			return nil // succeed on third attempt
+		},
+	}
+
+	mon.doFence(context.Background(), nil)
+
+	if got := callCount.Load(); got != 3 {
+		t.Fatalf("expected fence to be called 3 times, got %d", got)
+	}
+}
+
+func TestDoFence_AllRetriesFail(t *testing.T) {
+	var callCount atomic.Int32
+	mon := &Monitor{
+		fenceFunc: func(_ context.Context, _ pgfence.PGExecer) error {
+			callCount.Add(1)
+			return fmt.Errorf("permanent failure")
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mon.doFence(ctx, nil)
+
+	if got := callCount.Load(); got != 3 {
+		t.Fatalf("expected fence to be called 3 times, got %d", got)
+	}
+}

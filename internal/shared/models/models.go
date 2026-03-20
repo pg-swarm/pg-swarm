@@ -201,13 +201,14 @@ func (c *ClusterConfig) ParseSpec() (*ClusterSpec, error) {
 }
 
 type ClusterProfile struct {
-	ID          uuid.UUID       `json:"id" db:"id"`
-	Name        string          `json:"name" db:"name"`
-	Description string          `json:"description" db:"description"`
-	Config      json.RawMessage `json:"config" db:"config"`
-	Locked      bool            `json:"locked" db:"locked"`
-	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+	ID                 uuid.UUID       `json:"id" db:"id"`
+	Name               string          `json:"name" db:"name"`
+	Description        string          `json:"description" db:"description"`
+	Config             json.RawMessage `json:"config" db:"config"`
+	Locked             bool            `json:"locked" db:"locked"`
+	RecoveryRuleSetID  *uuid.UUID      `json:"recovery_rule_set_id" db:"recovery_rule_set_id"`
+	CreatedAt          time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // ParseSpec deserializes the Config JSON into a ClusterSpec.
@@ -477,4 +478,18 @@ type RestoreOperation struct {
 	StartedAt      *time.Time `json:"started_at,omitempty" db:"started_at"`
 	CompletedAt    *time.Time `json:"completed_at,omitempty" db:"completed_at"`
 	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
+}
+
+// ---------- Recovery Rule Sets ----------
+
+// RecoveryRuleSet is a named collection of log-based recovery rules.
+// Rules are stored as a JSON array in the Config column.
+type RecoveryRuleSet struct {
+	ID          uuid.UUID       `json:"id" db:"id"`
+	Name        string          `json:"name" db:"name"`
+	Description string          `json:"description" db:"description"`
+	Builtin     bool            `json:"builtin" db:"builtin"`
+	Config      json.RawMessage `json:"config" db:"config"` // JSON array of RecoveryRule
+	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
 }

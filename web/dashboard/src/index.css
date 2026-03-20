@@ -159,6 +159,8 @@ tbody tr:hover { background: var(--green-light); }
 .badge-red .dot    { background: var(--red); }
 .badge-gray   { background: var(--gray-bg); color: var(--gray); }
 .badge-gray .dot   { background: var(--gray); }
+.badge-blue   { background: #eff6ff; color: #2563eb; }
+.badge-blue .dot   { background: #2563eb; }
 
 /* ── Severity Pills ────────────────────────────────── */
 .sev-pill {
@@ -624,6 +626,116 @@ tbody tr:hover { background: var(--green-light); }
   background: var(--amber-bg); color: var(--amber);
   font-size: 12px; line-height: 1.5;
 }
+
+/* Switchover progress modal — pre-start */
+.so-prestart { margin-bottom: 8px; }
+.so-prestart-flow {
+  display: flex; align-items: center; justify-content: center;
+  gap: 20px; padding: 16px 0;
+}
+.so-prestart-node {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 4px; text-align: center;
+}
+.so-prestart-role {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .5px; color: var(--text-secondary);
+}
+.so-prestart-pod {
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+.so-prestart-action {
+  font-size: 11px; color: var(--text-secondary); font-style: italic;
+}
+.so-prestart-arrow { color: var(--text-secondary); flex-shrink: 0; }
+.so-prestart-warning {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 14px; border-radius: 8px;
+  background: var(--amber-bg); color: var(--amber);
+  font-size: 12px; line-height: 1.5; margin-top: 8px;
+}
+
+/* Switchover progress modal — progress view */
+.so-progress-track {
+  margin-top: 16px; padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.so-progress-bar {
+  width: 100%; height: 6px;
+  background: var(--gray-bg); border-radius: 3px;
+  overflow: hidden; margin-bottom: 8px;
+}
+.so-progress-fill {
+  height: 100%; background: var(--green);
+  border-radius: 3px; transition: width .3s ease;
+}
+.so-progress-fill-error { background: var(--red); }
+.so-progress-label {
+  font-size: 12px; color: var(--text-secondary);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.so-ponr-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 500;
+  padding: 2px 8px; border-radius: 10px;
+}
+.so-ponr-safe   { background: var(--green-bg); color: var(--green); }
+.so-ponr-passed { background: var(--amber-bg); color: var(--amber); }
+.so-log-scroll {
+  margin-top: 14px; height: 224px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--gray-bg); padding: 4px 0;
+}
+.so-log-entry {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 12px; font-size: 12px;
+  height: 24px; box-sizing: border-box;
+}
+.so-log-entry:hover { background: rgba(0,0,0,.03); }
+.so-log-label { font-weight: 500; white-space: nowrap; min-width: 120px; }
+.so-log-pending .so-log-label { color: var(--text-secondary); }
+.so-log-starting .so-log-label { color: var(--blue); }
+.so-log-completed .so-log-label { color: var(--green); }
+.so-log-failed .so-log-label { color: var(--red); }
+.so-log-rolling_back .so-log-label { color: var(--amber); }
+.so-log-pod {
+  font-size: 11px; color: var(--text-secondary);
+  background: var(--white); border: 1px solid var(--border);
+  padding: 0 5px; border-radius: 3px; flex-shrink: 0;
+}
+.so-log-status-text {
+  font-size: 11px; color: var(--blue); font-style: italic;
+}
+.so-log-detail {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--text-secondary); font-size: 11px;
+  flex-shrink: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.so-log-ponr {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; font-weight: 600; color: var(--amber);
+  background: var(--amber-bg); padding: 0 6px; border-radius: 8px;
+  flex-shrink: 0;
+}
+.so-log-times {
+  margin-left: auto; flex-shrink: 0;
+  font-size: 10.5px; color: var(--text-secondary);
+  white-space: nowrap;
+}
+.so-result-banner {
+  margin-top: 14px; padding: 10px 14px; border-radius: 8px;
+  font-size: 13px; font-weight: 500;
+  display: flex; align-items: center; gap: 8px;
+}
+.so-result-success { background: var(--green-bg); color: var(--green); }
+.so-result-failure { background: var(--red-bg); color: var(--red); }
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.so-spin { animation: spin 1s linear infinite; }
+
 .btn-danger {
   background: var(--red); color: var(--white); border-color: var(--red);
 }
@@ -1013,6 +1125,11 @@ tbody tr:hover { background: var(--green-light); }
   gap: 3px;
 }
 .cd-promote-btn:hover { background: var(--gray-bg); }
+.cd-progress-btn {
+  color: var(--blue); border-color: var(--blue);
+  background: var(--blue-bg);
+}
+.cd-progress-btn:hover { background: var(--blue-bg); opacity: .85; }
 
 /* Backup type badges */
 .cd-type-badge {

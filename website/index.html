@@ -62,7 +62,7 @@
         <span class="stat-label">Failover Time</span>
       </div>
       <div class="stat">
-        <span class="stat-num">3</span>
+        <span class="stat-num">4</span>
         <span class="stat-label">Go Binaries</span>
       </div>
       <div class="stat">
@@ -180,7 +180,7 @@
       <div class="feature-card">
         <div class="feature-icon">&#128736;</div>
         <h3>Planned Switchover</h3>
-        <p>One-click primary promotion from the dashboard. CHECKPOINT, fence, lease transfer, promote - with step-by-step confirmation.</p>
+        <p>Satellite-controlled 9-step orchestration with real-time progress tracking via WebSocket. Fence with drain, checkpoint, promote, with point-of-no-return indicator.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#128230;</div>
@@ -215,7 +215,7 @@
 <section class="section section-dark" id="architecture">
   <div class="container">
     <h2 class="section-title center">Architecture</h2>
-    <p class="section-sub center">Three Go binaries. Bidirectional gRPC streaming. No external dependencies beyond PostgreSQL.</p>
+    <p class="section-sub center">Bidirectional gRPC streaming across every layer. Continuous log monitoring with pattern-driven recovery rules. Real-time WebSocket state push. Sidecar command dispatch for zero-latency switchover.</p>
     <div class="arch-diagram">
       <img src="images/architecture.svg" alt="PG-Swarm architecture diagram" class="arch-svg">
     </div>
@@ -223,7 +223,7 @@
       <div class="arch-card">
         <h3>Central</h3>
         <code>cmd/central</code>
-        <p>gRPC server for satellite streams. REST API with 30+ endpoints. Embedded React dashboard. PostgreSQL metadata store with auto-migrations.</p>
+        <p>gRPC server for satellite streams. REST API with 60+ endpoints. WebSocket hub for real-time updates. Embedded React dashboard. PostgreSQL metadata store with auto-migrations.</p>
       </div>
       <div class="arch-card">
         <h3>Satellite</h3>
@@ -233,7 +233,7 @@
       <div class="arch-card">
         <h3>Failover Sidecar</h3>
         <code>cmd/failover-sidecar</code>
-        <p>Per-pod sidecar for leader election via K8s Leases. Detects split-brain, fences writes, demotes old primary, recovers timeline divergence.</p>
+        <p>Per-pod sidecar for leader election via K8s Leases. Detects split-brain, fences writes, demotes old primary, recovers timeline divergence. Log watcher with 40+ recovery patterns. Bidirectional gRPC streaming to satellite for command dispatch.</p>
       </div>
     </div>
   </div>
@@ -374,8 +374,8 @@
         <p>Map profiles to satellites via label selectors. When a rule matches, clusters are auto-created and pushed. Fleet-scale management.</p>
       </div>
       <div class="dash-feature">
-        <h4>One-Click Switchover</h4>
-        <p>Promote any replica to primary with a detailed confirmation modal showing each step and a downtime warning.</p>
+        <h4>Switchover Progress</h4>
+        <p>9-step switchover progress modal with real-time WebSocket updates, point-of-no-return indicator, and rollback status for pre-PONR failures.</p>
       </div>
       <div class="dash-feature">
         <h4>Backup Profiles</h4>
@@ -388,6 +388,18 @@
       <div class="dash-feature">
         <h4>Event Log</h4>
         <p>State transitions, failovers, switchovers, backup completions, and errors with severity icons. Per-cluster event filtering.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Satellite Logs</h4>
+        <p>Terminal-style log viewer with SSE streaming, server-side and client-side level filtering, remote log level control, auto-scroll, and clear.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Recovery Rules</h4>
+        <p>Centrally managed recovery rule sets with inline rule editing, pattern sandbox for testing regex against sample log lines, and per-cluster attachment.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Admin Console</h4>
+        <p>4-tab admin page: Storage Tiers with satellite mappings, Image Variants for postgres base images, PG Version registry, and Recovery Rules editor.</p>
       </div>
     </div>
   </div>

@@ -21,7 +21,7 @@ type Connector struct {
 	OnConfig              func(*pgswarmv1.ClusterConfig) error
 	OnDelete              func(*pgswarmv1.DeleteCluster) error
 	OnStorageClassRequest func() *pgswarmv1.StorageClassReport
-	OnSwitchover          func(*pgswarmv1.SwitchoverRequest) *pgswarmv1.SwitchoverResult
+	OnSwitchover          func(*pgswarmv1.SwitchoverRequest, func(int32, string, string, string, string, bool)) *pgswarmv1.SwitchoverResult
 	OnSetLogLevel         func(string)
 	OnRestoreCommand      func(*pgswarmv1.RestoreCommand)
 }
@@ -209,7 +209,27 @@ func (c *Connector) handleSwitchover(req *pgswarmv1.SwitchoverRequest) {
 	if c.OnSwitchover == nil {
 		return
 	}
-	result := c.OnSwitchover(req)
+
+	// Build progress callback that streams SwitchoverProgress messages to central
+	progressFn := func(step int32, stepName, status, targetPod, errorMsg string, ponr bool) {
+		c.SendMessage(&pgswarmv1.SatelliteMessage{
+			Payload: &pgswarmv1.SatelliteMessage_SwitchoverProgress{
+				SwitchoverProgress: &pgswarmv1.SwitchoverProgress{
+					OperationId:     req.OperationId,
+					ClusterName:     req.ClusterName,
+					Step:            step,
+					StepName:        stepName,
+					Status:          status,
+					TargetPod:       targetPod,
+					ErrorMessage:    errorMsg,
+					PointOfNoReturn: ponr,
+					Timestamp:       timestamppb.Now(),
+				},
+			},
+		})
+	}
+
+	result := c.OnSwitchover(req, progressFn)
 	if result == nil {
 		return
 	}

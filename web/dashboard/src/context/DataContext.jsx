@@ -6,7 +6,7 @@ const DataContext = createContext(null);
 const EMPTY = {
   satellites: [], clusters: [], health: [], events: [], profiles: [],
   deploymentRules: [], postgresVersions: [], postgresVariants: [],
-  backupProfiles: [], storageTiers: [],
+  backupProfiles: [], storageTiers: [], recoveryRuleSets: [],
 };
 
 function wsUrl() {
@@ -18,6 +18,7 @@ export function DataProvider({ children }) {
   const [data, setData] = useState(EMPTY);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const [activeOperations, setActiveOperations] = useState({});
   const wsRef = useRef(null);
   const pollRef = useRef(null);
 
@@ -25,8 +26,8 @@ export function DataProvider({ children }) {
   const refresh = useCallback(async () => {
     try {
       const safe = (p) => p.catch(() => null);
-      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupProfiles, storageTiers] = await Promise.all([
-        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.backupProfiles()), safe(api.storageTiers()),
+      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupProfiles, storageTiers, recoveryRuleSets] = await Promise.all([
+        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.backupProfiles()), safe(api.storageTiers()), safe(api.recoveryRuleSets()),
       ]);
       setData({
         satellites:        satellites || [],
@@ -39,6 +40,7 @@ export function DataProvider({ children }) {
         postgresVariants:  postgresVariants || [],
         backupProfiles:    backupProfiles || [],
         storageTiers:      storageTiers || [],
+        recoveryRuleSets:  recoveryRuleSets || [],
       });
       setLastRefresh(new Date());
     } catch (err) {
@@ -74,7 +76,11 @@ export function DataProvider({ children }) {
       postgresVariants:  state.postgresVariants || [],
       backupProfiles:    state.backupProfiles || [],
       storageTiers:      state.storageTiers || [],
+      recoveryRuleSets:  state.recoveryRuleSets || [],
     });
+    if (state.activeOperations) {
+      setActiveOperations(state.activeOperations);
+    }
     setLastRefresh(new Date());
   }, []);
 
@@ -100,6 +106,43 @@ export function DataProvider({ children }) {
             const msg = JSON.parse(e.data);
             if (msg.type === 'full_state' && msg.data) {
               applyWsState(msg.data);
+            } else if (msg.type === 'switchover_progress' && msg.data) {
+              const p = msg.data;
+              const logEntry = {
+                step: p.step, step_name: p.step_name, status: p.status,
+                target_pod: p.target_pod, detail: p.error_message,
+                ponr: p.point_of_no_return, timestamp: p.timestamp || new Date().toISOString(),
+              };
+              setActiveOperations(prev => {
+                const existing = prev[p.operation_id] || { operation_id: p.operation_id, cluster_name: p.cluster_name, steps: {}, log: [] };
+                return {
+                  ...prev,
+                  [p.operation_id]: {
+                    ...existing,
+                    steps: {
+                      ...existing.steps,
+                      [p.step]: {
+                        step: p.step, step_name: p.step_name, status: p.status,
+                        target_pod: p.target_pod, error_message: p.error_message,
+                        ponr: p.point_of_no_return,
+                      },
+                    },
+                    log: [...(existing.log || []), logEntry],
+                  },
+                };
+              });
+            } else if (msg.type === 'switchover_complete' && msg.data) {
+              const d = msg.data;
+              setActiveOperations(prev => ({
+                ...prev,
+                [d.operation_id]: {
+                  ...(prev[d.operation_id] || { operation_id: d.operation_id, steps: {}, log: [] }),
+                  cluster_name: d.cluster_name,
+                  done: true,
+                  success: d.success,
+                  error: d.error,
+                },
+              }));
             }
           } catch {}
         };
@@ -138,7 +181,7 @@ export function DataProvider({ children }) {
   }, [applyWsState, startPolling, stopPolling]);
 
   return (
-    <DataContext.Provider value={{ ...data, lastRefresh, refresh, wsConnected }}>
+    <DataContext.Provider value={{ ...data, lastRefresh, refresh, wsConnected, activeOperations }}>
       {children}
     </DataContext.Provider>
   );

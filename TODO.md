@@ -87,10 +87,10 @@ If building, start with Option A (TCP proxy) — it's simpler, has no external d
 
 ### Backup and recovery
 
-- Automated base backups to object storage (S3/GCS/MinIO) or PVC
-- Continuous WAL archiving to S3-compatible backends (wal-g or pgBackRest integration)
+- ~~Automated base backups to object storage (S3/GCS/MinIO) or PVC~~ Done
+- ~~Continuous WAL archiving to S3-compatible backends~~ Done
+- ~~Backup catalog with configurable retention policies~~ Done
 - Point-in-time recovery (PITR) to a specific timestamp
-- Backup catalog with configurable retention policies (daily, weekly, monthly)
 - Cross-cluster restore (restore backup from one satellite onto another)
 - Backup verification (periodic restore-to-temp + pg_checksums)
 
