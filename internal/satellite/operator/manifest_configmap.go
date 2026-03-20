@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -42,6 +43,56 @@ var mandatoryHbaRules = []string{
 	"host replication postgres 0.0.0.0/0 md5",
 }
 
+// recoveryRulesConfigMapName returns the ConfigMap name for recovery rules.
+func recoveryRulesConfigMapName(clusterName string) string {
+	return resourceName(clusterName, "recovery-rules")
+}
+
+// buildRecoveryRulesConfigMap creates the ConfigMap containing recovery rules JSON
+// for the failover sidecar to watch and apply.
+func buildRecoveryRulesConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
+	rulesJSON := "[]"
+	if len(cfg.RecoveryRules) > 0 {
+		type rule struct {
+			Name            string `json:"name"`
+			Pattern         string `json:"pattern"`
+			Severity        string `json:"severity"`
+			Action          string `json:"action"`
+			ExecCommand     string `json:"exec_command,omitempty"`
+			CooldownSeconds int32  `json:"cooldown_seconds"`
+			Enabled         bool   `json:"enabled"`
+			Category        string `json:"category"`
+		}
+		var rules []rule
+		for _, r := range cfg.RecoveryRules {
+			rules = append(rules, rule{
+				Name:            r.Name,
+				Pattern:         r.Pattern,
+				Severity:        r.Severity,
+				Action:          r.Action,
+				ExecCommand:     r.ExecCommand,
+				CooldownSeconds: r.CooldownSeconds,
+				Enabled:         r.Enabled,
+				Category:        r.Category,
+			})
+		}
+		if data, err := json.Marshal(rules); err == nil {
+			rulesJSON = string(data)
+		}
+	}
+	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      recoveryRulesConfigMapName(cfg.ClusterName),
+			Namespace: cfg.Namespace,
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+		},
+		Data: map[string]string{
+			"rules.json": rulesJSON,
+		},
+	}
+}
+
 // buildConfigMap creates the ConfigMap containing postgresql.conf and pg_hba.conf.
 func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
@@ -74,18 +125,18 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		}
 		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
 		merged["archive_command"] = fmt.Sprintf("'%s'", archive.ArchiveCommand)
-	} else if len(backups) > 0 {
-		// Backup profiles configured — sidecar handles WAL archiving via shared emptyDir volumes
-		merged["archive_mode"] = "on"
-		timeout := int32(60)
-		for _, b := range backups {
-			if b.Physical != nil && b.Physical.ArchiveTimeoutSeconds > 0 {
-				timeout = b.Physical.ArchiveTimeoutSeconds
-				break
-			}
-		}
-		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
-		merged["archive_command"] = "'cp %p /wal-staging/.tmp.%f && mv /wal-staging/.tmp.%f /wal-staging/%f'"
+	// TODO: Re-enable when backup sidecar is restored.
+	// } else if len(backups) > 0 {
+	// 	merged["archive_mode"] = "on"
+	// 	timeout := int32(60)
+	// 	for _, b := range backups {
+	// 		if b.Physical != nil && b.Physical.ArchiveTimeoutSeconds > 0 {
+	// 			timeout = b.Physical.ArchiveTimeoutSeconds
+	// 			break
+	// 		}
+	// 	}
+	// 	merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
+	// 	merged["archive_command"] = "'cp %p /wal-staging/.tmp.%f && mv /wal-staging/.tmp.%f /wal-staging/%f'"
 	} else {
 		merged["archive_mode"] = "off"
 	}

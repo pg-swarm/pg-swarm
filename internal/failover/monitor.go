@@ -61,6 +61,7 @@ type Config struct {
 	PrimaryHost         string        // RW service DNS for reachability check
 	PGPassword          string        // superuser password for reachability check
 	LeaseDuration       time.Duration // configurable, default 5s
+	RecoveryRulesPath   string        // path to mounted recovery rules JSON file
 }
 
 // Monitor watches the local PostgreSQL instance and manages leader election.
@@ -119,6 +120,12 @@ func (m *Monitor) Run(ctx context.Context) error {
 		Str("cluster", m.cfg.ClusterName).
 		Dur("interval", m.cfg.Interval).
 		Msg("failover monitor starting")
+
+	// Start log watcher for recovery rules (non-blocking)
+	if m.cfg.RecoveryRulesPath != "" {
+		lw := NewLogWatcher(m, m.client, m.cfg.RecoveryRulesPath, m.cfg.PodName, m.cfg.Namespace)
+		go lw.Run(ctx)
+	}
 
 	ticker := time.NewTicker(m.cfg.Interval)
 	defer ticker.Stop()

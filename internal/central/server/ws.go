@@ -152,6 +152,9 @@ func (h *WSHub) fetchState() map[string]interface{} {
 	if v, err := s.ListStorageTiers(ctx); err == nil {
 		state["storageTiers"] = v
 	}
+	if v, err := s.ListRecoveryRuleSets(ctx); err == nil {
+		state["recoveryRuleSets"] = v
+	}
 
 	return state
 }

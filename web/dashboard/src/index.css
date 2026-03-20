@@ -159,6 +159,8 @@ tbody tr:hover { background: var(--green-light); }
 .badge-red .dot    { background: var(--red); }
 .badge-gray   { background: var(--gray-bg); color: var(--gray); }
 .badge-gray .dot   { background: var(--gray); }
+.badge-blue   { background: #eff6ff; color: #2563eb; }
+.badge-blue .dot   { background: #2563eb; }
 
 /* ── Severity Pills ────────────────────────────────── */
 .sev-pill {

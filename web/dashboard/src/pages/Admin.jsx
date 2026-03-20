@@ -3,8 +3,9 @@ import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api } from '../api';
 import {
-  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database
+  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database, Shield
 } from 'lucide-react';
+import RecoveryRulesTab from '../components/RecoveryRulesTab';
 
 export default function Admin() {
   const { postgresVersions, postgresVariants, storageTiers, refresh } = useData();
@@ -17,6 +18,7 @@ export default function Admin() {
     { key: 'tiers', label: 'Storage Tiers', icon: <Layers size={14} /> },
     { key: 'variants', label: 'Image Variants', icon: <Box size={14} /> },
     { key: 'versions', label: 'PG Versions', icon: <Database size={14} /> },
+    { key: 'recovery', label: 'Recovery Rules', icon: <Shield size={14} /> },
   ];
 
   return (
@@ -37,6 +39,7 @@ export default function Admin() {
       {activeTab === 'tiers' && <StorageTiersTab storageTiers={storageTiers} refresh={refresh} toast={toast} />}
       {activeTab === 'variants' && <VariantsTab postgresVariants={postgresVariants} refresh={refresh} toast={toast} />}
       {activeTab === 'versions' && <VersionsTab postgresVersions={postgresVersions} postgresVariants={postgresVariants} refresh={refresh} toast={toast} />}
+      {activeTab === 'recovery' && <RecoveryRulesTab toast={toast} />}
       </div>
     </>
   );

@@ -145,6 +145,7 @@ func scanProfile(row pgx.Row) (*models.ClusterProfile, error) {
 		&p.Description,
 		&p.Config,
 		&p.Locked,
+		&p.RecoveryRuleSetID,
 		&p.CreatedAt,
 		&p.UpdatedAt,
 	)
@@ -686,9 +687,9 @@ func (s *PostgresStore) CreateProfile(ctx context.Context, p *models.ClusterProf
 	p.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO cluster_profiles (id, name, description, config, locked, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		p.ID, p.Name, p.Description, p.Config, p.Locked, p.CreatedAt, p.UpdatedAt,
+		`INSERT INTO cluster_profiles (id, name, description, config, locked, recovery_rule_set_id, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		p.ID, p.Name, p.Description, p.Config, p.Locked, p.RecoveryRuleSetID, p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create profile: %w", err)
@@ -699,10 +700,10 @@ func (s *PostgresStore) CreateProfile(ctx context.Context, p *models.ClusterProf
 // GetProfile returns a cluster profile by its ID.
 func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.ClusterProfile, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT p.id, p.name, p.description, p.config, 
-		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR 
-		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked, 
-		        p.created_at, p.updated_at
+		`SELECT p.id, p.name, p.description, p.config,
+		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked,
+		        p.recovery_rule_set_id, p.created_at, p.updated_at
 		 FROM cluster_profiles p WHERE p.id = $1`, id)
 	p, err := scanProfile(row)
 	if err != nil {
@@ -714,10 +715,10 @@ func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.C
 // ListProfiles returns all cluster profiles ordered by creation time.
 func (s *PostgresStore) ListProfiles(ctx context.Context) ([]*models.ClusterProfile, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.id, p.name, p.description, p.config, 
-		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR 
-		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked, 
-		        p.created_at, p.updated_at
+		`SELECT p.id, p.name, p.description, p.config,
+		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked,
+		        p.recovery_rule_set_id, p.created_at, p.updated_at
 		 FROM cluster_profiles p ORDER BY p.created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list profiles: %w", err)
@@ -754,9 +755,9 @@ func (s *PostgresStore) UpdateProfile(ctx context.Context, p *models.ClusterProf
 	}
 
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, updated_at = $4
-		 WHERE id = $5`,
-		p.Name, p.Description, p.Config, p.UpdatedAt, p.ID,
+		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, recovery_rule_set_id = $4, updated_at = $5
+		 WHERE id = $6`,
+		p.Name, p.Description, p.Config, p.RecoveryRuleSetID, p.UpdatedAt, p.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update profile: %w", err)
@@ -1623,6 +1624,95 @@ func (s *PostgresStore) ListRestoreOperations(ctx context.Context, satelliteID u
 		result = append(result, op)
 	}
 	return result, rows.Err()
+}
+
+// ── Recovery Rule Sets ──────────────────────────────────────────────────────
+
+const recoveryRuleSetCols = `id, name, description, builtin, config, created_at, updated_at`
+
+func scanRecoveryRuleSet(row pgx.Row) (*models.RecoveryRuleSet, error) {
+	var rs models.RecoveryRuleSet
+	err := row.Scan(&rs.ID, &rs.Name, &rs.Description, &rs.Builtin, &rs.Config, &rs.CreatedAt, &rs.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if rs.Config == nil {
+		rs.Config = json.RawMessage("[]")
+	}
+	return &rs, nil
+}
+
+func (s *PostgresStore) CreateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error {
+	if rs.ID == uuid.Nil {
+		rs.ID = uuid.New()
+	}
+	if rs.Config == nil {
+		rs.Config = json.RawMessage("[]")
+	}
+	now := time.Now()
+	rs.CreatedAt = now
+	rs.UpdatedAt = now
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO recovery_rule_sets (id, name, description, builtin, config, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		rs.ID, rs.Name, rs.Description, rs.Builtin, rs.Config, rs.CreatedAt, rs.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create recovery rule set: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListRecoveryRuleSets(ctx context.Context) ([]*models.RecoveryRuleSet, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+recoveryRuleSetCols+` FROM recovery_rule_sets ORDER BY builtin DESC, created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list recovery rule sets: %w", err)
+	}
+	defer rows.Close()
+	var result []*models.RecoveryRuleSet
+	for rows.Next() {
+		rs, err := scanRecoveryRuleSet(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan recovery rule set: %w", err)
+		}
+		result = append(result, rs)
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) GetRecoveryRuleSet(ctx context.Context, id uuid.UUID) (*models.RecoveryRuleSet, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+recoveryRuleSetCols+` FROM recovery_rule_sets WHERE id = $1`, id)
+	return scanRecoveryRuleSet(row)
+}
+
+func (s *PostgresStore) UpdateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error {
+	if rs.Config == nil {
+		rs.Config = json.RawMessage("[]")
+	}
+	rs.UpdatedAt = time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE recovery_rule_sets SET name = $1, description = $2, config = $3, updated_at = $4
+		 WHERE id = $5`,
+		rs.Name, rs.Description, rs.Config, rs.UpdatedAt, rs.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update recovery rule set: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("recovery rule set %s not found", rs.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteRecoveryRuleSet(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM recovery_rule_sets WHERE id = $1 AND builtin = false`, id)
+	if err != nil {
+		return fmt.Errorf("delete recovery rule set: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("recovery rule set %s not found or is built-in", id)
+	}
+	return nil
 }
 
 // Compile-time check that PostgresStore implements Store.

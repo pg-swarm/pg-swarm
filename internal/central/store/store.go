@@ -109,4 +109,11 @@ type Store interface {
 	CreateEvent(ctx context.Context, event *models.Event) error
 	ListEvents(ctx context.Context, limit int) ([]*models.Event, error)
 	ListEventsByCluster(ctx context.Context, satelliteID uuid.UUID, clusterName string, limit int) ([]*models.Event, error)
+
+	// Recovery Rule Sets
+	CreateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error
+	ListRecoveryRuleSets(ctx context.Context) ([]*models.RecoveryRuleSet, error)
+	GetRecoveryRuleSet(ctx context.Context, id uuid.UUID) (*models.RecoveryRuleSet, error)
+	UpdateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error
+	DeleteRecoveryRuleSet(ctx context.Context, id uuid.UUID) error
 }
