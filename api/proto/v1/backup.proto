@@ -14,6 +14,8 @@ message BackupConfig {
   BackupRetention retention = 4;
   string backup_image = 5;
   string backup_profile_id = 6;  // UUID of the source backup profile (for unique CronJob naming)
+  string store_id = 7;           // backup store UUID for tracking/audit
+  string base_path = 8;          // "<satellite-name>-<cluster-name>" prefix for destination paths
 }
 
 message PhysicalBackupConfig {
@@ -88,6 +90,9 @@ message BackupStatusReport {
   string wal_start_lsn = 11;
   string wal_end_lsn = 12;
   string error_message = 13;
+  int64 replication_lag_bytes = 14;
+  string wal_receiver_status = 15;
+  bool health_check_passed = 16;
 }
 
 // RestoreCommand is sent from central to satellite to initiate a restore.

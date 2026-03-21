@@ -35,7 +35,12 @@ func backupImageForRule(backup *pgswarmv1.BackupConfig) string {
 }
 
 // ruleShortID returns a short prefix from a backup profile ID for K8s resource naming.
+// Falls back to "default" when the profile ID is empty to avoid trailing hyphens
+// in resource names (e.g. "<cluster>-backup-creds-").
 func ruleShortID(ruleID string) string {
+	if ruleID == "" {
+		return "default"
+	}
 	if len(ruleID) >= 8 {
 		return ruleID[:8]
 	}
@@ -174,7 +179,7 @@ func pgMajorVersion(version string) string {
 }
 
 // backupSidecarEnvVars returns env vars for the backup sidecar container.
-func backupSidecarEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig, secretName, satelliteID string) []corev1.EnvVar {
+func backupSidecarEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig, secretName, satelliteID, satelliteName string) []corev1.EnvVar {
 	ruleShort := ruleShortID(backup.BackupProfileId)
 	pgMajor := "17"
 	if cfg.Postgres != nil && cfg.Postgres.Version != "" {
@@ -183,6 +188,8 @@ func backupSidecarEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.Backup
 
 	vars := []corev1.EnvVar{
 		{Name: "SATELLITE_ID", Value: satelliteID},
+		{Name: "SATELLITE_NAME", Value: satelliteName},
+		{Name: "BASE_PATH", Value: backup.BasePath},
 		{Name: "CLUSTER_NAME", Value: cfg.ClusterName},
 		{
 			Name: "POD_NAME",
@@ -301,11 +308,11 @@ func backupSidecarEnvVars(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.Backup
 }
 
 // buildBackupSidecar creates the backup sidecar container for injection into the StatefulSet.
-func buildBackupSidecar(cfg *pgswarmv1.ClusterConfig, secretName, satelliteID string) corev1.Container {
+func buildBackupSidecar(cfg *pgswarmv1.ClusterConfig, secretName, satelliteID, satelliteName string) corev1.Container {
 	// Use the first backup profile for configuration
 	backup := cfg.Backups[0]
 	image := backupImageForRule(backup)
-	env := backupSidecarEnvVars(cfg, backup, secretName, satelliteID)
+	env := backupSidecarEnvVars(cfg, backup, secretName, satelliteID, satelliteName)
 
 	c := corev1.Container{
 		Name:            "backup",

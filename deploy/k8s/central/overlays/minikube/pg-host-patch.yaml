@@ -15,3 +15,5 @@ spec:
           env:
             - name: PG_HOST
               value: postgres.pgswarm-system-central.svc.cluster.local
+            - name: ENCRYPTION_KEY
+              value: e639602b878c8faf08315e15b15392784446c043e6b2ef2fbb0f2835bfdf5cc9

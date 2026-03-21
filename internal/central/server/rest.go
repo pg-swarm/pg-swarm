@@ -1616,7 +1616,7 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		return
 	}
 
-	protoConfig, err := buildProtoClusterConfig(s.store, cfg)
+	protoConfig, err := buildProtoClusterConfig(s.store, cfg, s.encryptor)
 	if err != nil {
 		log.Error().Err(err).
 			Str("config_id", cfg.ID.String()).
@@ -1636,7 +1636,7 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 // buildProtoClusterConfig converts a models.ClusterConfig into the protobuf
 // ClusterConfig that satellites expect. It resolves profile names, label
 // selectors, and postgres images from the store.
-func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswarmv1.ClusterConfig, error) {
+func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig, enc *crypto.Encryptor) (*pgswarmv1.ClusterConfig, error) {
 	spec, err := cfg.ParseSpec()
 	if err != nil {
 		return nil, fmt.Errorf("parse cluster spec: %w", err)
@@ -1755,7 +1755,156 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 		}
 	}
 
+	// Build BackupConfig from spec.Backup + BackupStore
+	if spec.Backup != nil && spec.Backup.StoreID != nil {
+		backupStore, err := st.GetBackupStore(context.Background(), *spec.Backup.StoreID)
+		if err != nil {
+			log.Warn().Err(err).Str("store_id", spec.Backup.StoreID.String()).Msg("failed to resolve backup store — skipping backup config")
+		} else {
+			// Resolve satellite name for base_path
+			satelliteName := ""
+			if cfg.SatelliteID != nil {
+				if sat, err := st.GetSatellite(context.Background(), *cfg.SatelliteID); err == nil {
+					satelliteName = sat.Name
+					if satelliteName == "" {
+						satelliteName = sat.Hostname
+					}
+				}
+			}
+			if satelliteName == "" && cfg.SatelliteID != nil {
+				satelliteName = cfg.SatelliteID.String()
+			}
+
+			backupCfg := &pgswarmv1.BackupConfig{
+				StoreId:  spec.Backup.StoreID.String(),
+				BasePath: fmt.Sprintf("%s-%s-%s", satelliteName, cfg.Namespace, cfg.Name),
+			}
+
+			// Populate destination from store config + credentials
+			backupCfg.Destination = buildBackupDestination(backupStore, enc)
+
+			// Physical backup config
+			if spec.Backup.Physical != nil {
+				backupCfg.Physical = &pgswarmv1.PhysicalBackupConfig{
+					BaseSchedule:           spec.Backup.Physical.BaseSchedule,
+					WalArchiveEnabled:      spec.Backup.Physical.WalArchiveEnabled,
+					ArchiveTimeoutSeconds:  spec.Backup.Physical.ArchiveTimeoutSecs,
+					IncrementalSchedule:    spec.Backup.Physical.IncrementalSchedule,
+				}
+				backupCfg.Retention = &pgswarmv1.BackupRetention{
+					BaseBackupCount:        int32(spec.Backup.Physical.Retention.BaseBackupCount),
+					WalRetentionDays:       int32(spec.Backup.Physical.Retention.WalRetentionDays),
+					IncrementalBackupCount: int32(spec.Backup.Physical.Retention.IncrementalBackupCount),
+				}
+			}
+
+			// Logical backup config
+			if spec.Backup.Logical != nil {
+				backupCfg.Logical = &pgswarmv1.LogicalBackupConfig{
+					Schedule:  spec.Backup.Logical.Schedule,
+					Databases: spec.Backup.Logical.Databases,
+					Format:    spec.Backup.Logical.Format,
+				}
+				if backupCfg.Retention == nil {
+					backupCfg.Retention = &pgswarmv1.BackupRetention{}
+				}
+				backupCfg.Retention.LogicalBackupCount = int32(spec.Backup.Logical.Retention.BackupCount)
+			}
+
+			protoConfig.Backups = append(protoConfig.Backups, backupCfg)
+		}
+	}
+
 	return protoConfig, nil
+}
+
+// buildBackupDestination converts a BackupStore model into a proto BackupDestination.
+func buildBackupDestination(backupStore *models.BackupStore, enc *crypto.Encryptor) *pgswarmv1.BackupDestination {
+	dest := &pgswarmv1.BackupDestination{
+		Type: backupStore.StoreType,
+	}
+
+	// Decrypt credentials if available
+	var decryptedCreds []byte
+	if len(backupStore.Credentials) > 0 && enc != nil {
+		var err error
+		decryptedCreds, err = enc.Decrypt(backupStore.Credentials)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to decrypt backup store credentials")
+		}
+	}
+
+	switch backupStore.StoreType {
+	case "s3":
+		var storeCfg models.S3StoreConfig
+		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
+			dest.S3 = &pgswarmv1.S3Destination{
+				Bucket:         storeCfg.Bucket,
+				Region:         storeCfg.Region,
+				Endpoint:       storeCfg.Endpoint,
+				ForcePathStyle: storeCfg.ForcePathStyle,
+			}
+		}
+		if len(decryptedCreds) > 0 {
+			var creds models.S3StoreCredentials
+			if err := json.Unmarshal(decryptedCreds, &creds); err == nil {
+				if dest.S3 == nil {
+					dest.S3 = &pgswarmv1.S3Destination{}
+				}
+				dest.S3.AccessKeyId = creds.AccessKeyID
+				dest.S3.SecretAccessKey = creds.SecretAccessKey
+			}
+		}
+
+	case "gcs":
+		var storeCfg models.GCSStoreConfig
+		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
+			dest.Gcs = &pgswarmv1.GCSDestination{
+				Bucket:     storeCfg.Bucket,
+				PathPrefix: storeCfg.PathPrefix,
+			}
+		}
+		if len(decryptedCreds) > 0 {
+			var creds models.GCSStoreCredentials
+			if err := json.Unmarshal(decryptedCreds, &creds); err == nil {
+				if dest.Gcs == nil {
+					dest.Gcs = &pgswarmv1.GCSDestination{}
+				}
+				dest.Gcs.ServiceAccountJson = creds.ServiceAccountJSON
+			}
+		}
+
+	case "sftp":
+		var storeCfg models.SFTPStoreConfig
+		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
+			dest.Sftp = &pgswarmv1.SFTPDestination{
+				Host:     storeCfg.Host,
+				Port:     int32(storeCfg.Port),
+				User:     storeCfg.User,
+				BasePath: storeCfg.BasePath,
+			}
+		}
+		if len(decryptedCreds) > 0 {
+			var creds models.SFTPStoreCredentials
+			if err := json.Unmarshal(decryptedCreds, &creds); err == nil {
+				if dest.Sftp == nil {
+					dest.Sftp = &pgswarmv1.SFTPDestination{}
+				}
+				dest.Sftp.Password = creds.Password
+			}
+		}
+
+	case "local":
+		var storeCfg models.LocalStoreConfig
+		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
+			dest.Local = &pgswarmv1.LocalDestination{
+				Size:         storeCfg.Size,
+				StorageClass: storeCfg.StorageClass,
+			}
+		}
+	}
+
+	return dest
 }
 
 // --- Backup Stores ---

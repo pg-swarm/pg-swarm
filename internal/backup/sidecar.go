@@ -42,6 +42,8 @@ func (r Role) String() string {
 // Config holds the sidecar configuration, populated from environment variables.
 type Config struct {
 	SatelliteID   string
+	SatelliteName string
+	BasePath      string // "<satellite-name>-<cluster-name>" prefix; set by operator from proto
 	ClusterName   string
 	PodName       string
 	Namespace     string
@@ -82,6 +84,8 @@ func ConfigFromEnv() Config {
 	}
 	return Config{
 		SatelliteID:   os.Getenv("SATELLITE_ID"),
+		SatelliteName: os.Getenv("SATELLITE_NAME"),
+		BasePath:      os.Getenv("BASE_PATH"),
 		ClusterName:   os.Getenv("CLUSTER_NAME"),
 		PodName:       os.Getenv("POD_NAME"),
 		Namespace:     os.Getenv("NAMESPACE"),
@@ -101,19 +105,20 @@ func ConfigFromEnv() Config {
 
 // Sidecar is the main backup sidecar process.
 type Sidecar struct {
-	cfg        Config
-	dest       destination.Destination
-	meta       *MetadataDB
-	role       Role
-	mu         sync.RWMutex
-	api        *APIServer
-	sched      *Scheduler
-	ret        *RetentionWorker
-	reporter   *Reporter
-	notifier   *Notifier
-	cancel     context.CancelFunc
-	roleCtx    context.Context
-	roleCancel context.CancelFunc
+	cfg         Config
+	dest        destination.Destination
+	meta        *MetadataDB
+	role        Role
+	mu          sync.RWMutex
+	api         *APIServer
+	sched       *Scheduler
+	ret         *RetentionWorker
+	reporter    *Reporter
+	notifier    *Notifier
+	statusGate  *ClusterStatusGate
+	cancel      context.CancelFunc
+	roleCtx     context.Context
+	roleCancel  context.CancelFunc
 }
 
 // New creates a new Sidecar.
@@ -124,8 +129,17 @@ func New(cfg Config) *Sidecar {
 }
 
 // destPrefix returns the folder prefix for this satellite+cluster combination.
+// Format: "<satellite-name>-<namespace>-<cluster-name>/".
+// Prefers BasePath (set by central via proto), then constructs from components.
 func (s *Sidecar) destPrefix() string {
-	return fmt.Sprintf("%s-%s/", s.cfg.SatelliteID, s.cfg.ClusterName)
+	if s.cfg.BasePath != "" {
+		return s.cfg.BasePath + "/"
+	}
+	name := s.cfg.SatelliteName
+	if name == "" {
+		name = s.cfg.SatelliteID
+	}
+	return fmt.Sprintf("%s-%s-%s/", name, s.cfg.Namespace, s.cfg.ClusterName)
 }
 
 // Run starts the sidecar and blocks until ctx is cancelled.
@@ -136,6 +150,9 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// 1. Initialize destination
 	s.dest = destination.NewFromEnv(s.cfg.DestType)
 	log.Info().Str("dest_type", s.cfg.DestType).Msg("destination initialized")
+
+	// Check for existing backups in the store (informational)
+	s.checkExistingBackups(ctx)
 
 	// Start WAL restore watcher before detectRole: PostgreSQL's restore_command
 	// runs during recovery (before PG accepts connections). Without this, there
@@ -153,15 +170,21 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.mu.Unlock()
 	log.Info().Str("role", role.String()).Msg("role detected")
 
-	// 3. Initialize based on role
+	// 3. Initialize cluster status gate
+	s.statusGate = NewClusterStatusGate(s.cfg.Namespace, s.cfg.ClusterName)
+
+	// 4. Wait for cluster to be ready before activating backup responsibilities
+	s.waitForClusterReady(ctx, role)
+
+	// 5. Initialize based on role
 	if err := s.activateRole(ctx, role); err != nil {
 		return fmt.Errorf("activate role %s: %w", role, err)
 	}
 
-	// 4. Start role-change watcher
+	// 6. Start role-change watcher
 	go s.watchRoleChanges(ctx)
 
-	// 5. Block until context cancelled
+	// 7. Block until context cancelled
 	<-ctx.Done()
 	s.shutdown()
 	return nil
@@ -364,6 +387,30 @@ func (s *Sidecar) CurrentRole() Role {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.role
+}
+
+// isClusterStatusRunning checks if the cluster lifecycle state allows backups.
+func (s *Sidecar) isClusterStatusRunning(ctx context.Context) (bool, string) {
+	if s.statusGate == nil {
+		return true, "no status gate configured (fail-open)"
+	}
+	return s.statusGate.IsBackupAllowed(ctx)
+}
+
+// checkExistingBackups checks the remote store for existing backup metadata.
+// This is informational — it logs findings but does not block startup.
+func (s *Sidecar) checkExistingBackups(ctx context.Context) {
+	remoteMeta := s.destPrefix() + "backups.db"
+	exists, err := s.dest.Exists(ctx, remoteMeta)
+	if err != nil {
+		log.Debug().Err(err).Msg("could not check for existing backups in store")
+		return
+	}
+	if !exists {
+		log.Info().Msg("no existing backups found in store")
+		return
+	}
+	log.Info().Str("path", remoteMeta).Msg("existing backup metadata found in store")
 }
 
 // downloadFile downloads a remote file to a local path via the destination.

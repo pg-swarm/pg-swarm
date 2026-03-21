@@ -19,6 +19,9 @@ import (
 // RunBaseBackup executes a full pg_basebackup against the local PostgreSQL,
 // uploads the result, and notifies the primary sidecar.
 func (s *Sidecar) RunBaseBackup(ctx context.Context) error {
+	if allowed, reason := s.isClusterStatusRunning(ctx); !allowed {
+		return fmt.Errorf("backup blocked: cluster not RUNNING: %s", reason)
+	}
 	start := time.Now()
 	timestamp := start.UTC().Format("20060102T150405Z")
 	backupID := uuid.New().String()
@@ -94,9 +97,10 @@ func (s *Sidecar) RunBaseBackup(ctx context.Context) error {
 		DurationSecs: duration,
 	})
 
-	// Report status
+	// Report status with health context
 	if s.reporter != nil {
-		s.reporter.ReportBackup(ctx, "base", "completed", totalSize, "")
+		hs := s.checkHealth(ctx)
+		s.reporter.ReportBackupWithHealth(ctx, "base", "completed", totalSize, "", &hs)
 	}
 
 	return nil
@@ -105,6 +109,9 @@ func (s *Sidecar) RunBaseBackup(ctx context.Context) error {
 // RunIncrementalBackup executes an incremental pg_basebackup. Falls back to
 // a full base backup if the manifest is missing or WAL gap detected.
 func (s *Sidecar) RunIncrementalBackup(ctx context.Context) error {
+	if allowed, reason := s.isClusterStatusRunning(ctx); !allowed {
+		return fmt.Errorf("backup blocked: cluster not RUNNING: %s", reason)
+	}
 	start := time.Now()
 	timestamp := start.UTC().Format("20060102T150405Z")
 	backupID := uuid.New().String()
@@ -190,7 +197,8 @@ func (s *Sidecar) RunIncrementalBackup(ctx context.Context) error {
 	})
 
 	if s.reporter != nil {
-		s.reporter.ReportBackup(ctx, "incremental", "completed", totalSize, "")
+		hs := s.checkHealth(ctx)
+		s.reporter.ReportBackupWithHealth(ctx, "incremental", "completed", totalSize, "", &hs)
 	}
 	return nil
 }
