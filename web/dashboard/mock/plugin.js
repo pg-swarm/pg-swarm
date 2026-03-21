@@ -10,7 +10,7 @@ import {
   deploymentRules,
   postgresVersions,
   postgresVariants,
-  backupProfiles,
+  backupStores,
   storageTiers,
   backups,
   restores,
@@ -41,7 +41,7 @@ export default function mockApiPlugin() {
     deploymentRules: [...deploymentRules],
     postgresVersions: [...postgresVersions],
     postgresVariants: [...postgresVariants],
-    backupProfiles: [...backupProfiles],
+    backupStores: [...backupStores],
     storageTiers: [...storageTiers],
     recoveryRuleSets: recoveryRuleSets.map(rs => ({ ...rs, rules: rs.rules.map(r => ({ ...r })) })),
   };
@@ -200,15 +200,6 @@ export default function mockApiPlugin() {
           });
           return;
         }
-        if (path.match(/^\/profiles\/[^/]+\/backup-profiles$/) && method === 'GET') {
-          return json(res, state.backupProfiles.slice(0, 1));
-        }
-        if (path.match(/^\/profiles\/[^/]+\/attach-backup-profile$/) && method === 'POST') {
-          return json(res, { ok: true });
-        }
-        if (path.match(/^\/profiles\/[^/]+\/detach-backup-profile$/) && method === 'POST') {
-          return json(res, { ok: true });
-        }
 
         // ---- Deployment Rules ----
         if (path === '/deployment-rules' && method === 'GET') {
@@ -295,34 +286,34 @@ export default function mockApiPlugin() {
           return json(res, { ok: true });
         }
 
-        // ---- Backup Profiles ----
-        if (path === '/backup-profiles' && method === 'GET') {
-          return json(res, state.backupProfiles);
+        // ---- Backup Stores ----
+        if (path === '/backup-stores' && method === 'GET') {
+          return json(res, state.backupStores);
         }
-        if (path === '/backup-profiles' && method === 'POST') {
+        if (path === '/backup-stores' && method === 'POST') {
           body(req).then((b) => {
-            const bp = { id: 'bp-' + Date.now(), created_at: new Date().toISOString(), ...b };
-            state.backupProfiles.push(bp);
-            json(res, bp, 201);
+            const bs = { id: 'bs-' + Date.now(), created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...b };
+            state.backupStores.push(bs);
+            json(res, bs, 201);
           });
           return;
         }
-        if (path.match(/^\/backup-profiles\/[^/]+$/) && method === 'GET') {
+        if (path.match(/^\/backup-stores\/[^/]+$/) && method === 'GET') {
           const id = path.split('/')[2];
-          return json(res, state.backupProfiles.find((bp) => bp.id === id) || { error: 'not found' });
+          return json(res, state.backupStores.find((bs) => bs.id === id) || { error: 'not found' });
         }
-        if (path.match(/^\/backup-profiles\/[^/]+$/) && method === 'PUT') {
+        if (path.match(/^\/backup-stores\/[^/]+$/) && method === 'PUT') {
           const id = path.split('/')[2];
           body(req).then((b) => {
-            const idx = state.backupProfiles.findIndex((bp) => bp.id === id);
-            if (idx >= 0) { Object.assign(state.backupProfiles[idx], b); json(res, state.backupProfiles[idx]); }
+            const idx = state.backupStores.findIndex((bs) => bs.id === id);
+            if (idx >= 0) { Object.assign(state.backupStores[idx], b, { updated_at: new Date().toISOString() }); json(res, state.backupStores[idx]); }
             else json(res, { error: 'not found' }, 404);
           });
           return;
         }
-        if (path.match(/^\/backup-profiles\/[^/]+$/) && method === 'DELETE') {
+        if (path.match(/^\/backup-stores\/[^/]+$/) && method === 'DELETE') {
           const id = path.split('/')[2];
-          state.backupProfiles = state.backupProfiles.filter((bp) => bp.id !== id);
+          state.backupStores = state.backupStores.filter((bs) => bs.id !== id);
           return json(res, { ok: true });
         }
 

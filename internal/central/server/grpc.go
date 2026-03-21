@@ -840,16 +840,20 @@ func protoInstancesToJSON(instances []*pgswarmv1.InstanceHealth) (json.RawMessag
 
 // handleBackupStatusReport processes a backup status report from a satellite.
 func (s *GRPCServer) handleBackupStatusReport(ctx context.Context, satID uuid.UUID, report *pgswarmv1.BackupStatusReport) {
-	ruleID, err := uuid.Parse(report.BackupProfileId)
-	if err != nil {
-		log.Error().Err(err).Str("backup_profile_id", report.BackupProfileId).Msg("invalid backup profile id in status report")
-		return
+	var backupProfileID *uuid.UUID
+	if report.BackupProfileId != "" {
+		parsed, err := uuid.Parse(report.BackupProfileId)
+		if err != nil {
+			log.Error().Err(err).Str("backup_profile_id", report.BackupProfileId).Msg("invalid backup profile id in status report")
+			return
+		}
+		backupProfileID = &parsed
 	}
 
 	inv := &models.BackupInventory{
-		SatelliteID:  satID,
-		ClusterName:  report.ClusterName,
-		BackupProfileID: ruleID,
+		SatelliteID:     satID,
+		ClusterName:     report.ClusterName,
+		BackupProfileID: backupProfileID,
 		BackupType:   report.BackupType,
 		Status:       report.Status,
 		SizeBytes:    report.SizeBytes,

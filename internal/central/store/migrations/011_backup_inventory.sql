@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS backup_inventory (
     id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     satellite_id   UUID NOT NULL REFERENCES satellites(id),
     cluster_name   TEXT NOT NULL,
-    backup_profile_id UUID NOT NULL REFERENCES backup_profiles(id),
+    backup_profile_id UUID,
     backup_type    TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'running',
     started_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
