@@ -43,6 +43,11 @@ func NewReporter(namespace, clusterName string) *Reporter {
 
 // ReportBackup writes backup status to the cluster's backup-status ConfigMap.
 func (r *Reporter) ReportBackup(ctx context.Context, backupType, status string, sizeBytes int64, errMsg string) {
+	r.ReportBackupWithHealth(ctx, backupType, status, sizeBytes, errMsg, nil)
+}
+
+// ReportBackupWithHealth writes backup status with health context to the ConfigMap.
+func (r *Reporter) ReportBackupWithHealth(ctx context.Context, backupType, status string, sizeBytes int64, errMsg string, hs *HealthStatus) {
 	if r.client == nil {
 		return
 	}
@@ -58,6 +63,12 @@ func (r *Reporter) ReportBackup(ctx context.Context, backupType, status string, 
 		"size_bytes":    fmt.Sprintf("%d", sizeBytes),
 		"error_message": errMsg,
 		"pod_name":      podName,
+	}
+
+	if hs != nil {
+		data["replication_lag_bytes"] = fmt.Sprintf("%d", hs.ReplicationLagBytes)
+		data["wal_receiver_status"] = hs.WalReceiverStatus
+		data["health_check_passed"] = fmt.Sprintf("%t", hs.Healthy)
 	}
 
 	cm := &corev1.ConfigMap{

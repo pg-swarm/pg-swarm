@@ -77,15 +77,91 @@ func (sc *Scheduler) Stop() {
 }
 
 // runWithRecovery runs a backup function, recovering from panics.
+// It checks cluster lifecycle status and health before running; backups are
+// skipped unless the cluster is RUNNING. The initial base backup retries for
+// up to 10 minutes on both cluster status and health.
 func (sc *Scheduler) runWithRecovery(ctx context.Context, name string, fn func(context.Context) error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error().Interface("panic", r).Str("backup", name).Msg("backup panicked")
 		}
 	}()
+
+	// Check cluster lifecycle status before backup
+	if allowed, reason := sc.sidecar.isClusterStatusRunning(ctx); !allowed {
+		if name == "initial-base" {
+			if !sc.waitForClusterStatus(ctx, 10*time.Minute, 10*time.Second) {
+				log.Warn().Str("backup", name).Msg("cluster status not RUNNING after 10min — skipping initial base")
+				if sc.sidecar.reporter != nil {
+					sc.sidecar.reporter.ReportBackup(ctx, "base", "skipped", 0, "cluster not RUNNING: "+reason)
+				}
+				return
+			}
+		} else {
+			log.Warn().Str("backup", name).Str("reason", reason).Msg("cluster not RUNNING — skipping backup")
+			if sc.sidecar.reporter != nil {
+				sc.sidecar.reporter.ReportBackup(ctx, name, "skipped", 0, "cluster not RUNNING: "+reason)
+			}
+			return
+		}
+	}
+
+	hs := sc.sidecar.checkHealth(ctx)
+	if !hs.Healthy {
+		if name == "initial-base" {
+			// First base backup: retry health every 30s for up to 10 minutes
+			if !sc.waitForHealth(ctx, 10*time.Minute, 30*time.Second) {
+				log.Warn().Str("backup", name).Msg("health check timed out for initial base — skipping")
+				if sc.sidecar.reporter != nil {
+					sc.sidecar.reporter.ReportBackup(ctx, "base", "skipped", 0, "health check timed out")
+				}
+				return
+			}
+		} else {
+			log.Warn().Str("backup", name).Str("reason", hs.Reason).Msg("health check failed — skipping backup")
+			if sc.sidecar.reporter != nil {
+				sc.sidecar.reporter.ReportBackup(ctx, name, "skipped", 0, "health check failed: "+hs.Reason)
+			}
+			return
+		}
+	}
+
 	if err := fn(ctx); err != nil {
 		log.Error().Err(err).Str("backup", name).Msg("backup failed")
 	}
+}
+
+// waitForClusterStatus polls isClusterStatusRunning until allowed or timeout.
+func (sc *Scheduler) waitForClusterStatus(ctx context.Context, timeout, interval time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if allowed, _ := sc.sidecar.isClusterStatusRunning(ctx); allowed {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+	return false
+}
+
+// waitForHealth retries checkHealth at the given interval until healthy or timeout.
+func (sc *Scheduler) waitForHealth(ctx context.Context, timeout, interval time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		hs := sc.sidecar.checkHealth(ctx)
+		if hs.Healthy {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+	return false
 }
 
 // newTicker creates a ticker from a cron expression. For simplicity, we

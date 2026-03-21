@@ -31,6 +31,8 @@ type BackupConfig struct {
 	Retention       *BackupRetention       `protobuf:"bytes,4,opt,name=retention,proto3" json:"retention,omitempty"`
 	BackupImage     string                 `protobuf:"bytes,5,opt,name=backup_image,json=backupImage,proto3" json:"backup_image,omitempty"`
 	BackupProfileId string                 `protobuf:"bytes,6,opt,name=backup_profile_id,json=backupProfileId,proto3" json:"backup_profile_id,omitempty"` // UUID of the source backup profile (for unique CronJob naming)
+	StoreId         string                 `protobuf:"bytes,7,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"`                           // backup store UUID for tracking/audit
+	BasePath        string                 `protobuf:"bytes,8,opt,name=base_path,json=basePath,proto3" json:"base_path,omitempty"`                        // "<satellite-name>-<cluster-name>" prefix for destination paths
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -103,6 +105,20 @@ func (x *BackupConfig) GetBackupImage() string {
 func (x *BackupConfig) GetBackupProfileId() string {
 	if x != nil {
 		return x.BackupProfileId
+	}
+	return ""
+}
+
+func (x *BackupConfig) GetStoreId() string {
+	if x != nil {
+		return x.StoreId
+	}
+	return ""
+}
+
+func (x *BackupConfig) GetBasePath() string {
+	if x != nil {
+		return x.BasePath
 	}
 	return ""
 }
@@ -661,22 +677,25 @@ func (x *BackupRetention) GetIncrementalBackupCount() int32 {
 
 // BackupStatusReport is sent from satellite to central after a backup completes or fails.
 type BackupStatusReport struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName     string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	Namespace       string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	BackupProfileId string                 `protobuf:"bytes,3,opt,name=backup_profile_id,json=backupProfileId,proto3" json:"backup_profile_id,omitempty"`
-	BackupType      string                 `protobuf:"bytes,4,opt,name=backup_type,json=backupType,proto3" json:"backup_type,omitempty"` // "base", "wal", "logical"
-	Status          string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                           // "completed", "failed"
-	StartedAt       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	CompletedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
-	SizeBytes       int64                  `protobuf:"varint,8,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	BackupPath      string                 `protobuf:"bytes,9,opt,name=backup_path,json=backupPath,proto3" json:"backup_path,omitempty"`
-	PgVersion       string                 `protobuf:"bytes,10,opt,name=pg_version,json=pgVersion,proto3" json:"pg_version,omitempty"`
-	WalStartLsn     string                 `protobuf:"bytes,11,opt,name=wal_start_lsn,json=walStartLsn,proto3" json:"wal_start_lsn,omitempty"`
-	WalEndLsn       string                 `protobuf:"bytes,12,opt,name=wal_end_lsn,json=walEndLsn,proto3" json:"wal_end_lsn,omitempty"`
-	ErrorMessage    string                 `protobuf:"bytes,13,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName         string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	Namespace           string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	BackupProfileId     string                 `protobuf:"bytes,3,opt,name=backup_profile_id,json=backupProfileId,proto3" json:"backup_profile_id,omitempty"`
+	BackupType          string                 `protobuf:"bytes,4,opt,name=backup_type,json=backupType,proto3" json:"backup_type,omitempty"` // "base", "wal", "logical"
+	Status              string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                           // "completed", "failed"
+	StartedAt           *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	CompletedAt         *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	SizeBytes           int64                  `protobuf:"varint,8,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	BackupPath          string                 `protobuf:"bytes,9,opt,name=backup_path,json=backupPath,proto3" json:"backup_path,omitempty"`
+	PgVersion           string                 `protobuf:"bytes,10,opt,name=pg_version,json=pgVersion,proto3" json:"pg_version,omitempty"`
+	WalStartLsn         string                 `protobuf:"bytes,11,opt,name=wal_start_lsn,json=walStartLsn,proto3" json:"wal_start_lsn,omitempty"`
+	WalEndLsn           string                 `protobuf:"bytes,12,opt,name=wal_end_lsn,json=walEndLsn,proto3" json:"wal_end_lsn,omitempty"`
+	ErrorMessage        string                 `protobuf:"bytes,13,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	ReplicationLagBytes int64                  `protobuf:"varint,14,opt,name=replication_lag_bytes,json=replicationLagBytes,proto3" json:"replication_lag_bytes,omitempty"`
+	WalReceiverStatus   string                 `protobuf:"bytes,15,opt,name=wal_receiver_status,json=walReceiverStatus,proto3" json:"wal_receiver_status,omitempty"`
+	HealthCheckPassed   bool                   `protobuf:"varint,16,opt,name=health_check_passed,json=healthCheckPassed,proto3" json:"health_check_passed,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *BackupStatusReport) Reset() {
@@ -798,6 +817,27 @@ func (x *BackupStatusReport) GetErrorMessage() string {
 		return x.ErrorMessage
 	}
 	return ""
+}
+
+func (x *BackupStatusReport) GetReplicationLagBytes() int64 {
+	if x != nil {
+		return x.ReplicationLagBytes
+	}
+	return 0
+}
+
+func (x *BackupStatusReport) GetWalReceiverStatus() string {
+	if x != nil {
+		return x.WalReceiverStatus
+	}
+	return ""
+}
+
+func (x *BackupStatusReport) GetHealthCheckPassed() bool {
+	if x != nil {
+		return x.HealthCheckPassed
+	}
+	return false
 }
 
 // RestoreCommand is sent from central to satellite to initiate a restore.
@@ -991,14 +1031,16 @@ var File_backup_proto protoreflect.FileDescriptor
 const file_backup_proto_rawDesc = "" +
 	"\n" +
 	"\fbackup.proto\x12\n" +
-	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd2\x02\n" +
+	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8a\x03\n" +
 	"\fBackupConfig\x12<\n" +
 	"\bphysical\x18\x01 \x01(\v2 .pgswarm.v1.PhysicalBackupConfigR\bphysical\x129\n" +
 	"\alogical\x18\x02 \x01(\v2\x1f.pgswarm.v1.LogicalBackupConfigR\alogical\x12?\n" +
 	"\vdestination\x18\x03 \x01(\v2\x1d.pgswarm.v1.BackupDestinationR\vdestination\x129\n" +
 	"\tretention\x18\x04 \x01(\v2\x1b.pgswarm.v1.BackupRetentionR\tretention\x12!\n" +
 	"\fbackup_image\x18\x05 \x01(\tR\vbackupImage\x12*\n" +
-	"\x11backup_profile_id\x18\x06 \x01(\tR\x0fbackupProfileId\"\xd6\x01\n" +
+	"\x11backup_profile_id\x18\x06 \x01(\tR\x0fbackupProfileId\x12\x19\n" +
+	"\bstore_id\x18\a \x01(\tR\astoreId\x12\x1b\n" +
+	"\tbase_path\x18\b \x01(\tR\bbasePath\"\xd6\x01\n" +
 	"\x14PhysicalBackupConfig\x12#\n" +
 	"\rbase_schedule\x18\x01 \x01(\tR\fbaseSchedule\x12.\n" +
 	"\x13wal_archive_enabled\x18\x02 \x01(\bR\x11walArchiveEnabled\x126\n" +
@@ -1041,7 +1083,7 @@ const file_backup_proto_rawDesc = "" +
 	"\x11base_backup_count\x18\x01 \x01(\x05R\x0fbaseBackupCount\x12,\n" +
 	"\x12wal_retention_days\x18\x02 \x01(\x05R\x10walRetentionDays\x120\n" +
 	"\x14logical_backup_count\x18\x03 \x01(\x05R\x12logicalBackupCount\x128\n" +
-	"\x18incremental_backup_count\x18\x04 \x01(\x05R\x16incrementalBackupCount\"\xfc\x03\n" +
+	"\x18incremental_backup_count\x18\x04 \x01(\x05R\x16incrementalBackupCount\"\x90\x05\n" +
 	"\x12BackupStatusReport\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12*\n" +
@@ -1061,7 +1103,10 @@ const file_backup_proto_rawDesc = "" +
 	" \x01(\tR\tpgVersion\x12\"\n" +
 	"\rwal_start_lsn\x18\v \x01(\tR\vwalStartLsn\x12\x1e\n" +
 	"\vwal_end_lsn\x18\f \x01(\tR\twalEndLsn\x12#\n" +
-	"\rerror_message\x18\r \x01(\tR\ferrorMessage\"\xf8\x02\n" +
+	"\rerror_message\x18\r \x01(\tR\ferrorMessage\x122\n" +
+	"\x15replication_lag_bytes\x18\x0e \x01(\x03R\x13replicationLagBytes\x12.\n" +
+	"\x13wal_receiver_status\x18\x0f \x01(\tR\x11walReceiverStatus\x12.\n" +
+	"\x13health_check_passed\x18\x10 \x01(\bR\x11healthCheckPassed\"\xf8\x02\n" +
 	"\x0eRestoreCommand\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1d\n" +

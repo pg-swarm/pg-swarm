@@ -93,7 +93,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// 2. Create operator (requires K8s client)
 	if a.k8sClient != nil {
-		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage, a.identity.SatelliteID)
+		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage, a.identity.SatelliteID, a.config.Hostname)
 		log.Trace().Msg("operator created")
 	} else {
 		log.Warn().Msg("K8s client unavailable — operator disabled, configs will be logged only")

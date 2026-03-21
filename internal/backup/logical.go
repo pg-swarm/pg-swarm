@@ -17,6 +17,9 @@ import (
 // RunLogicalBackup executes pg_dump for configured databases (or pg_dumpall),
 // uploads results to the logical/ subfolder, and notifies the primary.
 func (s *Sidecar) RunLogicalBackup(ctx context.Context) error {
+	if allowed, reason := s.isClusterStatusRunning(ctx); !allowed {
+		return fmt.Errorf("backup blocked: cluster not RUNNING: %s", reason)
+	}
 	start := time.Now()
 	timestamp := start.UTC().Format("20060102T150405Z")
 	backupID := uuid.New().String()
@@ -106,7 +109,8 @@ func (s *Sidecar) RunLogicalBackup(ctx context.Context) error {
 	})
 
 	if s.reporter != nil {
-		s.reporter.ReportBackup(ctx, "logical", status, totalSize, errMsg)
+		hs := s.checkHealth(ctx)
+		s.reporter.ReportBackupWithHealth(ctx, "logical", status, totalSize, errMsg, &hs)
 	}
 
 	return lastErr

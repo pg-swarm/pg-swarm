@@ -72,7 +72,8 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 }
 
 // buildStatefulSet creates the StatefulSet for the PostgreSQL cluster.
-func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string, satelliteID ...string) *appsv1.StatefulSet {
+// satelliteInfo is optional: [0] = satelliteID, [1] = satelliteName (for backup sidecar).
+func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string, satelliteInfo ...string) *appsv1.StatefulSet {
 	selLabels := selectorLabels(cfg.ClusterName)
 	allLabels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
@@ -156,51 +157,53 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		})
 	}
 
-	// TODO: Re-enable backup sidecar injection once core functionality is stable.
-	_ = satelliteID // keep parameter for re-enablement
-	// // Backup sidecar
-	// if backupEnabled(cfg) {
-	// 	satID := ""
-	// 	if len(satelliteID) > 0 {
-	// 		satID = satelliteID[0]
-	// 	}
-	// 	sts.Spec.Template.Spec.Containers = append(
-	// 		sts.Spec.Template.Spec.Containers,
-	// 		buildBackupSidecar(cfg, secretName, satID),
-	// 	)
-	// 	if !failoverEnabled(cfg) {
-	// 		sts.Spec.Template.Spec.ServiceAccountName = backupServiceAccountName(cfg.ClusterName)
-	// 	}
-	// }
-	//
-	// // Shared emptyDir volumes for WAL staging (archive) and WAL restore (fetch).
-	// if backupEnabled(cfg) {
-	// 	sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes,
-	// 		corev1.Volume{
-	// 			Name:         "wal-staging",
-	// 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	// 		},
-	// 		corev1.Volume{
-	// 			Name:         "wal-restore",
-	// 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	// 		},
-	// 	)
-	//
-	// 	if cfg.Backups[0].Destination != nil && cfg.Backups[0].Destination.Type == "gcs" {
-	// 		ruleShort := ruleShortID(cfg.Backups[0].BackupProfileId)
-	// 		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
-	// 			Name: "gcp-creds",
-	// 			VolumeSource: corev1.VolumeSource{
-	// 				Secret: &corev1.SecretVolumeSource{
-	// 					SecretName: backupCredentialSecretName(cfg.ClusterName, ruleShort),
-	// 					Items: []corev1.KeyToPath{
-	// 						{Key: "service-account-json", Path: "service-account.json"},
-	// 					},
-	// 				},
-	// 			},
-	// 		})
-	// 	}
-	// }
+	// Backup sidecar
+	if backupEnabled(cfg) {
+		satID := ""
+		satName := ""
+		if len(satelliteInfo) > 0 {
+			satID = satelliteInfo[0]
+		}
+		if len(satelliteInfo) > 1 {
+			satName = satelliteInfo[1]
+		}
+		sts.Spec.Template.Spec.Containers = append(
+			sts.Spec.Template.Spec.Containers,
+			buildBackupSidecar(cfg, secretName, satID, satName),
+		)
+		if !failoverEnabled(cfg) {
+			sts.Spec.Template.Spec.ServiceAccountName = backupServiceAccountName(cfg.ClusterName)
+		}
+	}
+
+	// Shared emptyDir volumes for WAL staging (archive) and WAL restore (fetch).
+	if backupEnabled(cfg) {
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes,
+			corev1.Volume{
+				Name:         "wal-staging",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+			corev1.Volume{
+				Name:         "wal-restore",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+		)
+
+		if cfg.Backups[0].Destination != nil && cfg.Backups[0].Destination.Type == "gcs" {
+			ruleShort := ruleShortID(cfg.Backups[0].BackupProfileId)
+			sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
+				Name: "gcp-creds",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: backupCredentialSecretName(cfg.ClusterName, ruleShort),
+						Items: []corev1.KeyToPath{
+							{Key: "service-account-json", Path: "service-account.json"},
+						},
+					},
+				},
+			})
+		}
+	}
 
 	// Mount custom archive credentials as a volume
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" && cfg.Archive.CredentialsSecret != nil {

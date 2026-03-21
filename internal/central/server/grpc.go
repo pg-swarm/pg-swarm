@@ -381,7 +381,7 @@ func (s *GRPCServer) syncConfigs(ctx context.Context, satID uuid.UUID, satStream
 			continue
 		}
 
-		protoConfig, err := buildProtoClusterConfig(s.store, cfg)
+		protoConfig, err := buildProtoClusterConfig(s.store, cfg, nil)
 		if err != nil {
 			log.Error().Err(err).
 				Str("satellite_id", satID.String()).
