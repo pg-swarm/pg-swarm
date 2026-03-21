@@ -415,9 +415,7 @@ restore_command = 'curl -sf -o %p http://localhost:8442/wal/fetch?name=%f'
 ```
 
 - `archive_command` POSTs WAL to the local backup sidecar. Blocks until durable upload. PG only marks WAL as archived after curl returns 0.
-- `restore_command` fetches WAL from the sidecar, which downloads from the store.
-
----
+- `restore_command` fetches WAL from the sidecar, which downloads from the destination.
 
 ## Sidecar HTTP API (:8442)
 
