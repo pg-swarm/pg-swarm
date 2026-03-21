@@ -728,36 +728,28 @@ export const storageTiers = [
   { id: 'tier-004', name: 'archive', description: 'Low-cost storage for backups and cold data', created_at: ago(86400 * 15), updated_at: ago(86400 * 15) },
 ];
 
-// --- Backup Profiles ------------------------------------------------------
+// --- Backup Stores --------------------------------------------------------
 
-const BACKUP_IDS = {
-  s3Prod: 'bp-00000001-0000-4000-8000-000000000001',
-  localDev: 'bp-00000002-0000-4000-8000-000000000002',
-};
-
-export const backupProfiles = [
+export const backupStores = [
   {
-    id: BACKUP_IDS.s3Prod,
-    name: 'prod-s3-hourly',
-    description: 'Production backup: daily base + hourly incremental to S3',
-    config: JSON.stringify({
-      physical: { base_schedule: '0 0 4 * * *', incremental_schedule: '0 0 * * * *', wal_archive_enabled: true, archive_timeout_seconds: 120 },
-      logical: { schedule: '0 0 2 * * 0', databases: ['appdb', 'analytics'], format: 'custom' },
-      destination: { type: 's3', s3: { bucket: 'pg-swarm-backups-prod', region: 'india-south-1', path_prefix: 'backups/' } },
-      retention: { base_backup_count: 7, wal_retention_days: 14, logical_backup_count: 4 },
-    }),
+    id: 'bs-00000001-0000-4000-8000-000000000001',
+    name: 'prod-s3',
+    description: 'Production S3 bucket for backups',
+    store_type: 's3',
+    config: { bucket: 'pg-swarm-backups-prod', region: 'india-south-1' },
+    credentials_set: { access_key_id: true, secret_access_key: true },
     created_at: ago(86400 * 28),
+    updated_at: ago(86400 * 28),
   },
   {
-    id: BACKUP_IDS.localDev,
-    name: 'local-daily',
-    description: 'Dev/staging backup: daily logical dump to local PVC',
-    config: JSON.stringify({
-      logical: { schedule: '0 0 3 * * *', databases: [], format: 'custom' },
-      destination: { type: 'local', local: { path: '/backup-storage' } },
-      retention: { logical_backup_count: 3 },
-    }),
+    id: 'bs-00000002-0000-4000-8000-000000000002',
+    name: 'dev-local',
+    description: 'Local PVC storage for dev backups',
+    store_type: 'local',
+    config: { size: '20Gi' },
+    credentials_set: null,
     created_at: ago(86400 * 14),
+    updated_at: ago(86400 * 14),
   },
 ];
 
@@ -765,39 +757,39 @@ export const backupProfiles = [
 
 export const backups = [
   // orders-db (us-east) — full backup history
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'base', status: 'completed', backup_path: 'orders-db/base/20260315_040012', size_bytes: 12_800_000_000, started_at: ago(43200), completed_at: ago(42900), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_100005', size_bytes: 134_217_728, started_at: ago(18000), completed_at: ago(17940), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_110003', size_bytes: 98_304_000, started_at: ago(14400), completed_at: ago(14360), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_120001', size_bytes: 112_640_000, started_at: ago(10800), completed_at: ago(10755), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_130002', size_bytes: 87_040_000, started_at: ago(7200), completed_at: ago(7168), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'running', backup_path: 'orders-db/incremental/20260315_140001', size_bytes: 0, started_at: ago(120), completed_at: null, pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'logical', status: 'completed', backup_path: 'orders-db/logical/20260309_020015', size_bytes: 3_200_000_000, started_at: ago(86400 * 6), completed_at: ago(86400 * 6 - 480), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'logical', status: 'completed', backup_path: 'orders-db/logical/20260316_020008', size_bytes: 3_350_000_000, started_at: ago(3600), completed_at: ago(3120), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, backup_profile_id: BACKUP_IDS.s3Prod, type: 'base', status: 'completed', backup_path: 'orders-db/base/20260308_040010', size_bytes: 12_500_000_000, started_at: ago(86400 * 7), completed_at: ago(86400 * 7 - 320), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'base', status: 'completed', backup_path: 'orders-db/base/20260315_040012', size_bytes: 12_800_000_000, started_at: ago(43200), completed_at: ago(42900), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_100005', size_bytes: 134_217_728, started_at: ago(18000), completed_at: ago(17940), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_110003', size_bytes: 98_304_000, started_at: ago(14400), completed_at: ago(14360), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_120001', size_bytes: 112_640_000, started_at: ago(10800), completed_at: ago(10755), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'incremental', status: 'completed', backup_path: 'orders-db/incremental/20260315_130002', size_bytes: 87_040_000, started_at: ago(7200), completed_at: ago(7168), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'incremental', status: 'running', backup_path: 'orders-db/incremental/20260315_140001', size_bytes: 0, started_at: ago(120), completed_at: null, pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'logical', status: 'completed', backup_path: 'orders-db/logical/20260309_020015', size_bytes: 3_200_000_000, started_at: ago(86400 * 6), completed_at: ago(86400 * 6 - 480), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'logical', status: 'completed', backup_path: 'orders-db/logical/20260316_020008', size_bytes: 3_350_000_000, started_at: ago(3600), completed_at: ago(3120), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersUsEast, type: 'base', status: 'completed', backup_path: 'orders-db/base/20260308_040010', size_bytes: 12_500_000_000, started_at: ago(86400 * 7), completed_at: ago(86400 * 7 - 320), pg_version: '17.2' },
 
   // orders-db (eu-west) — some backups
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersEuWest, backup_profile_id: BACKUP_IDS.s3Prod, type: 'base', status: 'completed', backup_path: 'orders-db-eu/base/20260315_040018', size_bytes: 10_200_000_000, started_at: ago(43200), completed_at: ago(42850), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersEuWest, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'orders-db-eu/incremental/20260315_100010', size_bytes: 95_000_000, started_at: ago(18000), completed_at: ago(17950), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.ordersEuWest, backup_profile_id: BACKUP_IDS.s3Prod, type: 'logical', status: 'completed', backup_path: 'orders-db-eu/logical/20260316_020012', size_bytes: 2_900_000_000, started_at: ago(3600), completed_at: ago(3200), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersEuWest, type: 'base', status: 'completed', backup_path: 'orders-db-eu/base/20260315_040018', size_bytes: 10_200_000_000, started_at: ago(43200), completed_at: ago(42850), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersEuWest, type: 'incremental', status: 'completed', backup_path: 'orders-db-eu/incremental/20260315_100010', size_bytes: 95_000_000, started_at: ago(18000), completed_at: ago(17950), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.ordersEuWest, type: 'logical', status: 'completed', backup_path: 'orders-db-eu/logical/20260316_020012', size_bytes: 2_900_000_000, started_at: ago(3600), completed_at: ago(3200), pg_version: '17.2' },
 
   // staging-db — logical only
-  { id: uuid(), cluster_id: CLUSTER_IDS.stagingAp, backup_profile_id: BACKUP_IDS.localDev, type: 'logical', status: 'completed', backup_path: 'staging-db/logical/20260315_030008', size_bytes: 950_000_000, started_at: ago(46800), completed_at: ago(46500), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.stagingAp, backup_profile_id: BACKUP_IDS.localDev, type: 'logical', status: 'completed', backup_path: 'staging-db/logical/20260314_030012', size_bytes: 940_000_000, started_at: ago(86400 + 46800), completed_at: ago(86400 + 46500), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.stagingAp, backup_profile_id: BACKUP_IDS.localDev, type: 'logical', status: 'completed', backup_path: 'staging-db/logical/20260313_030010', size_bytes: 935_000_000, started_at: ago(86400 * 2 + 46800), completed_at: ago(86400 * 2 + 46500), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.stagingAp, type: 'logical', status: 'completed', backup_path: 'staging-db/logical/20260315_030008', size_bytes: 950_000_000, started_at: ago(46800), completed_at: ago(46500), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.stagingAp, type: 'logical', status: 'completed', backup_path: 'staging-db/logical/20260314_030012', size_bytes: 940_000_000, started_at: ago(86400 + 46800), completed_at: ago(86400 + 46500), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.stagingAp, type: 'logical', status: 'completed', backup_path: 'staging-db/logical/20260313_030010', size_bytes: 935_000_000, started_at: ago(86400 * 2 + 46800), completed_at: ago(86400 * 2 + 46500), pg_version: '17.2' },
 
   // payments-db (us-east)
-  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'base', status: 'completed', backup_path: 'payments-db/base/20260315_040020', size_bytes: 5_600_000_000, started_at: ago(43200), completed_at: ago(43050), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'payments-db/incremental/20260315_100008', size_bytes: 45_000_000, started_at: ago(18000), completed_at: ago(17980), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'failed', backup_path: 'payments-db/incremental/20260315_110004', size_bytes: 0, started_at: ago(14400), completed_at: ago(14350), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'payments-db/incremental/20260315_120006', size_bytes: 52_000_000, started_at: ago(10800), completed_at: ago(10770), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, type: 'base', status: 'completed', backup_path: 'payments-db/base/20260315_040020', size_bytes: 5_600_000_000, started_at: ago(43200), completed_at: ago(43050), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, type: 'incremental', status: 'completed', backup_path: 'payments-db/incremental/20260315_100008', size_bytes: 45_000_000, started_at: ago(18000), completed_at: ago(17980), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, type: 'incremental', status: 'failed', backup_path: 'payments-db/incremental/20260315_110004', size_bytes: 0, started_at: ago(14400), completed_at: ago(14350), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.paymentsUs, type: 'incremental', status: 'completed', backup_path: 'payments-db/incremental/20260315_120006', size_bytes: 52_000_000, started_at: ago(10800), completed_at: ago(10770), pg_version: '17.2' },
 
   // inventory-db (us-east)
-  { id: uuid(), cluster_id: CLUSTER_IDS.inventoryUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'base', status: 'completed', backup_path: 'inventory-db/base/20260315_040025', size_bytes: 11_200_000_000, started_at: ago(43200), completed_at: ago(42880), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.inventoryUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'logical', status: 'completed', backup_path: 'inventory-db/logical/20260316_020020', size_bytes: 4_100_000_000, started_at: ago(3600), completed_at: ago(3050), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.inventoryUs, type: 'base', status: 'completed', backup_path: 'inventory-db/base/20260315_040025', size_bytes: 11_200_000_000, started_at: ago(43200), completed_at: ago(42880), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.inventoryUs, type: 'logical', status: 'completed', backup_path: 'inventory-db/logical/20260316_020020', size_bytes: 4_100_000_000, started_at: ago(3600), completed_at: ago(3050), pg_version: '17.2' },
 
   // sessions-db (us-east)
-  { id: uuid(), cluster_id: CLUSTER_IDS.sessionsUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'base', status: 'completed', backup_path: 'sessions-db/base/20260315_040030', size_bytes: 7_800_000_000, started_at: ago(43200), completed_at: ago(42950), pg_version: '17.2' },
-  { id: uuid(), cluster_id: CLUSTER_IDS.sessionsUs, backup_profile_id: BACKUP_IDS.s3Prod, type: 'incremental', status: 'completed', backup_path: 'sessions-db/incremental/20260315_100015', size_bytes: 220_000_000, started_at: ago(18000), completed_at: ago(17920), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.sessionsUs, type: 'base', status: 'completed', backup_path: 'sessions-db/base/20260315_040030', size_bytes: 7_800_000_000, started_at: ago(43200), completed_at: ago(42950), pg_version: '17.2' },
+  { id: uuid(), cluster_id: CLUSTER_IDS.sessionsUs, type: 'incremental', status: 'completed', backup_path: 'sessions-db/incremental/20260315_100015', size_bytes: 220_000_000, started_at: ago(18000), completed_at: ago(17920), pg_version: '17.2' },
 ];
 
 // --- Restores -------------------------------------------------------------

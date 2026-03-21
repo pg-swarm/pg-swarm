@@ -1270,174 +1270,105 @@ func (s *PostgresStore) ListEventsByCluster(ctx context.Context, satelliteID uui
 	return result, rows.Err()
 }
 
-// ---------- Backup Profiles ----------
+// ---------- Backup Stores ----------
 
-const backupProfileCols = `id, name, description, config, created_at, updated_at`
+const backupStoreCols = `id, name, description, store_type, config, credentials, created_at, updated_at`
 
-func scanBackupProfile(row pgx.Row) (*models.BackupProfile, error) {
-	var r models.BackupProfile
-	err := row.Scan(&r.ID, &r.Name, &r.Description, &r.Config, &r.CreatedAt, &r.UpdatedAt)
+func scanBackupStore(row pgx.Row) (*models.BackupStore, error) {
+	var s models.BackupStore
+	err := row.Scan(&s.ID, &s.Name, &s.Description, &s.StoreType, &s.Config, &s.Credentials, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
-	if r.Config == nil {
-		r.Config = json.RawMessage("{}")
+	if s.Config == nil {
+		s.Config = json.RawMessage("{}")
 	}
-	return &r, nil
+	return &s, nil
 }
 
-// CreateBackupProfile inserts a new backup profile.
-func (s *PostgresStore) CreateBackupProfile(ctx context.Context, rule *models.BackupProfile) error {
-	if rule.ID == uuid.Nil {
-		rule.ID = uuid.New()
+// CreateBackupStore inserts a new backup store.
+func (s *PostgresStore) CreateBackupStore(ctx context.Context, store *models.BackupStore) error {
+	if store.ID == uuid.Nil {
+		store.ID = uuid.New()
 	}
-	if rule.Config == nil {
-		rule.Config = json.RawMessage("{}")
+	if store.Config == nil {
+		store.Config = json.RawMessage("{}")
 	}
 	now := time.Now()
-	rule.CreatedAt = now
-	rule.UpdatedAt = now
+	store.CreatedAt = now
+	store.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO backup_profiles (id, name, description, config, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		rule.ID, rule.Name, rule.Description, rule.Config, rule.CreatedAt, rule.UpdatedAt,
+		`INSERT INTO backup_stores (id, name, description, store_type, config, credentials, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		store.ID, store.Name, store.Description, store.StoreType, store.Config, store.Credentials, store.CreatedAt, store.UpdatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("create backup profile: %w", err)
+		return fmt.Errorf("create backup store: %w", err)
 	}
 	return nil
 }
 
-// GetBackupProfile returns a backup profile by its ID.
-func (s *PostgresStore) GetBackupProfile(ctx context.Context, id uuid.UUID) (*models.BackupProfile, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+backupProfileCols+` FROM backup_profiles WHERE id = $1`, id)
-	r, err := scanBackupProfile(row)
+// GetBackupStore returns a backup store by its ID.
+func (s *PostgresStore) GetBackupStore(ctx context.Context, id uuid.UUID) (*models.BackupStore, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+backupStoreCols+` FROM backup_stores WHERE id = $1`, id)
+	store, err := scanBackupStore(row)
 	if err != nil {
-		return nil, fmt.Errorf("get backup profile %s: %w", id, err)
+		return nil, fmt.Errorf("get backup store %s: %w", id, err)
 	}
-	return r, nil
+	return store, nil
 }
 
-// ListBackupProfiles returns all backup profiles ordered by creation time.
-func (s *PostgresStore) ListBackupProfiles(ctx context.Context) ([]*models.BackupProfile, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+backupProfileCols+` FROM backup_profiles ORDER BY created_at DESC`)
+// ListBackupStores returns all backup stores ordered by creation time.
+func (s *PostgresStore) ListBackupStores(ctx context.Context) ([]*models.BackupStore, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+backupStoreCols+` FROM backup_stores ORDER BY created_at DESC`)
 	if err != nil {
-		return nil, fmt.Errorf("list backup profiles: %w", err)
+		return nil, fmt.Errorf("list backup stores: %w", err)
 	}
 	defer rows.Close()
 
-	var result []*models.BackupProfile
+	var result []*models.BackupStore
 	for rows.Next() {
-		r, err := scanBackupProfile(rows)
+		store, err := scanBackupStore(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan backup profile row: %w", err)
+			return nil, fmt.Errorf("scan backup store row: %w", err)
 		}
-		result = append(result, r)
+		result = append(result, store)
 	}
 	return result, rows.Err()
 }
 
-// UpdateBackupProfile updates a backup profile.
-func (s *PostgresStore) UpdateBackupProfile(ctx context.Context, rule *models.BackupProfile) error {
-	if rule.Config == nil {
-		rule.Config = json.RawMessage("{}")
+// UpdateBackupStore updates a backup store.
+func (s *PostgresStore) UpdateBackupStore(ctx context.Context, store *models.BackupStore) error {
+	if store.Config == nil {
+		store.Config = json.RawMessage("{}")
 	}
-	rule.UpdatedAt = time.Now()
+	store.UpdatedAt = time.Now()
 
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE backup_profiles SET name = $1, description = $2, config = $3, updated_at = $4
-		 WHERE id = $5`,
-		rule.Name, rule.Description, rule.Config, rule.UpdatedAt, rule.ID,
+		`UPDATE backup_stores SET name = $1, description = $2, store_type = $3, config = $4, credentials = $5, updated_at = $6
+		 WHERE id = $7`,
+		store.Name, store.Description, store.StoreType, store.Config, store.Credentials, store.UpdatedAt, store.ID,
 	)
 	if err != nil {
-		return fmt.Errorf("update backup profile: %w", err)
+		return fmt.Errorf("update backup store: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("backup profile %s not found", rule.ID)
+		return fmt.Errorf("backup store %s not found", store.ID)
 	}
 	return nil
 }
 
-// DeleteBackupProfile removes a backup profile by its ID.
-func (s *PostgresStore) DeleteBackupProfile(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM backup_profiles WHERE id = $1`, id)
+// DeleteBackupStore removes a backup store by its ID.
+func (s *PostgresStore) DeleteBackupStore(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM backup_stores WHERE id = $1`, id)
 	if err != nil {
-		return fmt.Errorf("delete backup profile: %w", err)
+		return fmt.Errorf("delete backup store: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("backup profile %s not found", id)
+		return fmt.Errorf("backup store %s not found", id)
 	}
 	return nil
-}
-
-// AttachBackupProfileToProfile links a backup profile to a profile via the join table.
-func (s *PostgresStore) AttachBackupProfileToProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO profile_backup_profiles (profile_id, backup_profile_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-		profileID, backupProfileID,
-	)
-	if err != nil {
-		return fmt.Errorf("attach backup profile to profile: %w", err)
-	}
-	return nil
-}
-
-// DetachBackupProfileFromProfile removes a backup profile from a profile.
-func (s *PostgresStore) DetachBackupProfileFromProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM profile_backup_profiles WHERE profile_id = $1 AND backup_profile_id = $2`,
-		profileID, backupProfileID,
-	)
-	if err != nil {
-		return fmt.Errorf("detach backup profile from profile: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("backup profile %s not attached to profile %s", backupProfileID, profileID)
-	}
-	return nil
-}
-
-// ListBackupProfilesForProfile returns all backup profiles attached to a profile.
-func (s *PostgresStore) ListBackupProfilesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupProfile, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT `+backupProfileCols+` FROM backup_profiles
-		 WHERE id IN (SELECT backup_profile_id FROM profile_backup_profiles WHERE profile_id = $1)
-		 ORDER BY created_at DESC`, profileID)
-	if err != nil {
-		return nil, fmt.Errorf("list backup profiles for profile: %w", err)
-	}
-	defer rows.Close()
-
-	var result []*models.BackupProfile
-	for rows.Next() {
-		r, err := scanBackupProfile(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan backup profile row: %w", err)
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
-// ListProfileIDsForBackupProfile returns all profile IDs that have the given backup profile attached.
-func (s *PostgresStore) ListProfileIDsForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT profile_id FROM profile_backup_profiles WHERE backup_profile_id = $1`, backupProfileID)
-	if err != nil {
-		return nil, fmt.Errorf("list profiles for backup profile: %w", err)
-	}
-	defer rows.Close()
-
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan profile id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
 // ---------- Backup Inventory ----------

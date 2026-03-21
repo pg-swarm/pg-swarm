@@ -6,7 +6,7 @@ const DataContext = createContext(null);
 const EMPTY = {
   satellites: [], clusters: [], health: [], events: [], profiles: [],
   deploymentRules: [], postgresVersions: [], postgresVariants: [],
-  backupProfiles: [], storageTiers: [], recoveryRuleSets: [],
+  backupStores: [], storageTiers: [], recoveryRuleSets: [],
 };
 
 function wsUrl() {
@@ -26,8 +26,8 @@ export function DataProvider({ children }) {
   const refresh = useCallback(async () => {
     try {
       const safe = (p) => p.catch(() => null);
-      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupProfiles, storageTiers, recoveryRuleSets] = await Promise.all([
-        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.backupProfiles()), safe(api.storageTiers()), safe(api.recoveryRuleSets()),
+      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, backupStores, storageTiers, recoveryRuleSets] = await Promise.all([
+        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.backupStores()), safe(api.storageTiers()), safe(api.recoveryRuleSets()),
       ]);
       setData({
         satellites:        satellites || [],
@@ -38,7 +38,7 @@ export function DataProvider({ children }) {
         deploymentRules:   deploymentRules || [],
         postgresVersions:  postgresVersions || [],
         postgresVariants:  postgresVariants || [],
-        backupProfiles:    backupProfiles || [],
+        backupStores:    backupStores || [],
         storageTiers:      storageTiers || [],
         recoveryRuleSets:  recoveryRuleSets || [],
       });
@@ -74,7 +74,7 @@ export function DataProvider({ children }) {
       deploymentRules:   state.deploymentRules || [],
       postgresVersions:  state.postgresVersions || [],
       postgresVariants:  state.postgresVariants || [],
-      backupProfiles:    state.backupProfiles || [],
+      backupStores:    state.backupStores || [],
       storageTiers:      state.storageTiers || [],
       recoveryRuleSets:  state.recoveryRuleSets || [],
     });
