@@ -3,7 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,6 +97,7 @@ type ClusterSpec struct {
 	Databases          []DatabaseSpec    `json:"databases,omitempty"`           // databases to create with owner users
 	Failover           *FailoverSpec     `json:"failover,omitempty"`            // nil = failover disabled
 	DeletionProtection bool              `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
+	Backup             *BackupSpec       `json:"backup,omitempty"`              // nil = no backup configured
 }
 
 type PostgresSpec struct {
@@ -140,6 +141,37 @@ type FailoverSpec struct {
 	Enabled                    bool   `json:"enabled"`
 	HealthCheckIntervalSeconds int32  `json:"health_check_interval_seconds,omitempty"`
 	SidecarImage               string `json:"sidecar_image,omitempty"`
+}
+
+type BackupSpec struct {
+	StoreID  *uuid.UUID            `json:"store_id,omitempty"` // references a BackupStore
+	Physical *PhysicalBackupConfig `json:"physical,omitempty"`
+	Logical  *LogicalBackupConfig  `json:"logical,omitempty"`
+}
+
+type PhysicalBackupConfig struct {
+	BaseSchedule        string            `json:"base_schedule"`
+	IncrementalSchedule string            `json:"incremental_schedule,omitempty"`
+	WalArchiveEnabled   bool              `json:"wal_archive_enabled"`
+	ArchiveTimeoutSecs  int32             `json:"archive_timeout_seconds,omitempty"`
+	Retention           PhysicalRetention `json:"retention"`
+}
+
+type PhysicalRetention struct {
+	BaseBackupCount        int `json:"base_backup_count,omitempty"`
+	IncrementalBackupCount int `json:"incremental_backup_count,omitempty"`
+	WalRetentionDays       int `json:"wal_retention_days,omitempty"`
+}
+
+type LogicalBackupConfig struct {
+	Schedule  string           `json:"schedule"`
+	Databases []string         `json:"databases,omitempty"`
+	Format    string           `json:"format,omitempty"`
+	Retention LogicalRetention `json:"retention"`
+}
+
+type LogicalRetention struct {
+	BackupCount int `json:"backup_count,omitempty"`
 }
 
 type DatabaseSpec struct {
@@ -187,6 +219,60 @@ func ValidateDatabases(dbs []DatabaseSpec) error {
 			return fmt.Errorf("databases[%d]: duplicate database name %q", i, db.Name)
 		}
 		seen[db.Name] = true
+	}
+	return nil
+}
+
+// cronRe is a basic structural check for 5-field cron expressions.
+var cronRe = regexp.MustCompile(`^(\S+\s+){4}\S+$`)
+
+// ValidateBackupSpec validates the backup configuration.
+// nil is valid (no backup configured).
+func ValidateBackupSpec(b *BackupSpec) error {
+	if b == nil {
+		return nil
+	}
+	if (b.Physical != nil || b.Logical != nil) && b.StoreID == nil {
+		return fmt.Errorf("backup: store_id is required when physical or logical backups are configured")
+	}
+	if b.Physical != nil {
+		p := b.Physical
+		if p.BaseSchedule == "" {
+			return fmt.Errorf("backup.physical: base_schedule is required")
+		}
+		if !cronRe.MatchString(p.BaseSchedule) {
+			return fmt.Errorf("backup.physical: base_schedule must be a 5-field cron expression")
+		}
+		if p.IncrementalSchedule != "" && !cronRe.MatchString(p.IncrementalSchedule) {
+			return fmt.Errorf("backup.physical: incremental_schedule must be a 5-field cron expression")
+		}
+		if p.ArchiveTimeoutSecs < 0 {
+			return fmt.Errorf("backup.physical: archive_timeout_seconds must be >= 0")
+		}
+		if p.Retention.BaseBackupCount < 1 {
+			return fmt.Errorf("backup.physical: retention.base_backup_count must be >= 1")
+		}
+		if p.WalArchiveEnabled && p.Retention.WalRetentionDays < 1 {
+			return fmt.Errorf("backup.physical: retention.wal_retention_days must be >= 1 when WAL archiving is enabled")
+		}
+	}
+	if b.Logical != nil {
+		l := b.Logical
+		if l.Schedule == "" {
+			return fmt.Errorf("backup.logical: schedule is required")
+		}
+		if !cronRe.MatchString(l.Schedule) {
+			return fmt.Errorf("backup.logical: schedule must be a 5-field cron expression")
+		}
+		switch l.Format {
+		case "", "custom", "plain", "directory":
+			// valid
+		default:
+			return fmt.Errorf("backup.logical: format must be \"custom\", \"plain\", or \"directory\"")
+		}
+		if l.Retention.BackupCount < 1 {
+			return fmt.Errorf("backup.logical: retention.backup_count must be >= 1")
+		}
 	}
 	return nil
 }
@@ -267,191 +353,143 @@ type Event struct {
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
 
-// ---------- Backup ----------
+// ---------- Backup Stores ----------
 
-type BackupProfile struct {
-	ID          uuid.UUID       `json:"id" db:"id"`
-	Name        string          `json:"name" db:"name"`
-	Description string          `json:"description" db:"description"`
-	Config      json.RawMessage `json:"config" db:"config"` // BackupProfileSpec JSON
-	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+type BackupStore struct {
+	ID             uuid.UUID       `json:"id"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	StoreType      string          `json:"store_type"`
+	Config         json.RawMessage `json:"config"`
+	Credentials    []byte          `json:"-"`                         // never serialized to API
+	CredentialsSet map[string]bool `json:"credentials_set,omitempty"` // computed on read
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
-// ParseBackupProfileSpec deserializes the Config JSON into a BackupProfileSpec.
-func (r *BackupProfile) ParseBackupProfileSpec() (*BackupProfileSpec, error) {
-	var spec BackupProfileSpec
-	if err := json.Unmarshal(r.Config, &spec); err != nil {
-		return nil, err
-	}
-	return &spec, nil
+// Non-secret config (stored as plaintext JSONB)
+type S3StoreConfig struct {
+	Bucket         string `json:"bucket"`
+	Region         string `json:"region"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	ForcePathStyle bool   `json:"force_path_style,omitempty"`
 }
-
-type BackupProfileSpec struct {
-	Physical    *PhysicalBackupSpec `json:"physical,omitempty"`
-	Logical     *LogicalBackupSpec  `json:"logical,omitempty"`
-	Destination DestinationSpec     `json:"destination"`
-	Retention   RetentionSpec       `json:"retention"`
-	BackupImage string              `json:"backup_image,omitempty"` // default: ghcr.io/pg-swarm/pg-swarm-backup:latest
+type GCSStoreConfig struct {
+	Bucket     string `json:"bucket"`
+	PathPrefix string `json:"path_prefix,omitempty"`
 }
-
-type PhysicalBackupSpec struct {
-	BaseSchedule        string `json:"base_schedule"`                     // cron for full backups: "0 2 * * 0"
-	IncrementalSchedule string `json:"incremental_schedule,omitempty"`    // cron for incrementals: "0 2 * * 1-6" (PG 17+)
-	WalArchiveEnabled   bool   `json:"wal_archive_enabled"`               // enable continuous WAL archiving
-	ArchiveTimeoutSecs  int32  `json:"archive_timeout_seconds,omitempty"` // default 60
+type SFTPStoreConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port,omitempty"`
+	User     string `json:"user"`
+	BasePath string `json:"base_path"`
 }
-
-type LogicalBackupSpec struct {
-	Schedule  string   `json:"schedule"`            // cron: "0 2 * * *"
-	Databases []string `json:"databases,omitempty"` // empty = pg_dumpall
-	Format    string   `json:"format,omitempty"`    // "custom" (default), "plain", "directory"
-}
-
-type DestinationSpec struct {
-	Type  string       `json:"type"` // "gcs", "s3", "sftp", "local"
-	GCS   *GCSConfig   `json:"gcs,omitempty"`
-	S3    *S3Config    `json:"s3,omitempty"`
-	SFTP  *SFTPConfig  `json:"sftp,omitempty"`
-	Local *LocalConfig `json:"local,omitempty"`
-}
-
-type GCSConfig struct {
-	Bucket             string `json:"bucket"`
-	PathPrefix         string `json:"path_prefix,omitempty"`
-	ServiceAccountJSON string `json:"service_account_json,omitempty"`
-}
-
-type S3Config struct {
-	Bucket          string `json:"bucket"`
-	Region          string `json:"region"`
-	Endpoint        string `json:"endpoint,omitempty"` // for S3-compatible (MinIO)
-	PathPrefix      string `json:"path_prefix,omitempty"`
-	AccessKeyID     string `json:"access_key_id,omitempty"`
-	SecretAccessKey string `json:"secret_access_key,omitempty"`
-	ForcePathStyle  bool   `json:"force_path_style,omitempty"`
-}
-
-type SFTPConfig struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port,omitempty"` // default 22
-	User       string `json:"user"`
-	Password   string `json:"password,omitempty"`
-	PrivateKey string `json:"private_key,omitempty"`
-	BasePath   string `json:"base_path"`
-}
-
-type LocalConfig struct {
+type LocalStoreConfig struct {
 	Size         string `json:"size"`
 	StorageClass string `json:"storage_class,omitempty"`
 }
 
-type RetentionSpec struct {
-	BaseBackupCount        int `json:"base_backup_count,omitempty"`        // default 7
-	IncrementalBackupCount int `json:"incremental_backup_count,omitempty"` // default 6 (per full cycle)
-	WalRetentionDays       int `json:"wal_retention_days,omitempty"`       // default 14
-	LogicalBackupCount     int `json:"logical_backup_count,omitempty"`     // default 30
+// Secret credentials (stored encrypted as BYTEA)
+type S3StoreCredentials struct {
+	AccessKeyID    string `json:"access_key_id,omitempty"`
+	SecretAccessKey string `json:"secret_access_key,omitempty"`
+}
+type GCSStoreCredentials struct {
+	ServiceAccountJSON string `json:"service_account_json,omitempty"`
+}
+type SFTPStoreCredentials struct {
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"private_key,omitempty"`
 }
 
-// ValidateBackupProfileSpec validates the backup profile configuration.
-func ValidateBackupProfileSpec(spec *BackupProfileSpec) error {
-	if spec.Physical == nil && spec.Logical == nil {
-		return fmt.Errorf("backup profile must define either physical or logical backup")
+// ValidateBackupStore validates a backup store's required fields.
+func ValidateBackupStore(store *BackupStore) error {
+	if store.Name == "" {
+		return fmt.Errorf("name is required")
 	}
-	if spec.Physical != nil {
-		if spec.Physical.BaseSchedule == "" {
-			return fmt.Errorf("physical backup requires base_schedule")
-		}
-		// Validate WAL retention covers the base backup span
-		if spec.Physical.WalArchiveEnabled {
-			walDays := spec.Retention.WalRetentionDays
-			if walDays <= 0 {
-				walDays = 14
-			}
-			baseCount := spec.Retention.BaseBackupCount
-			if baseCount <= 0 {
-				baseCount = 7
-			}
-			if minDays := estimateCronIntervalDays(spec.Physical.BaseSchedule) * baseCount; minDays > 0 && walDays < minDays {
-				return fmt.Errorf("wal_retention_days (%d) is too short to cover %d base backups at schedule %q (need at least %d days for PITR)",
-					walDays, baseCount, spec.Physical.BaseSchedule, minDays)
-			}
-		}
-	}
-	if spec.Logical != nil {
-		if spec.Logical.Schedule == "" {
-			return fmt.Errorf("logical backup requires schedule")
-		}
-		if spec.Logical.Format != "" {
-			switch spec.Logical.Format {
-			case "custom", "plain", "directory":
-			default:
-				return fmt.Errorf("logical backup format must be \"custom\", \"plain\", or \"directory\"")
-			}
-		}
-	}
-	switch spec.Destination.Type {
+	switch store.StoreType {
 	case "s3":
-		if spec.Destination.S3 == nil || spec.Destination.S3.Bucket == "" {
-			return fmt.Errorf("s3 destination requires bucket")
+		var cfg S3StoreConfig
+		if err := json.Unmarshal(store.Config, &cfg); err != nil {
+			return fmt.Errorf("invalid s3 config: %w", err)
+		}
+		if cfg.Bucket == "" {
+			return fmt.Errorf("s3 store requires bucket")
 		}
 	case "gcs":
-		if spec.Destination.GCS == nil || spec.Destination.GCS.Bucket == "" {
-			return fmt.Errorf("gcs destination requires bucket")
+		var cfg GCSStoreConfig
+		if err := json.Unmarshal(store.Config, &cfg); err != nil {
+			return fmt.Errorf("invalid gcs config: %w", err)
+		}
+		if cfg.Bucket == "" {
+			return fmt.Errorf("gcs store requires bucket")
 		}
 	case "sftp":
-		if spec.Destination.SFTP == nil || spec.Destination.SFTP.Host == "" || spec.Destination.SFTP.BasePath == "" {
-			return fmt.Errorf("sftp destination requires host and base_path")
+		var cfg SFTPStoreConfig
+		if err := json.Unmarshal(store.Config, &cfg); err != nil {
+			return fmt.Errorf("invalid sftp config: %w", err)
+		}
+		if cfg.Host == "" || cfg.BasePath == "" {
+			return fmt.Errorf("sftp store requires host and base_path")
 		}
 	case "local":
-		if spec.Destination.Local == nil || spec.Destination.Local.Size == "" {
-			return fmt.Errorf("local destination requires size")
+		var cfg LocalStoreConfig
+		if err := json.Unmarshal(store.Config, &cfg); err != nil {
+			return fmt.Errorf("invalid local config: %w", err)
+		}
+		if cfg.Size == "" {
+			return fmt.Errorf("local store requires size")
 		}
 	default:
-		return fmt.Errorf("destination type must be \"s3\", \"gcs\", \"sftp\", or \"local\"")
+		return fmt.Errorf("store_type must be \"s3\", \"gcs\", \"sftp\", or \"local\"")
 	}
 	return nil
 }
 
-// estimateCronIntervalDays returns the approximate interval in days for a cron schedule.
-// Returns 0 if the schedule can't be parsed.
-func estimateCronIntervalDays(cron string) int {
-	parts := strings.Fields(cron)
-	if len(parts) < 5 {
-		return 0
+// ComputeCredentialsSet unmarshals decrypted credential JSON and returns which fields are non-empty.
+func ComputeCredentialsSet(storeType string, creds []byte) map[string]bool {
+	if len(creds) == 0 {
+		return nil
 	}
-	dayOfMonth, month, dayOfWeek := parts[2], parts[3], parts[4]
-
-	// Weekly: "* * 0" or "* * 1,4"
-	if dayOfMonth == "*" && month == "*" && dayOfWeek != "*" {
-		days := strings.Count(dayOfWeek, ",") + 1
-		return 7 / days
+	result := make(map[string]bool)
+	switch storeType {
+	case "s3":
+		var c S3StoreCredentials
+		if json.Unmarshal(creds, &c) == nil {
+			result["access_key_id"] = c.AccessKeyID != ""
+			result["secret_access_key"] = c.SecretAccessKey != ""
+		}
+	case "gcs":
+		var c GCSStoreCredentials
+		if json.Unmarshal(creds, &c) == nil {
+			result["service_account_json"] = c.ServiceAccountJSON != ""
+		}
+	case "sftp":
+		var c SFTPStoreCredentials
+		if json.Unmarshal(creds, &c) == nil {
+			result["password"] = c.Password != ""
+			result["private_key"] = c.PrivateKey != ""
+		}
+	case "local":
+		return nil
 	}
-	// Daily: "* * *"
-	if dayOfMonth == "*" && month == "*" && dayOfWeek == "*" {
-		return 1
-	}
-	// Monthly: "1 * *"
-	if dayOfMonth != "*" && month == "*" && dayOfWeek == "*" {
-		dates := strings.Count(dayOfMonth, ",") + 1
-		return 30 / dates
-	}
-	// Every N days: "*/N * *"
-	if strings.HasPrefix(dayOfMonth, "*/") {
-		n := 0
-		fmt.Sscanf(dayOfMonth[2:], "%d", &n)
-		if n > 0 {
-			return n
+	// Remove entries where value is false
+	for k, v := range result {
+		if !v {
+			delete(result, k)
 		}
 	}
-	return 0
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 type BackupInventory struct {
 	ID              uuid.UUID  `json:"id" db:"id"`
 	SatelliteID     uuid.UUID  `json:"satellite_id" db:"satellite_id"`
 	ClusterName     string     `json:"cluster_name" db:"cluster_name"`
-	BackupProfileID uuid.UUID  `json:"backup_profile_id" db:"backup_profile_id"`
+	BackupProfileID *uuid.UUID `json:"backup_profile_id,omitempty" db:"backup_profile_id"`
 	BackupType      string     `json:"backup_type" db:"backup_type"` // "base", "wal", "logical"
 	Status          string     `json:"status" db:"status"`           // "running", "completed", "failed"
 	StartedAt       time.Time  `json:"started_at" db:"started_at"`
