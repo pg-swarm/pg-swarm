@@ -167,8 +167,11 @@ func (h *WSHub) fetchState() map[string]interface{} {
 	if v, err := s.ListPostgresVariants(ctx); err == nil {
 		state["postgresVariants"] = v
 	}
-	if v, err := s.ListBackupProfiles(ctx); err == nil {
-		state["backupProfiles"] = v
+	if v, err := s.ListBackupStores(ctx); err == nil {
+		for _, st := range v {
+			h.server.computeStoreCredentialsSet(st)
+		}
+		state["backupStores"] = v
 	}
 	if v, err := s.ListStorageTiers(ctx); err == nil {
 		state["storageTiers"] = v

@@ -227,7 +227,7 @@ function NodeTable({ instances, storageBytes }) {
 /* ── Clusters page ───────────────────────────────────── */
 
 export default function Clusters() {
-  const { clusters, satellites, health, deploymentRules, backupProfiles, profiles, refresh } = useData();
+  const { clusters, satellites, health, deploymentRules, profiles, refresh } = useData();
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState('');
 
@@ -265,12 +265,8 @@ export default function Clusters() {
     return rule?.label_selector || {};
   }
 
-  function hasBackup(c) {
-    if (!c.deployment_rule_id) return false;
-    const rule = deploymentRules.find(r => r.id === c.deployment_rule_id);
-    if (!rule) return false;
-    // If there are backup profiles and the profile matches, assume backup is configured
-    return backupProfiles && backupProfiles.length > 0;
+  function hasBackup() {
+    return false; // backup store integration pending
   }
 
   const term = search.toLowerCase().trim();

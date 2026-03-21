@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/pg-swarm/pg-swarm/internal/central/crypto"
 	"github.com/pg-swarm/pg-swarm/internal/central/registry"
 	"github.com/pg-swarm/pg-swarm/internal/central/server"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
@@ -44,8 +45,17 @@ func main() {
 	pgStore := store.NewPostgresStore(pool)
 	reg := registry.New(pgStore)
 	opsTracker := server.NewOpsTracker()
+
+	var enc *crypto.Encryptor
+	if encryptionKey := os.Getenv("ENCRYPTION_KEY"); encryptionKey != "" {
+		enc, err = crypto.NewEncryptor(encryptionKey)
+		if err != nil {
+			log.Fatal().Err(err).Msg("invalid ENCRYPTION_KEY")
+		}
+	}
+
 	grpcServer := server.NewGRPCServer(reg, pgStore)
-	restServer := server.NewRESTServer(pgStore, reg, grpcServer.GetStreams(), grpcServer.GetLogBuffer(), opsTracker)
+	restServer := server.NewRESTServer(pgStore, reg, grpcServer.GetStreams(), grpcServer.GetLogBuffer(), opsTracker, enc)
 	grpcServer.SetWSHub(restServer.GetWSHub())
 	grpcServer.SetOpsTracker(opsTracker)
 

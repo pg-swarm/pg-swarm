@@ -8,7 +8,6 @@ import ClusterDetail from './pages/ClusterDetail';
 import Events from './pages/Events';
 import Profiles from './pages/Profiles';
 import DeploymentRules from './pages/DeploymentRules';
-import BackupProfiles from './pages/BackupProfiles';
 import Admin from './pages/Admin';
 
 export default function App() {
@@ -24,7 +23,6 @@ export default function App() {
         <Route path="/clusters" element={<Clusters />} />
         <Route path="/profiles" element={<Profiles />} />
         <Route path="/deployment-rules" element={<DeploymentRules />} />
-        <Route path="/backup-profiles" element={<BackupProfiles />} />
         <Route path="/events" element={<Events />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="*" element={<Navigate to="/" replace />} />

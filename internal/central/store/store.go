@@ -76,16 +76,12 @@ type Store interface {
 	CreatePostgresVariant(ctx context.Context, v *models.PostgresVariant) error
 	DeletePostgresVariant(ctx context.Context, id uuid.UUID) error
 
-	// Backup Profiles
-	CreateBackupProfile(ctx context.Context, rule *models.BackupProfile) error
-	GetBackupProfile(ctx context.Context, id uuid.UUID) (*models.BackupProfile, error)
-	ListBackupProfiles(ctx context.Context) ([]*models.BackupProfile, error)
-	UpdateBackupProfile(ctx context.Context, rule *models.BackupProfile) error
-	DeleteBackupProfile(ctx context.Context, id uuid.UUID) error
-	AttachBackupProfileToProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
-	DetachBackupProfileFromProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
-	ListBackupProfilesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupProfile, error)
-	ListProfileIDsForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) ([]uuid.UUID, error)
+	// Backup Stores
+	CreateBackupStore(ctx context.Context, store *models.BackupStore) error
+	GetBackupStore(ctx context.Context, id uuid.UUID) (*models.BackupStore, error)
+	ListBackupStores(ctx context.Context) ([]*models.BackupStore, error)
+	UpdateBackupStore(ctx context.Context, store *models.BackupStore) error
+	DeleteBackupStore(ctx context.Context, id uuid.UUID) error
 
 	// Backup Inventory
 	CreateBackupInventory(ctx context.Context, inv *models.BackupInventory) error

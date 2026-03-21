@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/google/uuid"
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
+	"github.com/pg-swarm/pg-swarm/internal/central/crypto"
 	"github.com/pg-swarm/pg-swarm/internal/central/registry"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
@@ -29,18 +30,20 @@ type RESTServer struct {
 	streams    *StreamManager
 	logBuffer  *LogBuffer
 	opsTracker *OpsTracker
+	encryptor  *crypto.Encryptor
 	app        *fiber.App
 	wsHub      *WSHub
 }
 
 // NewRESTServer creates a new RESTServer.
-func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager, lb *LogBuffer, ot *OpsTracker) *RESTServer {
+func NewRESTServer(s store.Store, reg *registry.Registry, sm *StreamManager, lb *LogBuffer, ot *OpsTracker, enc *crypto.Encryptor) *RESTServer {
 	srv := &RESTServer{
 		store:      s,
 		registry:   reg,
 		streams:    sm,
 		logBuffer:  lb,
 		opsTracker: ot,
+		encryptor:  enc,
 		app:        fiber.New(fiber.Config{ErrorHandler: fiberErrorHandler}),
 	}
 	srv.wsHub = newWSHub(srv)
@@ -159,15 +162,12 @@ func (s *RESTServer) setupRoutes() {
 	api.Get("/profiles/:id/cascade-preview", s.cascadePreview)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
 
-	// Backup Profiles
-	api.Get("/backup-profiles", s.listBackupProfiles)
-	api.Post("/backup-profiles", s.createBackupProfile)
-	api.Get("/backup-profiles/:id", s.getBackupProfile)
-	api.Put("/backup-profiles/:id", s.updateBackupProfile)
-	api.Delete("/backup-profiles/:id", s.deleteBackupProfile)
-	api.Post("/profiles/:id/attach-backup-profile", s.attachBackupProfile)
-	api.Post("/profiles/:id/detach-backup-profile", s.detachBackupProfile)
-	api.Get("/profiles/:id/backup-profiles", s.listProfileBackupProfiles)
+	// Backup Stores
+	api.Get("/backup-stores", s.listBackupStores)
+	api.Post("/backup-stores", s.createBackupStore)
+	api.Get("/backup-stores/:id", s.getBackupStore)
+	api.Put("/backup-stores/:id", s.updateBackupStore)
+	api.Delete("/backup-stores/:id", s.deleteBackupStore)
 
 	// Backup Inventory & Restore
 	api.Get("/clusters/:id/backups", s.listClusterBackups)
@@ -294,6 +294,9 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -348,6 +351,9 @@ func (s *RESTServer) updateClusterConfig(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
@@ -1243,6 +1249,9 @@ func (s *RESTServer) createProfile(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -1290,6 +1299,9 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
@@ -1711,21 +1723,6 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 		}
 	}
 
-	// Resolve backup profiles from profile
-	if cfg.ProfileID != nil {
-		if rules, err := st.ListBackupProfilesForProfile(context.Background(), *cfg.ProfileID); err == nil {
-			for _, rule := range rules {
-				ruleSpec, err := rule.ParseBackupProfileSpec()
-				if err != nil {
-					continue
-				}
-				bc := buildProtoBackupConfig(ruleSpec)
-				bc.BackupProfileId = rule.ID.String()
-				protoConfig.Backups = append(protoConfig.Backups, bc)
-			}
-		}
-	}
-
 	// Resolve recovery rules from profile's recovery_rule_set_id
 	if cfg.ProfileID != nil {
 		if p, err := st.GetProfile(context.Background(), *cfg.ProfileID); err == nil && p.RecoveryRuleSetID != nil {
@@ -1761,256 +1758,166 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig) (*pgswar
 	return protoConfig, nil
 }
 
-// buildProtoBackupConfig converts a BackupProfileSpec into a proto BackupConfig.
-func buildProtoBackupConfig(spec *models.BackupProfileSpec) *pgswarmv1.BackupConfig {
-	bc := &pgswarmv1.BackupConfig{
-		BackupImage: spec.BackupImage,
-	}
+// --- Backup Stores ---
 
-	if spec.Physical != nil {
-		bc.Physical = &pgswarmv1.PhysicalBackupConfig{
-			BaseSchedule:          spec.Physical.BaseSchedule,
-			IncrementalSchedule:   spec.Physical.IncrementalSchedule,
-			WalArchiveEnabled:     spec.Physical.WalArchiveEnabled,
-			ArchiveTimeoutSeconds: spec.Physical.ArchiveTimeoutSecs,
-		}
-	}
-
-	if spec.Logical != nil {
-		bc.Logical = &pgswarmv1.LogicalBackupConfig{
-			Schedule:  spec.Logical.Schedule,
-			Databases: spec.Logical.Databases,
-			Format:    spec.Logical.Format,
-		}
-	}
-
-	bc.Destination = &pgswarmv1.BackupDestination{
-		Type: spec.Destination.Type,
-	}
-	switch spec.Destination.Type {
-	case "s3":
-		if spec.Destination.S3 != nil {
-			bc.Destination.S3 = &pgswarmv1.S3Destination{
-				Bucket:          spec.Destination.S3.Bucket,
-				Region:          spec.Destination.S3.Region,
-				Endpoint:        spec.Destination.S3.Endpoint,
-				PathPrefix:      spec.Destination.S3.PathPrefix,
-				ForcePathStyle:  spec.Destination.S3.ForcePathStyle,
-				AccessKeyId:     spec.Destination.S3.AccessKeyID,
-				SecretAccessKey: spec.Destination.S3.SecretAccessKey,
-			}
-		}
-	case "gcs":
-		if spec.Destination.GCS != nil {
-			bc.Destination.Gcs = &pgswarmv1.GCSDestination{
-				Bucket:             spec.Destination.GCS.Bucket,
-				PathPrefix:         spec.Destination.GCS.PathPrefix,
-				ServiceAccountJson: spec.Destination.GCS.ServiceAccountJSON,
-			}
-		}
-	case "sftp":
-		if spec.Destination.SFTP != nil {
-			bc.Destination.Sftp = &pgswarmv1.SFTPDestination{
-				Host:     spec.Destination.SFTP.Host,
-				Port:     int32(spec.Destination.SFTP.Port),
-				User:     spec.Destination.SFTP.User,
-				BasePath: spec.Destination.SFTP.BasePath,
-				Password: spec.Destination.SFTP.Password,
-			}
-		}
-	case "local":
-		if spec.Destination.Local != nil {
-			bc.Destination.Local = &pgswarmv1.LocalDestination{
-				Size:         spec.Destination.Local.Size,
-				StorageClass: spec.Destination.Local.StorageClass,
-			}
-		}
-	}
-
-	bc.Retention = &pgswarmv1.BackupRetention{
-		BaseBackupCount:        int32(spec.Retention.BaseBackupCount),
-		IncrementalBackupCount: int32(spec.Retention.IncrementalBackupCount),
-		WalRetentionDays:       int32(spec.Retention.WalRetentionDays),
-		LogicalBackupCount:     int32(spec.Retention.LogicalBackupCount),
-	}
-
-	return bc
-}
-
-// --- Backup Profiles ---
-
-func (s *RESTServer) listBackupProfiles(c *fiber.Ctx) error {
-	rules, err := s.store.ListBackupProfiles(c.Context())
+func (s *RESTServer) listBackupStores(c *fiber.Ctx) error {
+	stores, err := s.store.ListBackupStores(c.Context())
 	if err != nil {
-		return fmt.Errorf("list backup profiles: %w", err)
+		return fmt.Errorf("list backup stores: %w", err)
 	}
-	if rules == nil {
-		rules = []*models.BackupProfile{}
+	if stores == nil {
+		stores = []*models.BackupStore{}
 	}
-	return c.JSON(rules)
+	for _, st := range stores {
+		s.computeStoreCredentialsSet(st)
+	}
+	return c.JSON(stores)
 }
 
-func (s *RESTServer) createBackupProfile(c *fiber.Ctx) error {
-	var rule models.BackupProfile
-	if err := c.BodyParser(&rule); err != nil {
+func (s *RESTServer) createBackupStore(c *fiber.Ctx) error {
+	var body struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		StoreType   string          `json:"store_type"`
+		Config      json.RawMessage `json:"config"`
+		Credentials json.RawMessage `json:"credentials"`
+	}
+	if err := c.BodyParser(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if rule.Name == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+
+	store := &models.BackupStore{
+		Name:      body.Name,
+		Description: body.Description,
+		StoreType: body.StoreType,
+		Config:    body.Config,
+	}
+	if store.Config == nil {
+		store.Config = json.RawMessage("{}")
 	}
 
-	// Validate the backup profile spec
-	spec, err := rule.ParseBackupProfileSpec()
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid config: "+err.Error())
-	}
-	if err := models.ValidateBackupProfileSpec(spec); err != nil {
+	if err := models.ValidateBackupStore(store); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
-	if err := s.store.CreateBackupProfile(c.Context(), &rule); err != nil {
-		return fmt.Errorf("create backup profile: %w", err)
+	// Validate required credentials per store type
+	if store.StoreType == "gcs" {
+		var creds models.GCSStoreCredentials
+		if len(body.Credentials) == 0 || json.Unmarshal(body.Credentials, &creds) != nil || creds.ServiceAccountJSON == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "gcs store requires service_account_json")
+		}
 	}
-	return c.Status(fiber.StatusCreated).JSON(rule)
+
+	// Encrypt credentials if provided
+	if len(body.Credentials) > 0 && string(body.Credentials) != "{}" && string(body.Credentials) != "null" {
+		if s.encryptor == nil {
+			return fiber.NewError(fiber.StatusBadRequest, "ENCRYPTION_KEY not configured; cannot store credentials")
+		}
+		encrypted, err := s.encryptor.Encrypt(body.Credentials)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to encrypt credentials")
+		}
+		store.Credentials = encrypted
+	}
+
+	if err := s.store.CreateBackupStore(c.Context(), store); err != nil {
+		return fmt.Errorf("create backup store: %w", err)
+	}
+
+	s.computeStoreCredentialsSet(store)
+	return c.Status(fiber.StatusCreated).JSON(store)
 }
 
-func (s *RESTServer) getBackupProfile(c *fiber.Ctx) error {
+func (s *RESTServer) getBackupStore(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
-	rule, err := s.store.GetBackupProfile(c.Context(), id)
+	store, err := s.store.GetBackupStore(c.Context(), id)
 	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup profile not found")
+		return fiber.NewError(fiber.StatusNotFound, "backup store not found")
 	}
-	return c.JSON(rule)
+	s.computeStoreCredentialsSet(store)
+	return c.JSON(store)
 }
 
-func (s *RESTServer) updateBackupProfile(c *fiber.Ctx) error {
+func (s *RESTServer) updateBackupStore(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
 
-	var rule models.BackupProfile
-	if err := c.BodyParser(&rule); err != nil {
+	existing, err := s.store.GetBackupStore(c.Context(), id)
+	if err != nil {
+		return fiber.NewError(fiber.StatusNotFound, "backup store not found")
+	}
+
+	var body struct {
+		Name        string           `json:"name"`
+		Description string           `json:"description"`
+		StoreType   string           `json:"store_type"`
+		Config      json.RawMessage  `json:"config"`
+		Credentials *json.RawMessage `json:"credentials"` // pointer: nil = keep existing
+	}
+	if err := c.BodyParser(&body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	rule.ID = id
 
-	if rule.Name == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+	existing.Name = body.Name
+	existing.Description = body.Description
+	existing.StoreType = body.StoreType
+	if body.Config != nil {
+		existing.Config = body.Config
 	}
 
-	spec, err := rule.ParseBackupProfileSpec()
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid config: "+err.Error())
-	}
-	if err := models.ValidateBackupProfileSpec(spec); err != nil {
+	if err := models.ValidateBackupStore(existing); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
-	if err := s.store.UpdateBackupProfile(c.Context(), &rule); err != nil {
-		return fmt.Errorf("update backup profile: %w", err)
+	// If new credentials provided, encrypt and overwrite; otherwise keep existing
+	if body.Credentials != nil && len(*body.Credentials) > 0 && string(*body.Credentials) != "{}" && string(*body.Credentials) != "null" {
+		if s.encryptor == nil {
+			return fiber.NewError(fiber.StatusBadRequest, "ENCRYPTION_KEY not configured; cannot store credentials")
+		}
+		encrypted, err := s.encryptor.Encrypt(*body.Credentials)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to encrypt credentials")
+		}
+		existing.Credentials = encrypted
 	}
 
-	// Re-push configs to all satellites using profiles that have this backup profile attached
-	s.rePushClustersForBackupProfile(c.Context(), id)
+	if err := s.store.UpdateBackupStore(c.Context(), existing); err != nil {
+		return fmt.Errorf("update backup store: %w", err)
+	}
 
-	return c.JSON(rule)
+	s.computeStoreCredentialsSet(existing)
+	return c.JSON(existing)
 }
 
-func (s *RESTServer) deleteBackupProfile(c *fiber.Ctx) error {
+func (s *RESTServer) deleteBackupStore(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
-	if err := s.store.DeleteBackupProfile(c.Context(), id); err != nil {
-		return fmt.Errorf("delete backup profile: %w", err)
+	if err := s.store.DeleteBackupStore(c.Context(), id); err != nil {
+		return fmt.Errorf("delete backup store: %w", err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-func (s *RESTServer) attachBackupProfile(c *fiber.Ctx) error {
-	profileID, err := uuid.Parse(c.Params("id"))
+// computeStoreCredentialsSet decrypts credentials and computes which fields are set.
+func (s *RESTServer) computeStoreCredentialsSet(store *models.BackupStore) {
+	if len(store.Credentials) == 0 || s.encryptor == nil {
+		store.Credentials = nil
+		return
+	}
+	decrypted, err := s.encryptor.Decrypt(store.Credentials)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid profile id")
+		store.Credentials = nil
+		return
 	}
-
-	var body struct {
-		BackupProfileID string `json:"backup_profile_id"`
-	}
-	if err := c.BodyParser(&body); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
-	}
-	backupProfileID, err := uuid.Parse(body.BackupProfileID)
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_profile_id")
-	}
-
-	// Verify backup profile exists and determine its type
-	newRule, err := s.store.GetBackupProfile(c.Context(), backupProfileID)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup profile not found")
-	}
-	newSpec, err := newRule.ParseBackupProfileSpec()
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid backup profile config")
-	}
-
-	// Enforce: at most one physical and one logical rule per profile
-	existing, _ := s.store.ListBackupProfilesForProfile(c.Context(), profileID)
-	for _, r := range existing {
-		if r.ID == backupProfileID {
-			return fiber.NewError(fiber.StatusConflict, "backup profile already attached")
-		}
-		spec, err := r.ParseBackupProfileSpec()
-		if err != nil {
-			continue
-		}
-		if newSpec.Physical != nil && spec.Physical != nil {
-			return fiber.NewError(fiber.StatusConflict, "profile already has a physical backup profile attached")
-		}
-		if newSpec.Logical != nil && spec.Logical != nil {
-			return fiber.NewError(fiber.StatusConflict, "profile already has a logical backup profile attached")
-		}
-	}
-
-	if err := s.store.AttachBackupProfileToProfile(c.Context(), profileID, backupProfileID); err != nil {
-		return fmt.Errorf("attach backup profile: %w", err)
-	}
-
-	// Bump config_version and re-push all clusters using this profile
-	s.rePushClustersForProfile(c.Context(), profileID)
-
-	return c.JSON(fiber.Map{"status": "attached"})
-}
-
-func (s *RESTServer) detachBackupProfile(c *fiber.Ctx) error {
-	profileID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid profile id")
-	}
-
-	var body struct {
-		BackupProfileID string `json:"backup_profile_id"`
-	}
-	if err := c.BodyParser(&body); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
-	}
-	backupProfileID, err := uuid.Parse(body.BackupProfileID)
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid backup_profile_id")
-	}
-
-	if err := s.store.DetachBackupProfileFromProfile(c.Context(), profileID, backupProfileID); err != nil {
-		return fmt.Errorf("detach backup profile: %w", err)
-	}
-
-	// Bump config_version and re-push all clusters using this profile
-	s.rePushClustersForProfile(c.Context(), profileID)
-
-	return c.JSON(fiber.Map{"status": "detached"})
+	store.CredentialsSet = models.ComputeCredentialsSet(store.StoreType, decrypted)
+	store.Credentials = nil // never expose raw credentials
 }
 
 // rePushClustersForProfile bumps config_version and re-pushes configs for all
@@ -2028,24 +1935,6 @@ func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uui
 			continue
 		}
 		s.pushConfigToSatellite(cfg)
-	}
-}
-
-// rePushClustersForBackupProfile re-pushes configs for all clusters linked to
-// profiles that have the given backup profile attached, and bumps updated_at on
-// each affected cluster profile so the change is visible without inspecting the
-// backup profile directly.
-func (s *RESTServer) rePushClustersForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) {
-	profileIDs, err := s.store.ListProfileIDsForBackupProfile(ctx, backupProfileID)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to list profiles for backup profile")
-		return
-	}
-	for _, pid := range profileIDs {
-		if err := s.store.TouchProfile(ctx, pid); err != nil {
-			log.Error().Err(err).Str("profile_id", pid.String()).Msg("failed to touch cluster profile after backup profile update")
-		}
-		s.rePushClustersForProfile(ctx, pid)
 	}
 }
 
@@ -2119,15 +2008,6 @@ func (s *RESTServer) initiateRestore(c *fiber.Ctx) error {
 
 	// Send restore command to satellite via gRPC
 	if s.streams != nil {
-		// Resolve the backup profile to get destination config
-		var dest *pgswarmv1.BackupDestination
-		if rule, err := s.store.GetBackupProfile(c.Context(), backup.BackupProfileID); err == nil {
-			if ruleSpec, err := rule.ParseBackupProfileSpec(); err == nil {
-				protoBackup := buildProtoBackupConfig(ruleSpec)
-				dest = protoBackup.Destination
-			}
-		}
-
 		restoreCmd := &pgswarmv1.RestoreCommand{
 			ClusterName:    cfg.Name,
 			Namespace:      cfg.Namespace,
@@ -2135,7 +2015,6 @@ func (s *RESTServer) initiateRestore(c *fiber.Ctx) error {
 			BackupId:       body.BackupID.String(),
 			RestoreType:    body.RestoreType,
 			TargetDatabase: body.TargetDatabase,
-			Destination:    dest,
 			BackupPath:     backup.BackupPath,
 		}
 		if body.TargetTime != nil {
@@ -2170,21 +2049,6 @@ func (s *RESTServer) listClusterRestores(c *fiber.Ctx) error {
 		ops = []*models.RestoreOperation{}
 	}
 	return c.JSON(ops)
-}
-
-func (s *RESTServer) listProfileBackupProfiles(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
-	}
-	rules, err := s.store.ListBackupProfilesForProfile(c.Context(), id)
-	if err != nil {
-		return fmt.Errorf("list backup profiles for profile: %w", err)
-	}
-	if rules == nil {
-		rules = []*models.BackupProfile{}
-	}
-	return c.JSON(rules)
 }
 
 // --- Error handler ---
