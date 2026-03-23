@@ -32,6 +32,7 @@ var mandatoryPgParams = map[string]string{
 	"wal_keep_size":             "'512MB'",
 	"shared_preload_libraries":  "'pg_stat_statements'",
 	"pg_stat_statements.track":  "all",
+	"password_encryption":       "'scram-sha-256'",
 }
 
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.

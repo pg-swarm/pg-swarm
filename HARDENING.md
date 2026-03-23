@@ -100,3 +100,6 @@ This document tracks the security and enterprise readiness work needed before pr
 - On-call manual for common incidents (satellite offline, cluster degraded, backup failure)
 - Troubleshooting decision trees
 - SLA/SLO documentation with RPO/RTO targets
+
+
+
