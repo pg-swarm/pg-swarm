@@ -71,6 +71,28 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	return pvc
 }
 
+// clusterStatusConfigMapName returns the ConfigMap name for cluster lifecycle status.
+func clusterStatusConfigMapName(clusterName string) string {
+	return clusterName + "-cluster-status"
+}
+
+// buildClusterStatusConfigMap creates the initial cluster-status ConfigMap.
+// The health monitor owns updates; the operator only seeds it on first creation.
+func buildClusterStatusConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterStatusConfigMapName(cfg.ClusterName),
+			Namespace: cfg.Namespace,
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+		},
+		Data: map[string]string{
+			"lifecycle_state": "PROVISIONING",
+			"reason":          "initial seed by operator",
+		},
+	}
+}
+
 // buildStatefulSet creates the StatefulSet for the PostgreSQL cluster.
 // satelliteInfo is optional: [0] = satelliteID, [1] = satelliteName (for backup sidecar).
 func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string, satelliteInfo ...string) *appsv1.StatefulSet {

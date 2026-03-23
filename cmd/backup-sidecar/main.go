@@ -6,6 +6,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	_ "github.com/jackc/pgx/v5/stdlib" // Register pgx driver for database/sql
+
 	"github.com/pg-swarm/pg-swarm/internal/backup"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"

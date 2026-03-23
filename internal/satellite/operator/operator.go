@@ -450,7 +450,7 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		go o.ensurePodLabels(cfg.Namespace, cfg.ClusterName, cfg.Replicas)
 	}
 
-	// 10. Backup sidecar RBAC and credential secrets
+	// 10. Backup sidecar RBAC, credential secrets, and config ConfigMap
 	if backupEnabled(cfg) {
 		log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
 		if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
@@ -463,6 +463,10 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 					return fmt.Errorf("backup credential secret: %w", err)
 				}
 			}
+		}
+		// Backup config ConfigMap (watched by sidecar for live reload)
+		if err := createOrUpdateConfigMap(ctx, o.client, buildBackupConfigConfigMap(cfg)); err != nil {
+			return fmt.Errorf("backup config configmap: %w", err)
 		}
 	} else {
 		log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")

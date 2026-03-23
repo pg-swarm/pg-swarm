@@ -37,10 +37,10 @@ var mandatoryPgParams = map[string]string{
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.
 var mandatoryHbaRules = []string{
 	"local all all trust",
-	"host all all 0.0.0.0/0 md5",
-	"host replication repl_user 0.0.0.0/0 md5",
-	"host replication backup_user 0.0.0.0/0 md5",
-	"host replication postgres 0.0.0.0/0 md5",
+	"host all all 0.0.0.0/0 scram-sha-256",
+	"host replication repl_user 0.0.0.0/0 scram-sha-256",
+	"host replication backup_user 0.0.0.0/0 scram-sha-256",
+	"host replication postgres 0.0.0.0/0 scram-sha-256",
 }
 
 // recoveryRulesConfigMapName returns the ConfigMap name for recovery rules.

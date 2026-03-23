@@ -128,6 +128,48 @@ func backupStatusConfigMapName(clusterName string) string {
 	return resourceName(clusterName, "backup-status")
 }
 
+// backupConfigConfigMapName returns the ConfigMap name for live-reloadable backup config.
+func backupConfigConfigMapName(clusterName string) string {
+	return clusterName + "-backup-config"
+}
+
+// buildBackupConfigConfigMap creates a ConfigMap with schedule and retention settings
+// that the backup sidecar watches for live reload (no pod restart needed).
+func buildBackupConfigConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
+	backup := cfg.Backups[0]
+	data := map[string]string{}
+
+	if backup.Physical != nil {
+		if backup.Physical.BaseSchedule != "" {
+			data["base_schedule"] = backup.Physical.BaseSchedule
+		}
+		if backup.Physical.IncrementalSchedule != "" {
+			data["incr_schedule"] = backup.Physical.IncrementalSchedule
+		}
+	}
+	if backup.Logical != nil && backup.Logical.Schedule != "" {
+		data["logical_schedule"] = backup.Logical.Schedule
+	}
+	if backup.Retention != nil {
+		if backup.Retention.BaseBackupCount > 0 {
+			data["retention_sets"] = fmt.Sprintf("%d", backup.Retention.BaseBackupCount)
+		}
+		if backup.Retention.WalRetentionDays > 0 {
+			data["retention_days"] = fmt.Sprintf("%d", backup.Retention.WalRetentionDays)
+		}
+	}
+
+	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      backupConfigConfigMapName(cfg.ClusterName),
+			Namespace: cfg.Namespace,
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+		},
+		Data: data,
+	}
+}
+
 // buildBackupCredentialSecret creates a K8s Secret containing destination credentials for one backup profile.
 func buildBackupCredentialSecret(cfg *pgswarmv1.ClusterConfig, backup *pgswarmv1.BackupConfig) *corev1.Secret {
 	if backup == nil || backup.Destination == nil {
@@ -383,6 +425,11 @@ func cleanupBackupResources(ctx context.Context, client kubernetes.Interface, ns
 	// Clean up status ConfigMap
 	statusName := backupStatusConfigMapName(clusterName)
 	if err := client.CoreV1().ConfigMaps(ns).Delete(ctx, statusName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		// best-effort
+	}
+	// Clean up backup config ConfigMap
+	configName := backupConfigConfigMapName(clusterName)
+	if err := client.CoreV1().ConfigMaps(ns).Delete(ctx, configName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		// best-effort
 	}
 	// Clean up backup lease

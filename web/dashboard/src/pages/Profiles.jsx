@@ -439,6 +439,54 @@ const TABS = [
 const CRON_RE = /^(\S+\s+){4}\S+$/;
 function isValidCron(s) { return !s || CRON_RE.test(s.trim()); }
 
+// Parse a cron step field like "* /5", "0/5", or "*" and return the step value, or 0 if not a step.
+function cronStep(field) {
+  const m = field.match(/^(?:\*|\d+)\/(\d+)$/);
+  return m ? parseInt(m[1]) : 0;
+}
+
+/** Convert a 5-field cron expression to a short human-readable string. */
+function cronToText(expr) {
+  if (!expr || !isValidCron(expr)) return '';
+  const [min, hr, dom, mon, dow] = expr.trim().split(/\s+/);
+
+  const minStep = cronStep(min);
+  const hrStep = cronStep(hr);
+
+  // Every N minutes: */5 (after start) or 0/5 (on the clock)
+  if (minStep && hr === '*' && dom === '*' && mon === '*' && dow === '*') {
+    if (minStep === 1) return 'Every minute';
+    const qualifier = min.startsWith('*') ? ' after start' : ' on the clock';
+    return `Every ${minStep} minutes${qualifier}`;
+  }
+  // Every N hours: */N (after start) or 0/N (on the clock)
+  if (/^\d+$/.test(min) && hrStep && dom === '*' && mon === '*' && dow === '*') {
+    if (hrStep === 1) return 'Every hour';
+    const qualifier = hr.startsWith('*') ? ' after start' : ' on the clock';
+    return `Every ${hrStep} hours${qualifier}`;
+  }
+  // Hourly at :MM: M * * * *
+  if (/^\d+$/.test(min) && hr === '*' && dom === '*' && mon === '*' && dow === '*') {
+    return `Hourly at :${min.padStart(2, '0')}`;
+  }
+  // Daily: 0 H * * *
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && mon === '*' && dow === '*') {
+    return `Daily at ${hr.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  }
+  // Weekly: 0 H * * D
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && mon === '*' && /^\d+$/.test(dow)) {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    return `${days[parseInt(dow)] || dow} at ${hr.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  }
+  // Monthly: 0 H D * *
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && /^\d+$/.test(dom) && mon === '*' && dow === '*') {
+    const d = parseInt(dom);
+    const suffix = d === 1 || d === 21 || d === 31 ? 'st' : d === 2 || d === 22 ? 'nd' : d === 3 || d === 23 ? 'rd' : 'th';
+    return `Monthly on ${d}${suffix} at ${hr.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  }
+  return '';
+}
+
 // ── Profile Form ────────────────────────────────────────────────────────────
 
 function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets, backupStores }) {
@@ -1020,15 +1068,15 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOn
                   <ReportRow label="Backup Store" value={store ? `${store.name} (${store.store_type})` : spec.backup?.store_id || 'Not selected'} />
                   {spec.backup?.physical && (
                     <>
-                      <ReportRow label="Physical Base" value={spec.backup.physical.base_schedule} />
-                      {spec.backup.physical.incremental_schedule && <ReportRow label="Physical Incr" value={spec.backup.physical.incremental_schedule} />}
+                      <ReportRow label="Physical Base" value={cronToText(spec.backup.physical.base_schedule) || spec.backup.physical.base_schedule} />
+                      {spec.backup.physical.incremental_schedule && <ReportRow label="Physical Incr" value={cronToText(spec.backup.physical.incremental_schedule) || spec.backup.physical.incremental_schedule} />}
                       <ReportRow label="WAL Archive" value={spec.backup.physical.wal_archive_enabled ? 'Enabled' : 'Disabled'} />
                       <ReportRow label="Base Retention" value={`${spec.backup.physical.retention?.base_backup_count || 0} backups`} />
                     </>
                   )}
                   {spec.backup?.logical && (
                     <>
-                      <ReportRow label="Logical Schedule" value={spec.backup.logical.schedule} />
+                      <ReportRow label="Logical Schedule" value={cronToText(spec.backup.logical.schedule) || spec.backup.logical.schedule} />
                       <ReportRow label="Logical Format" value={spec.backup.logical.format || 'custom'} />
                       <ReportRow label="Logical Retention" value={`${spec.backup.logical.retention?.backup_count || 0} backups`} />
                     </>
@@ -1253,7 +1301,7 @@ function BackupTab({ spec, setSpec, backupStores }) {
                       onChange={e => setPhysical(p => ({ ...p, base_schedule: e.target.value }))}
                       placeholder="0 4 * * *"
                     />
-                    <span className="form-hint">Cron (min hr dom mon dow)</span>
+                    <span className="form-hint">{cronToText(physical.base_schedule) ? <span className="cron-desc">{cronToText(physical.base_schedule)}</span> : 'Cron (min hr dom mon dow)'}</span>
                     {physical.base_schedule && !isValidCron(physical.base_schedule) && (
                       <span className="form-error">Invalid cron expression</span>
                     )}
@@ -1266,7 +1314,7 @@ function BackupTab({ spec, setSpec, backupStores }) {
                       onChange={e => setPhysical(p => ({ ...p, incremental_schedule: e.target.value }))}
                       placeholder="0 * * * *"
                     />
-                    <span className="form-hint">Optional. PG 17+ only</span>
+                    <span className="form-hint">{cronToText(physical.incremental_schedule) ? <span className="cron-desc">{cronToText(physical.incremental_schedule)}</span> : 'Optional. PG 17+ only'}</span>
                     {physical.incremental_schedule && !isValidCron(physical.incremental_schedule) && (
                       <span className="form-error">Invalid cron expression</span>
                     )}
@@ -1331,7 +1379,7 @@ function BackupTab({ spec, setSpec, backupStores }) {
                       onChange={e => setLogical(l => ({ ...l, schedule: e.target.value }))}
                       placeholder="0 2 * * *"
                     />
-                    <span className="form-hint">Cron (min hr dom mon dow)</span>
+                    <span className="form-hint">{cronToText(logical.schedule) ? <span className="cron-desc">{cronToText(logical.schedule)}</span> : 'Cron (min hr dom mon dow)'}</span>
                     {logical.schedule && !isValidCron(logical.schedule) && (
                       <span className="form-error">Invalid cron expression</span>
                     )}

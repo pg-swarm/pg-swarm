@@ -184,7 +184,10 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// 6. Start role-change watcher
 	go s.watchRoleChanges(ctx)
 
-	// 7. Block until context cancelled
+	// 7. Start config watcher for live reload of schedules/retention
+	go s.watchConfig(ctx)
+
+	// 8. Block until context cancelled
 	<-ctx.Done()
 	s.shutdown()
 	return nil
@@ -346,6 +349,50 @@ func (s *Sidecar) watchRoleChanges(ctx context.Context) {
 				}
 			}
 		}
+	}
+}
+
+// watchConfig starts a ConfigWatcher that live-reloads schedule and retention
+// settings from the backup-config ConfigMap without requiring a pod restart.
+func (s *Sidecar) watchConfig(ctx context.Context) {
+	current := ScheduleConfig{
+		BaseSchedule:  s.cfg.BaseSchedule,
+		IncrSchedule:  s.cfg.IncrSchedule,
+		LogicSchedule: s.cfg.LogicSchedule,
+		RetentionSets: s.cfg.RetentionSets,
+		RetentionDays: s.cfg.RetentionDays,
+	}
+
+	watcher := NewConfigWatcher(s.cfg.Namespace, s.cfg.ClusterName, func(sc ScheduleConfig) {
+		s.reloadSchedules(ctx, sc)
+	})
+	watcher.Run(ctx, current)
+}
+
+// reloadSchedules applies new schedule/retention config and restarts the
+// scheduler if the sidecar is currently in the replica role.
+func (s *Sidecar) reloadSchedules(ctx context.Context, sc ScheduleConfig) {
+	s.mu.Lock()
+	s.cfg.BaseSchedule = sc.BaseSchedule
+	s.cfg.IncrSchedule = sc.IncrSchedule
+	s.cfg.LogicSchedule = sc.LogicSchedule
+	s.cfg.RetentionSets = sc.RetentionSets
+	s.cfg.RetentionDays = sc.RetentionDays
+	role := s.role
+	s.mu.Unlock()
+
+	log.Info().Str("role", role.String()).Msg("applying reloaded config")
+
+	// Update retention worker if active (primary)
+	if s.ret != nil {
+		s.ret.UpdateRetention(sc.RetentionSets, sc.RetentionDays)
+	}
+
+	// Restart scheduler if active (replica)
+	if role == RoleReplica && s.sched != nil {
+		s.sched.Stop()
+		s.sched = NewScheduler(s)
+		go s.sched.Run(s.roleCtx)
 	}
 }
 

@@ -29,6 +29,19 @@ func NewRetentionWorker(s *Sidecar, sets, days int) *RetentionWorker {
 	}
 }
 
+// UpdateRetention updates the retention settings in place.
+func (rw *RetentionWorker) UpdateRetention(sets, days int) {
+	if sets <= 0 {
+		sets = 3
+	}
+	if days <= 0 {
+		days = 30
+	}
+	rw.retentionSets = sets
+	rw.retentionDays = days
+	log.Info().Int("sets", sets).Int("days", days).Msg("retention settings updated")
+}
+
 // RunOnce executes one retention pass: deletes old backup sets and their files.
 func (rw *RetentionWorker) RunOnce(ctx context.Context) {
 	if rw.sidecar.meta == nil {

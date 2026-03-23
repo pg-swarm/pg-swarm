@@ -35,10 +35,10 @@ fi
 
 if [ "$NEEDS_BASEBACKUP" = "false" ] && [ "$ORDINAL" = "0" ]; then
     echo "Initializing primary (ordinal 0)"
-    initdb -D "$PGDATA" --auth-local=trust --auth-host=md5
+    initdb -D "$PGDATA" --auth-local=trust --auth-host=scram-sha-256
 
-    # Set superuser password
-    pg_ctl -D "$PGDATA" start -w -o "-c listen_addresses='localhost'"
+    # Set superuser password (ensure SCRAM hashing)
+    pg_ctl -D "$PGDATA" start -w -o "-c listen_addresses='localhost' -c password_encryption='scram-sha-256'"
     psql -U postgres -c "ALTER USER postgres PASSWORD '$POSTGRES_PASSWORD';"
     psql -U postgres -c "CREATE ROLE repl_user WITH REPLICATION LOGIN PASSWORD '$REPLICATION_PASSWORD';"
     psql -U postgres -c "CREATE ROLE backup_user WITH REPLICATION LOGIN PASSWORD '$BACKUP_PASSWORD' IN ROLE pg_read_all_data;"

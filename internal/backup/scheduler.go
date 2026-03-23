@@ -4,26 +4,24 @@ import (
 	"context"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog/log"
 )
 
 // Scheduler runs backup jobs on cron schedules. Active only on the replica sidecar.
 type Scheduler struct {
 	sidecar *Sidecar
-	stop    chan struct{}
+	cron    *cron.Cron
 }
 
 // NewScheduler creates a new backup scheduler.
 func NewScheduler(s *Sidecar) *Scheduler {
 	return &Scheduler{
 		sidecar: s,
-		stop:    make(chan struct{}),
 	}
 }
 
 // Run starts the scheduler. It runs backup jobs based on configured schedules.
-// For simplicity, this uses a ticker-based approach with cron expression parsing
-// rather than pulling in a cron library dependency.
 func (sc *Scheduler) Run(ctx context.Context) {
 	log.Info().
 		Str("base", sc.sidecar.cfg.BaseSchedule).
@@ -36,43 +34,32 @@ func (sc *Scheduler) Run(ctx context.Context) {
 		go sc.runWithRecovery(ctx, "initial-base", sc.sidecar.RunBaseBackup)
 	}
 
-	baseTicker := sc.newTicker(sc.sidecar.cfg.BaseSchedule)
-	incrTicker := sc.newTicker(sc.sidecar.cfg.IncrSchedule)
-	logicTicker := sc.newTicker(sc.sidecar.cfg.LogicSchedule)
+	sc.cron = cron.New()
+	sc.addJob(ctx, sc.sidecar.cfg.BaseSchedule, "base", sc.sidecar.RunBaseBackup)
+	sc.addJob(ctx, sc.sidecar.cfg.IncrSchedule, "incremental", sc.sidecar.RunIncrementalBackup)
+	sc.addJob(ctx, sc.sidecar.cfg.LogicSchedule, "logical", sc.sidecar.RunLogicalBackup)
+	sc.cron.Start()
 
-	defer func() {
-		if baseTicker != nil {
-			baseTicker.Stop()
-		}
-		if incrTicker != nil {
-			incrTicker.Stop()
-		}
-		if logicTicker != nil {
-			logicTicker.Stop()
-		}
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-sc.stop:
-			return
-		case <-tickerChan(baseTicker):
-			go sc.runWithRecovery(ctx, "base", sc.sidecar.RunBaseBackup)
-		case <-tickerChan(incrTicker):
-			go sc.runWithRecovery(ctx, "incremental", sc.sidecar.RunIncrementalBackup)
-		case <-tickerChan(logicTicker):
-			go sc.runWithRecovery(ctx, "logical", sc.sidecar.RunLogicalBackup)
-		}
-	}
+	<-ctx.Done()
+	sc.cron.Stop()
 }
 
 // Stop signals the scheduler to shut down.
 func (sc *Scheduler) Stop() {
-	select {
-	case sc.stop <- struct{}{}:
-	default:
+	if sc.cron != nil {
+		sc.cron.Stop()
+	}
+}
+
+// addJob registers a cron job if the expression is non-empty.
+func (sc *Scheduler) addJob(ctx context.Context, cronExpr, name string, fn func(context.Context) error) {
+	if cronExpr == "" {
+		return
+	}
+	if _, err := sc.cron.AddFunc(cronExpr, func() {
+		sc.runWithRecovery(ctx, name, fn)
+	}); err != nil {
+		log.Error().Err(err).Str("backup", name).Str("cron", cronExpr).Msg("invalid cron expression")
 	}
 }
 
@@ -106,23 +93,27 @@ func (sc *Scheduler) runWithRecovery(ctx context.Context, name string, fn func(c
 		}
 	}
 
-	hs := sc.sidecar.checkHealth(ctx)
-	if !hs.Healthy {
-		if name == "initial-base" {
-			// First base backup: retry health every 30s for up to 10 minutes
-			if !sc.waitForHealth(ctx, 10*time.Minute, 30*time.Second) {
-				log.Warn().Str("backup", name).Msg("health check timed out for initial base — skipping")
+	// Replication health gate: only applies to physical backups (base/incremental).
+	// Logical backups (pg_dump) query local data and don't depend on streaming.
+	if name != "logical" {
+		hs := sc.sidecar.checkHealth(ctx)
+		if !hs.Healthy {
+			if name == "initial-base" {
+				// First base backup: retry health every 30s for up to 10 minutes
+				if !sc.waitForHealth(ctx, 10*time.Minute, 30*time.Second) {
+					log.Warn().Str("backup", name).Msg("health check timed out for initial base — skipping")
+					if sc.sidecar.reporter != nil {
+						sc.sidecar.reporter.ReportBackup(ctx, "base", "skipped", 0, "health check timed out")
+					}
+					return
+				}
+			} else {
+				log.Warn().Str("backup", name).Str("reason", hs.Reason).Msg("health check failed — skipping backup")
 				if sc.sidecar.reporter != nil {
-					sc.sidecar.reporter.ReportBackup(ctx, "base", "skipped", 0, "health check timed out")
+					sc.sidecar.reporter.ReportBackup(ctx, name, "skipped", 0, "health check failed: "+hs.Reason)
 				}
 				return
 			}
-		} else {
-			log.Warn().Str("backup", name).Str("reason", hs.Reason).Msg("health check failed — skipping backup")
-			if sc.sidecar.reporter != nil {
-				sc.sidecar.reporter.ReportBackup(ctx, name, "skipped", 0, "health check failed: "+hs.Reason)
-			}
-			return
 		}
 	}
 
@@ -162,58 +153,4 @@ func (sc *Scheduler) waitForHealth(ctx context.Context, timeout, interval time.D
 		}
 	}
 	return false
-}
-
-// newTicker creates a ticker from a cron expression. For simplicity, we
-// parse common cron intervals into durations. Full cron parsing would
-// require a library like robfig/cron.
-func (sc *Scheduler) newTicker(cronExpr string) *time.Ticker {
-	d := parseCronInterval(cronExpr)
-	if d == 0 {
-		return nil
-	}
-	return time.NewTicker(d)
-}
-
-// parseCronInterval converts common cron expressions to durations.
-// Supports: "0 * * * *" (hourly), "0 */N * * *" (every N hours),
-// "0 0 * * *" (daily), "0 0 * * 0" (weekly), and minute intervals.
-func parseCronInterval(expr string) time.Duration {
-	if expr == "" {
-		return 0
-	}
-	// Simple heuristic-based parsing for common patterns
-	switch {
-	case expr == "0 * * * *":
-		return time.Hour
-	case expr == "0 0 * * *" || expr == "0 2 * * *" || expr == "0 3 * * *":
-		return 24 * time.Hour
-	case expr == "0 0 * * 0" || expr == "0 2 * * 0":
-		return 7 * 24 * time.Hour
-	case len(expr) > 4 && expr[:4] == "*/5 ":
-		return 5 * time.Minute
-	case len(expr) > 5 && expr[:5] == "*/15 ":
-		return 15 * time.Minute
-	case len(expr) > 5 && expr[:5] == "*/30 ":
-		return 30 * time.Minute
-	case len(expr) > 6 && expr[:6] == "0 */2 ":
-		return 2 * time.Hour
-	case len(expr) > 6 && expr[:6] == "0 */4 ":
-		return 4 * time.Hour
-	case len(expr) > 6 && expr[:6] == "0 */6 ":
-		return 6 * time.Hour
-	case len(expr) > 7 && expr[:7] == "0 */12 ":
-		return 12 * time.Hour
-	default:
-		// Default to daily if we can't parse
-		return 24 * time.Hour
-	}
-}
-
-// tickerChan returns the channel from a ticker, or a nil channel if ticker is nil.
-func tickerChan(t *time.Ticker) <-chan time.Time {
-	if t == nil {
-		return nil
-	}
-	return t.C
 }
