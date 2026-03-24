@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"strconv"
 	"sync"
 	"time"
 
@@ -30,12 +29,10 @@ type Monitor struct {
 	operator     *operator.Operator
 	onHealth     func(*pgswarmv1.ClusterHealthReport)
 	onEvent      func(*pgswarmv1.EventReport)
-	onBackup     func(*pgswarmv1.BackupStatusReport)
-	interval     time.Duration
-	lastStates   map[string]pgswarmv1.ClusterState
-	mu           sync.Mutex
-	firstSeen    map[string]time.Time // tracks when each cluster was first observed
-	lastBackupCM map[string]string    // tracks last-seen backup status ConfigMap resourceVersion
+	interval   time.Duration
+	lastStates map[string]pgswarmv1.ClusterState
+	mu         sync.Mutex
+	firstSeen  map[string]time.Time // tracks when each cluster was first observed
 
 	transitionSince map[string]time.Time // tracks when TRANSITION state started per cluster
 
@@ -54,7 +51,6 @@ func New(client kubernetes.Interface, op *operator.Operator, interval time.Durat
 		boostInterval:   3 * time.Second,
 		lastStates:      make(map[string]pgswarmv1.ClusterState),
 		firstSeen:       make(map[string]time.Time),
-		lastBackupCM:    make(map[string]string),
 		transitionSince: make(map[string]time.Time),
 		poke:            make(chan struct{}, 1),
 	}
@@ -94,11 +90,6 @@ func (m *Monitor) SetOnHealth(fn func(*pgswarmv1.ClusterHealthReport)) {
 // SetOnEvent sets the callback for event reports.
 func (m *Monitor) SetOnEvent(fn func(*pgswarmv1.EventReport)) {
 	m.onEvent = fn
-}
-
-// SetOnBackup sets the callback for backup status reports.
-func (m *Monitor) SetOnBackup(fn func(*pgswarmv1.BackupStatusReport)) {
-	m.onBackup = fn
 }
 
 // Run starts the health check loop. It blocks until ctx is cancelled.
@@ -181,12 +172,6 @@ func (m *Monitor) checkAll(ctx context.Context) {
 				})
 			}
 		}
-		// Trigger pending base backups when cluster first becomes RUNNING
-		if r.report.State == pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING &&
-			(!existed || prev != pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING) {
-			m.operator.TriggerPendingBackups(ctx, r.mc.Namespace, r.mc.ClusterName)
-		}
-
 		// Auto-boost: new cluster appearing, or any cluster not yet RUNNING
 		if !existed {
 			needsBoost = true
@@ -209,54 +194,6 @@ func (m *Monitor) checkAll(ctx context.Context) {
 		m.Boost(1 * time.Minute)
 	}
 
-	// Check for backup status ConfigMap updates
-	if m.onBackup != nil {
-		m.checkBackupStatuses(ctx, clusters)
-	}
-}
-
-// checkBackupStatuses looks for backup-status ConfigMaps and reports new completions.
-func (m *Monitor) checkBackupStatuses(ctx context.Context, clusters []operator.ManagedCluster) {
-	for _, mc := range clusters {
-		cmName := mc.ClusterName + "-backup-status"
-		cm, err := m.client.CoreV1().ConfigMaps(mc.Namespace).Get(ctx, cmName, metav1.GetOptions{})
-		if err != nil {
-			continue // no backup status ConfigMap = no backup running
-		}
-
-		key := mc.Namespace + "/" + cmName
-		if cm.ResourceVersion == m.lastBackupCM[key] {
-			continue // no change since last check
-		}
-		m.lastBackupCM[key] = cm.ResourceVersion
-
-		report := &pgswarmv1.BackupStatusReport{
-			ClusterName:  mc.ClusterName,
-			Namespace:    mc.Namespace,
-			BackupType:   cm.Data["backup_type"],
-			Status:       cm.Data["status"],
-			BackupPath:   cm.Data["backup_path"],
-			ErrorMessage: cm.Data["error_message"],
-		}
-
-		if t, err := time.Parse(time.RFC3339, cm.Data["started_at"]); err == nil {
-			report.StartedAt = timestamppb.New(t)
-		}
-		if t, err := time.Parse(time.RFC3339, cm.Data["completed_at"]); err == nil {
-			report.CompletedAt = timestamppb.New(t)
-		}
-
-		// Health context fields
-		if v, err := strconv.ParseInt(cm.Data["replication_lag_bytes"], 10, 64); err == nil {
-			report.ReplicationLagBytes = v
-		}
-		report.WalReceiverStatus = cm.Data["wal_receiver_status"]
-		if v, err := strconv.ParseBool(cm.Data["health_check_passed"]); err == nil {
-			report.HealthCheckPassed = v
-		}
-
-		m.onBackup(report)
-	}
 }
 
 func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) *pgswarmv1.ClusterHealthReport {
@@ -275,7 +212,7 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	defer cancel()
 
 	pods, err := m.client.CoreV1().Pods(mc.Namespace).List(checkCtx, metav1.ListOptions{
-		LabelSelector: operator.LabelCluster + "=" + mc.ClusterName + ",!" + operator.LabelBackupType,
+		LabelSelector: operator.LabelCluster + "=" + mc.ClusterName,
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("cluster", mc.ClusterName).Msg("failed to list pods for health check")

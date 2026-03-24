@@ -148,7 +148,7 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, postgresVariants, clusters, storageTiers, recoveryRuleSets, backupStores, refresh } = useData();
+  const { profiles, postgresVersions, postgresVariants, clusters, storageTiers, recoveryRuleSets, refresh } = useData();
   const toast = useToast();
 
   useEffect(() => { document.title = 'Profiles - PG-Swarm'; }, []);
@@ -276,7 +276,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} recoveryRuleSets={recoveryRuleSets} backupStores={backupStores} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} recoveryRuleSets={recoveryRuleSets} />;
   }
 
   if (viewing) {
@@ -340,8 +340,6 @@ export default function Profiles() {
                   {spec.archive?.mode && <span className="tag">archive:{spec.archive.mode}</span>}
                   {Object.keys(spec.pg_params || {}).length > 0 && <span className="tag">{Object.keys(spec.pg_params).length} pg params</span>}
                   {(spec.hba_rules || []).length > 0 && <span className="tag">{spec.hba_rules.length} hba rules</span>}
-                  {spec.backup?.physical && <span className="tag">physical backup</span>}
-                  {spec.backup?.logical && <span className="tag">logical backup</span>}
                   {p.recovery_rule_set_id && (() => {
                     const rs = recoveryRuleSets.find(r => r.id === p.recovery_rule_set_id);
                     return rs ? <span className="tag">recovery: {rs.name}</span> : null;
@@ -430,7 +428,6 @@ const TABS = [
   { id: 'general', label: 'General' },
   { id: 'volumes', label: 'Volumes' },
   { id: 'resources', label: 'Resources' },
-  { id: 'backup', label: 'Backup' },
   { id: 'pgconfig', label: 'PostgreSQL' },
   { id: 'hba', label: 'HBA Rules' },
   { id: 'databases', label: 'Databases' },
@@ -489,7 +486,7 @@ function cronToText(expr) {
 
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets, backupStores }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
@@ -639,9 +636,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
             {tab.id === 'hba' && spec.hba_rules.length > 0 && (
               <span className="tab-badge">{spec.hba_rules.length}</span>
             )}
-            {tab.id === 'backup' && (spec.backup?.physical || spec.backup?.logical) && (
-              <span className="tab-badge">{(spec.backup?.physical ? 1 : 0) + (spec.backup?.logical ? 1 : 0)}</span>
-            )}
           </button>
         ))}
       </div>
@@ -775,10 +769,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
               </div>
             </div>
           </section>
-        )}
-
-        {activeTab === 'backup' && (
-          <BackupTab spec={spec} setSpec={setSpec} backupStores={backupStores} />
         )}
 
         {activeTab === 'pgconfig' && (
@@ -983,7 +973,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
           onConfirm={confirmSave}
           onCancel={() => setShowConfirm(false)}
           saving={saving}
-          backupStores={backupStores}
         />
       )}
     </div>
@@ -1018,7 +1007,7 @@ function ProfileView({ state, onClose }) {
 
 // ── Confirmation Report ─────────────────────────────────────────────────────
 
-function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOnly, saving, backupStores }) {
+function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOnly, saving }) {
   const content = (
     <>
       <div className="confirm-header">
@@ -1057,34 +1046,6 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOn
               <ReportRow label="Memory" value={`${spec.resources.memory_request} / ${spec.resources.memory_limit}`} />
             </div>
           </div>
-
-          {/* Backup */}
-          {(spec.backup?.physical || spec.backup?.logical) && (() => {
-            const store = (backupStores || []).find(s => s.id === spec.backup?.store_id);
-            return (
-              <div className="report-section">
-                <h5>Backup</h5>
-                <div className="report-grid">
-                  <ReportRow label="Backup Store" value={store ? `${store.name} (${store.store_type})` : spec.backup?.store_id || 'Not selected'} />
-                  {spec.backup?.physical && (
-                    <>
-                      <ReportRow label="Physical Base" value={cronToText(spec.backup.physical.base_schedule) || spec.backup.physical.base_schedule} />
-                      {spec.backup.physical.incremental_schedule && <ReportRow label="Physical Incr" value={cronToText(spec.backup.physical.incremental_schedule) || spec.backup.physical.incremental_schedule} />}
-                      <ReportRow label="WAL Archive" value={spec.backup.physical.wal_archive_enabled ? 'Enabled' : 'Disabled'} />
-                      <ReportRow label="Base Retention" value={`${spec.backup.physical.retention?.base_backup_count || 0} backups`} />
-                    </>
-                  )}
-                  {spec.backup?.logical && (
-                    <>
-                      <ReportRow label="Logical Schedule" value={cronToText(spec.backup.logical.schedule) || spec.backup.logical.schedule} />
-                      <ReportRow label="Logical Format" value={spec.backup.logical.format || 'custom'} />
-                      <ReportRow label="Logical Retention" value={`${spec.backup.logical.retention?.backup_count || 0} backups`} />
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
 
           {/* PG Params — only non-default */}
           {changedParams.length > 0 && (
@@ -1155,260 +1116,6 @@ function ReportRow({ label, value }) {
       <span className="report-label">{label}</span>
       <span className="report-value">{value}</span>
     </div>
-  );
-}
-
-const PHYSICAL_DEFAULTS = {
-  base_schedule: '0 4 * * *',
-  incremental_schedule: '',
-  wal_archive_enabled: true,
-  archive_timeout_seconds: 60,
-  retention: { base_backup_count: 7, incremental_backup_count: 6, wal_retention_days: 14 },
-};
-
-const LOGICAL_DEFAULTS = {
-  schedule: '0 2 * * *',
-  format: 'custom',
-  retention: { backup_count: 30 },
-};
-
-function BackupTab({ spec, setSpec, backupStores }) {
-  const [subTab, setSubTab] = useState('physical');
-  const backup = spec.backup;
-  const physical = backup?.physical;
-  const logical = backup?.logical;
-  const hasAny = !!(physical || logical);
-
-  function setBackupField(field, value) {
-    setSpec(s => ({ ...s, backup: { ...s.backup, [field]: value } }));
-  }
-
-  function setPhysical(fn) {
-    setSpec(s => ({
-      ...s,
-      backup: { ...s.backup, physical: fn(s.backup?.physical || {}) },
-    }));
-  }
-
-  function setLogical(fn) {
-    setSpec(s => ({
-      ...s,
-      backup: { ...s.backup, logical: fn(s.backup?.logical || {}) },
-    }));
-  }
-
-  function togglePhysical(enabled) {
-    setSpec(s => ({
-      ...s,
-      backup: {
-        ...s.backup,
-        physical: enabled ? { ...PHYSICAL_DEFAULTS, retention: { ...PHYSICAL_DEFAULTS.retention } } : null,
-      },
-    }));
-  }
-
-  function toggleLogical(enabled) {
-    setSpec(s => ({
-      ...s,
-      backup: {
-        ...s.backup,
-        logical: enabled ? { ...LOGICAL_DEFAULTS, retention: { ...LOGICAL_DEFAULTS.retention } } : null,
-      },
-    }));
-  }
-
-  const stores = backupStores || [];
-
-  return (
-    <section className="form-section">
-      <h4>Backup Configuration</h4>
-
-      <div className="backup-sticky-header">
-        {/* ── Storage Destination ─────────────────────────── */}
-        <div className="backup-section">
-          <h5>Storage Destination</h5>
-          <div className="form-row">
-            <label>Backup Store {hasAny ? '*' : ''}</label>
-            <select
-              className={'input' + (hasAny && !backup?.store_id ? ' input-error' : '')}
-              value={backup?.store_id || ''}
-              onChange={e => setBackupField('store_id', e.target.value || null)}
-              style={{ maxWidth: 360 }}
-            >
-              <option value="">— Select a backup store —</option>
-              {stores.map(s => (
-                <option key={s.id} value={s.id}>{s.name} ({s.store_type})</option>
-              ))}
-            </select>
-            {hasAny && !backup?.store_id && (
-              <span className="form-error">A backup store is required when backups are enabled</span>
-            )}
-            {stores.length === 0 && (
-              <span className="form-hint">No backup stores configured. Add one in Admin &rarr; Backup Stores.</span>
-            )}
-          </div>
-        </div>
-
-        {/* ── Sub-tab bar ────────────────────────────────── */}
-        <div className="backup-subtabs">
-          <button className={'backup-subtab' + (subTab === 'physical' ? ' active' : '')} onClick={() => setSubTab('physical')}>
-            Physical{physical && <span className="backup-dot" />}
-          </button>
-          <button className={'backup-subtab' + (subTab === 'logical' ? ' active' : '')} onClick={() => setSubTab('logical')}>
-            Logical{logical && <span className="backup-dot" />}
-          </button>
-        </div>
-
-        {/* ── Enable toggle ──────────────────────────────── */}
-        {subTab === 'physical' && (
-          <div className="backup-section">
-            <h5>
-              Physical Backups
-              <label className="toggle" style={{ marginLeft: 8 }}>
-                <input type="checkbox" checked={!!physical} onChange={e => togglePhysical(e.target.checked)} />
-                <span>{physical ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </h5>
-          </div>
-        )}
-        {subTab === 'logical' && (
-          <div className="backup-section">
-            <h5>
-              Logical Backups
-              <label className="toggle" style={{ marginLeft: 8 }}>
-                <input type="checkbox" checked={!!logical} onChange={e => toggleLogical(e.target.checked)} />
-                <span>{logical ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </h5>
-          </div>
-        )}
-      </div>
-
-      {/* ── Physical Backups ───────────────────────────── */}
-      {subTab === 'physical' && (
-        <>
-
-          {physical && (
-            <>
-              <div className="backup-section">
-                <h5>Schedule</h5>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>Base Schedule *</label>
-                    <input
-                      className={'input' + (physical.base_schedule && !isValidCron(physical.base_schedule) ? ' input-error' : '')}
-                      value={physical.base_schedule}
-                      onChange={e => setPhysical(p => ({ ...p, base_schedule: e.target.value }))}
-                      placeholder="0 4 * * *"
-                    />
-                    <span className="form-hint">{cronToText(physical.base_schedule) ? <span className="cron-desc">{cronToText(physical.base_schedule)}</span> : 'Cron (min hr dom mon dow)'}</span>
-                    {physical.base_schedule && !isValidCron(physical.base_schedule) && (
-                      <span className="form-error">Invalid cron expression</span>
-                    )}
-                  </div>
-                  <div className="form-row">
-                    <label>Incremental Schedule</label>
-                    <input
-                      className={'input' + (physical.incremental_schedule && !isValidCron(physical.incremental_schedule) ? ' input-error' : '')}
-                      value={physical.incremental_schedule || ''}
-                      onChange={e => setPhysical(p => ({ ...p, incremental_schedule: e.target.value }))}
-                      placeholder="0 * * * *"
-                    />
-                    <span className="form-hint">{cronToText(physical.incremental_schedule) ? <span className="cron-desc">{cronToText(physical.incremental_schedule)}</span> : 'Optional. PG 17+ only'}</span>
-                    {physical.incremental_schedule && !isValidCron(physical.incremental_schedule) && (
-                      <span className="form-error">Invalid cron expression</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="backup-section">
-                <h5>WAL Archiving</h5>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>WAL Archiving</label>
-                    <label className="toggle">
-                      <input type="checkbox" checked={!!physical.wal_archive_enabled} onChange={e => setPhysical(p => ({ ...p, wal_archive_enabled: e.target.checked }))} />
-                      <span>Enabled</span>
-                    </label>
-                  </div>
-                  <div className="form-row">
-                    <label>Archive Timeout (s)</label>
-                    <input className="input" type="number" min="0" value={physical.archive_timeout_seconds || 0} onChange={e => setPhysical(p => ({ ...p, archive_timeout_seconds: parseInt(e.target.value) || 0 }))} />
-                  </div>
-                </div>
-              </div>
-
-              <div className="backup-section">
-                <h5>Retention</h5>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>Base Backups to Keep *</label>
-                    <input className="input" type="number" min="1" value={physical.retention?.base_backup_count || 7} onChange={e => setPhysical(p => ({ ...p, retention: { ...p.retention, base_backup_count: parseInt(e.target.value) || 1 } }))} />
-                  </div>
-                  <div className="form-row">
-                    <label>Incremental per Cycle</label>
-                    <input className="input" type="number" min="0" value={physical.retention?.incremental_backup_count || 0} onChange={e => setPhysical(p => ({ ...p, retention: { ...p.retention, incremental_backup_count: parseInt(e.target.value) || 0 } }))} />
-                  </div>
-                  {physical.wal_archive_enabled && (
-                    <div className="form-row">
-                      <label>WAL Retention (days) *</label>
-                      <input className="input" type="number" min="1" value={physical.retention?.wal_retention_days || 14} onChange={e => setPhysical(p => ({ ...p, retention: { ...p.retention, wal_retention_days: parseInt(e.target.value) || 1 } }))} />
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-        </>
-      )}
-
-      {/* ── Logical Backups ────────────────────────────── */}
-      {subTab === 'logical' && (
-        <>
-          {logical && (
-            <>
-              <div className="backup-section">
-                <h5>Schedule</h5>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>Schedule *</label>
-                    <input
-                      className={'input' + (logical.schedule && !isValidCron(logical.schedule) ? ' input-error' : '')}
-                      value={logical.schedule}
-                      onChange={e => setLogical(l => ({ ...l, schedule: e.target.value }))}
-                      placeholder="0 2 * * *"
-                    />
-                    <span className="form-hint">{cronToText(logical.schedule) ? <span className="cron-desc">{cronToText(logical.schedule)}</span> : 'Cron (min hr dom mon dow)'}</span>
-                    {logical.schedule && !isValidCron(logical.schedule) && (
-                      <span className="form-error">Invalid cron expression</span>
-                    )}
-                  </div>
-                  <div className="form-row">
-                    <label>Format</label>
-                    <select className="input" value={logical.format || 'custom'} onChange={e => setLogical(l => ({ ...l, format: e.target.value }))}>
-                      <option value="custom">custom</option>
-                      <option value="plain">plain</option>
-                      <option value="directory">directory</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              <div className="backup-section">
-                <h5>Retention</h5>
-                <div className="form-grid">
-                  <div className="form-row">
-                    <label>Backups to Keep *</label>
-                    <input className="input" type="number" min="1" value={logical.retention?.backup_count || 30} onChange={e => setLogical(l => ({ ...l, retention: { ...l.retention, backup_count: parseInt(e.target.value) || 1 } }))} />
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-        </>
-      )}
-    </section>
   );
 }
 

@@ -46,8 +46,8 @@ func buildNamespace(name string) *corev1.Namespace {
 
 // createOrPreserveSecret creates the secret only if it doesn't already exist.
 // This preserves passwords across config updates. If the secret exists but is
-// missing keys that the desired secret has (e.g. backup-password added in a
-// newer version), the missing keys are backfilled without touching existing ones.
+// missing keys that the desired secret has, the missing keys are backfilled
+// without touching existing ones.
 func createOrPreserveSecret(ctx context.Context, client kubernetes.Interface, desired *corev1.Secret) error {
 	log.Trace().Str("secret", desired.Name).Msg("createOrPreserveSecret entry")
 	existing, err := client.CoreV1().Secrets(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
@@ -60,8 +60,8 @@ func createOrPreserveSecret(ctx context.Context, client kubernetes.Interface, de
 	}
 
 	// Backfill any keys present in desired.StringData but missing from the
-	// existing secret. This handles schema upgrades (e.g. adding backup-password)
-	// without overwriting existing passwords.
+	// existing secret. This handles schema upgrades without overwriting
+	// existing passwords.
 	needsUpdate := false
 	for key, val := range desired.StringData {
 		if _, exists := existing.Data[key]; !exists {

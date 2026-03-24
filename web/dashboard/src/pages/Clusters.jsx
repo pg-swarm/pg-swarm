@@ -5,7 +5,7 @@ import { api, parseSpec, timeAgo } from '../api';
 import {
   Server, Crown, Copy, Shield,
   Pause, Play, Database, AlertCircle,
-  ExternalLink, Search, Archive, ArchiveX
+  ExternalLink, Search
 } from 'lucide-react';
 
 /* ── Format helpers (shared with ClusterDetail) ──────── */
@@ -265,10 +265,6 @@ export default function Clusters() {
     return rule?.label_selector || {};
   }
 
-  function hasBackup() {
-    return false; // backup store integration pending
-  }
-
   const term = search.toLowerCase().trim();
 
   const filtered = term
@@ -361,9 +357,6 @@ export default function Clusters() {
 
               {/* Footer */}
               <div className="cl-foot">
-                {hasBackup(c)
-                  ? <span title="Backup configured"><Archive size={13} style={{ color: 'var(--green)' }} /></span>
-                  : <span title="No backup configured"><ArchiveX size={13} style={{ color: 'var(--text-secondary)', opacity: 0.4 }} /></span>}
                 <span style={{ marginRight: 'auto' }} />
                 <button
                   className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-pause'}`}

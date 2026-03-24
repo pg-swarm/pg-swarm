@@ -20,7 +20,6 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
 	"github.com/pg-swarm/pg-swarm/web"
 	"github.com/rs/zerolog/log"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // RESTServer handles the REST API endpoints for the central server.
@@ -162,19 +161,6 @@ func (s *RESTServer) setupRoutes() {
 	api.Get("/profiles/:id/cascade-preview", s.cascadePreview)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
 
-	// Backup Stores
-	api.Get("/backup-stores", s.listBackupStores)
-	api.Post("/backup-stores", s.createBackupStore)
-	api.Get("/backup-stores/:id", s.getBackupStore)
-	api.Put("/backup-stores/:id", s.updateBackupStore)
-	api.Delete("/backup-stores/:id", s.deleteBackupStore)
-
-	// Backup Inventory & Restore
-	api.Get("/clusters/:id/backups", s.listClusterBackups)
-	api.Get("/backups/:id", s.getBackup)
-	api.Post("/clusters/:id/restore", s.initiateRestore)
-	api.Get("/clusters/:id/restores", s.listClusterRestores)
-
 	// Postgres Variants (admin)
 	api.Get("/postgres-variants", s.listPostgresVariants)
 	api.Post("/postgres-variants", s.createPostgresVariant)
@@ -294,9 +280,6 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -351,9 +334,6 @@ func (s *RESTServer) updateClusterConfig(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
-	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
@@ -1249,9 +1229,6 @@ func (s *RESTServer) createProfile(c *fiber.Ctx) error {
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -1299,9 +1276,6 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := models.ValidateDatabases(spec.Databases); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
-	if err := models.ValidateBackupSpec(spec.Backup); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
@@ -1755,318 +1729,7 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig, enc *cry
 		}
 	}
 
-	// Build BackupConfig from spec.Backup + BackupStore
-	if spec.Backup != nil && spec.Backup.StoreID != nil {
-		backupStore, err := st.GetBackupStore(context.Background(), *spec.Backup.StoreID)
-		if err != nil {
-			log.Warn().Err(err).Str("store_id", spec.Backup.StoreID.String()).Msg("failed to resolve backup store — skipping backup config")
-		} else {
-			// Resolve satellite name for base_path
-			satelliteName := ""
-			if cfg.SatelliteID != nil {
-				if sat, err := st.GetSatellite(context.Background(), *cfg.SatelliteID); err == nil {
-					satelliteName = sat.Name
-					if satelliteName == "" {
-						satelliteName = sat.Hostname
-					}
-				}
-			}
-			if satelliteName == "" && cfg.SatelliteID != nil {
-				satelliteName = cfg.SatelliteID.String()
-			}
-
-			backupCfg := &pgswarmv1.BackupConfig{
-				StoreId:  spec.Backup.StoreID.String(),
-				BasePath: fmt.Sprintf("%s-%s-%s", satelliteName, cfg.Namespace, cfg.Name),
-			}
-
-			// Populate destination from store config + credentials
-			backupCfg.Destination = buildBackupDestination(backupStore, enc)
-
-			// Physical backup config
-			if spec.Backup.Physical != nil {
-				backupCfg.Physical = &pgswarmv1.PhysicalBackupConfig{
-					BaseSchedule:           spec.Backup.Physical.BaseSchedule,
-					WalArchiveEnabled:      spec.Backup.Physical.WalArchiveEnabled,
-					ArchiveTimeoutSeconds:  spec.Backup.Physical.ArchiveTimeoutSecs,
-					IncrementalSchedule:    spec.Backup.Physical.IncrementalSchedule,
-				}
-				backupCfg.Retention = &pgswarmv1.BackupRetention{
-					BaseBackupCount:        int32(spec.Backup.Physical.Retention.BaseBackupCount),
-					WalRetentionDays:       int32(spec.Backup.Physical.Retention.WalRetentionDays),
-					IncrementalBackupCount: int32(spec.Backup.Physical.Retention.IncrementalBackupCount),
-				}
-			}
-
-			// Logical backup config
-			if spec.Backup.Logical != nil {
-				backupCfg.Logical = &pgswarmv1.LogicalBackupConfig{
-					Schedule:  spec.Backup.Logical.Schedule,
-					Databases: spec.Backup.Logical.Databases,
-					Format:    spec.Backup.Logical.Format,
-				}
-				if backupCfg.Retention == nil {
-					backupCfg.Retention = &pgswarmv1.BackupRetention{}
-				}
-				backupCfg.Retention.LogicalBackupCount = int32(spec.Backup.Logical.Retention.BackupCount)
-			}
-
-			protoConfig.Backups = append(protoConfig.Backups, backupCfg)
-		}
-	}
-
 	return protoConfig, nil
-}
-
-// buildBackupDestination converts a BackupStore model into a proto BackupDestination.
-func buildBackupDestination(backupStore *models.BackupStore, enc *crypto.Encryptor) *pgswarmv1.BackupDestination {
-	dest := &pgswarmv1.BackupDestination{
-		Type: backupStore.StoreType,
-	}
-
-	// Decrypt credentials if available
-	var decryptedCreds []byte
-	if len(backupStore.Credentials) > 0 && enc != nil {
-		var err error
-		decryptedCreds, err = enc.Decrypt(backupStore.Credentials)
-		if err != nil {
-			log.Warn().Err(err).Msg("failed to decrypt backup store credentials")
-		}
-	}
-
-	switch backupStore.StoreType {
-	case "s3":
-		var storeCfg models.S3StoreConfig
-		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
-			dest.S3 = &pgswarmv1.S3Destination{
-				Bucket:         storeCfg.Bucket,
-				Region:         storeCfg.Region,
-				Endpoint:       storeCfg.Endpoint,
-				ForcePathStyle: storeCfg.ForcePathStyle,
-			}
-		}
-		if len(decryptedCreds) > 0 {
-			var creds models.S3StoreCredentials
-			if err := json.Unmarshal(decryptedCreds, &creds); err == nil {
-				if dest.S3 == nil {
-					dest.S3 = &pgswarmv1.S3Destination{}
-				}
-				dest.S3.AccessKeyId = creds.AccessKeyID
-				dest.S3.SecretAccessKey = creds.SecretAccessKey
-			}
-		}
-
-	case "gcs":
-		var storeCfg models.GCSStoreConfig
-		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
-			dest.Gcs = &pgswarmv1.GCSDestination{
-				Bucket:     storeCfg.Bucket,
-				PathPrefix: storeCfg.PathPrefix,
-			}
-		}
-		if len(decryptedCreds) > 0 {
-			var creds models.GCSStoreCredentials
-			if err := json.Unmarshal(decryptedCreds, &creds); err == nil {
-				if dest.Gcs == nil {
-					dest.Gcs = &pgswarmv1.GCSDestination{}
-				}
-				dest.Gcs.ServiceAccountJson = creds.ServiceAccountJSON
-			}
-		}
-
-	case "sftp":
-		var storeCfg models.SFTPStoreConfig
-		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
-			dest.Sftp = &pgswarmv1.SFTPDestination{
-				Host:     storeCfg.Host,
-				Port:     int32(storeCfg.Port),
-				User:     storeCfg.User,
-				BasePath: storeCfg.BasePath,
-			}
-		}
-		if len(decryptedCreds) > 0 {
-			var creds models.SFTPStoreCredentials
-			if err := json.Unmarshal(decryptedCreds, &creds); err == nil {
-				if dest.Sftp == nil {
-					dest.Sftp = &pgswarmv1.SFTPDestination{}
-				}
-				dest.Sftp.Password = creds.Password
-			}
-		}
-
-	case "local":
-		var storeCfg models.LocalStoreConfig
-		if err := json.Unmarshal(backupStore.Config, &storeCfg); err == nil {
-			dest.Local = &pgswarmv1.LocalDestination{
-				Size:         storeCfg.Size,
-				StorageClass: storeCfg.StorageClass,
-			}
-		}
-	}
-
-	return dest
-}
-
-// --- Backup Stores ---
-
-func (s *RESTServer) listBackupStores(c *fiber.Ctx) error {
-	stores, err := s.store.ListBackupStores(c.Context())
-	if err != nil {
-		return fmt.Errorf("list backup stores: %w", err)
-	}
-	if stores == nil {
-		stores = []*models.BackupStore{}
-	}
-	for _, st := range stores {
-		s.computeStoreCredentialsSet(st)
-	}
-	return c.JSON(stores)
-}
-
-func (s *RESTServer) createBackupStore(c *fiber.Ctx) error {
-	var body struct {
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		StoreType   string          `json:"store_type"`
-		Config      json.RawMessage `json:"config"`
-		Credentials json.RawMessage `json:"credentials"`
-	}
-	if err := c.BodyParser(&body); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
-	}
-
-	store := &models.BackupStore{
-		Name:      body.Name,
-		Description: body.Description,
-		StoreType: body.StoreType,
-		Config:    body.Config,
-	}
-	if store.Config == nil {
-		store.Config = json.RawMessage("{}")
-	}
-
-	if err := models.ValidateBackupStore(store); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
-	}
-
-	// Validate required credentials per store type
-	if store.StoreType == "gcs" {
-		var creds models.GCSStoreCredentials
-		if len(body.Credentials) == 0 || json.Unmarshal(body.Credentials, &creds) != nil || creds.ServiceAccountJSON == "" {
-			return fiber.NewError(fiber.StatusBadRequest, "gcs store requires service_account_json")
-		}
-	}
-
-	// Encrypt credentials if provided
-	if len(body.Credentials) > 0 && string(body.Credentials) != "{}" && string(body.Credentials) != "null" {
-		if s.encryptor == nil {
-			return fiber.NewError(fiber.StatusBadRequest, "ENCRYPTION_KEY not configured; cannot store credentials")
-		}
-		encrypted, err := s.encryptor.Encrypt(body.Credentials)
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to encrypt credentials")
-		}
-		store.Credentials = encrypted
-	}
-
-	if err := s.store.CreateBackupStore(c.Context(), store); err != nil {
-		return fmt.Errorf("create backup store: %w", err)
-	}
-
-	s.computeStoreCredentialsSet(store)
-	return c.Status(fiber.StatusCreated).JSON(store)
-}
-
-func (s *RESTServer) getBackupStore(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
-	}
-	store, err := s.store.GetBackupStore(c.Context(), id)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup store not found")
-	}
-	s.computeStoreCredentialsSet(store)
-	return c.JSON(store)
-}
-
-func (s *RESTServer) updateBackupStore(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
-	}
-
-	existing, err := s.store.GetBackupStore(c.Context(), id)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup store not found")
-	}
-
-	var body struct {
-		Name        string           `json:"name"`
-		Description string           `json:"description"`
-		StoreType   string           `json:"store_type"`
-		Config      json.RawMessage  `json:"config"`
-		Credentials *json.RawMessage `json:"credentials"` // pointer: nil = keep existing
-	}
-	if err := c.BodyParser(&body); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
-	}
-
-	existing.Name = body.Name
-	existing.Description = body.Description
-	existing.StoreType = body.StoreType
-	if body.Config != nil {
-		existing.Config = body.Config
-	}
-
-	if err := models.ValidateBackupStore(existing); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
-	}
-
-	// If new credentials provided, encrypt and overwrite; otherwise keep existing
-	if body.Credentials != nil && len(*body.Credentials) > 0 && string(*body.Credentials) != "{}" && string(*body.Credentials) != "null" {
-		if s.encryptor == nil {
-			return fiber.NewError(fiber.StatusBadRequest, "ENCRYPTION_KEY not configured; cannot store credentials")
-		}
-		encrypted, err := s.encryptor.Encrypt(*body.Credentials)
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to encrypt credentials")
-		}
-		existing.Credentials = encrypted
-	}
-
-	if err := s.store.UpdateBackupStore(c.Context(), existing); err != nil {
-		return fmt.Errorf("update backup store: %w", err)
-	}
-
-	s.computeStoreCredentialsSet(existing)
-	return c.JSON(existing)
-}
-
-func (s *RESTServer) deleteBackupStore(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
-	}
-	if err := s.store.DeleteBackupStore(c.Context(), id); err != nil {
-		return fmt.Errorf("delete backup store: %w", err)
-	}
-	return c.SendStatus(fiber.StatusNoContent)
-}
-
-// computeStoreCredentialsSet decrypts credentials and computes which fields are set.
-func (s *RESTServer) computeStoreCredentialsSet(store *models.BackupStore) {
-	if len(store.Credentials) == 0 || s.encryptor == nil {
-		store.Credentials = nil
-		return
-	}
-	decrypted, err := s.encryptor.Decrypt(store.Credentials)
-	if err != nil {
-		store.Credentials = nil
-		return
-	}
-	store.CredentialsSet = models.ComputeCredentialsSet(store.StoreType, decrypted)
-	store.Credentials = nil // never expose raw credentials
 }
 
 // rePushClustersForProfile bumps config_version and re-pushes configs for all
@@ -2085,119 +1748,6 @@ func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uui
 		}
 		s.pushConfigToSatellite(cfg)
 	}
-}
-
-// --- Backup Inventory & Restore ---
-
-func (s *RESTServer) listClusterBackups(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
-	}
-	cfg, err := s.store.GetClusterConfig(c.Context(), id)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "cluster not found")
-	}
-	if cfg.SatelliteID == nil {
-		return c.JSON([]*models.BackupInventory{})
-	}
-	backups, err := s.store.ListBackupInventory(c.Context(), *cfg.SatelliteID, cfg.Name)
-	if err != nil {
-		return fmt.Errorf("list backups: %w", err)
-	}
-	if backups == nil {
-		backups = []*models.BackupInventory{}
-	}
-	return c.JSON(backups)
-}
-
-func (s *RESTServer) getBackup(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
-	}
-	backup, err := s.store.GetBackupInventory(c.Context(), id)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup not found")
-	}
-	return c.JSON(backup)
-}
-
-func (s *RESTServer) initiateRestore(c *fiber.Ctx) error {
-	clusterID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid cluster id")
-	}
-	cfg, err := s.store.GetClusterConfig(c.Context(), clusterID)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "cluster not found")
-	}
-	if cfg.SatelliteID == nil {
-		return fiber.NewError(fiber.StatusBadRequest, "cluster has no satellite")
-	}
-
-	var body models.RestoreOperation
-	if err := c.BodyParser(&body); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
-	}
-
-	// Validate backup exists
-	backup, err := s.store.GetBackupInventory(c.Context(), body.BackupID)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "backup not found")
-	}
-
-	body.SatelliteID = *cfg.SatelliteID
-	body.ClusterName = cfg.Name
-	body.Status = "pending"
-
-	if err := s.store.CreateRestoreOperation(c.Context(), &body); err != nil {
-		return fmt.Errorf("create restore operation: %w", err)
-	}
-
-	// Send restore command to satellite via gRPC
-	if s.streams != nil {
-		restoreCmd := &pgswarmv1.RestoreCommand{
-			ClusterName:    cfg.Name,
-			Namespace:      cfg.Namespace,
-			RestoreId:      body.ID.String(),
-			BackupId:       body.BackupID.String(),
-			RestoreType:    body.RestoreType,
-			TargetDatabase: body.TargetDatabase,
-			BackupPath:     backup.BackupPath,
-		}
-		if body.TargetTime != nil {
-			restoreCmd.TargetTime = timestamppb.New(*body.TargetTime)
-		}
-
-		if err := s.streams.PushRestoreCommand(*cfg.SatelliteID, restoreCmd); err != nil {
-			log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to send restore command")
-		}
-	}
-
-	return c.Status(fiber.StatusCreated).JSON(body)
-}
-
-func (s *RESTServer) listClusterRestores(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
-	}
-	cfg, err := s.store.GetClusterConfig(c.Context(), id)
-	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "cluster not found")
-	}
-	if cfg.SatelliteID == nil {
-		return c.JSON([]*models.RestoreOperation{})
-	}
-	ops, err := s.store.ListRestoreOperations(c.Context(), *cfg.SatelliteID, cfg.Name)
-	if err != nil {
-		return fmt.Errorf("list restore operations: %w", err)
-	}
-	if ops == nil {
-		ops = []*models.RestoreOperation{}
-	}
-	return c.JSON(ops)
 }
 
 // --- Error handler ---

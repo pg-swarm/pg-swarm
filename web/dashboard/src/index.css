@@ -367,10 +367,6 @@ tbody tr:hover { background: var(--green-light); }
 .input-warn { border-color: var(--amber); }
 .btn-link { background: none; border: none; color: var(--green); cursor: pointer; font-size: 11px; font-weight: 600; padding: 0; text-decoration: underline; }
 .btn-link:hover { color: var(--green-dark); }
-.backup-profiles-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-.backup-profiles-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-.backup-profiles-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--text-secondary); }
-.backup-profile-chip { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
 .form-row-wide { grid-column: 1 / -1; }
 
 .param-list { display: flex; flex-direction: column; gap: 4px; }
@@ -512,21 +508,6 @@ tbody tr:hover { background: var(--green-light); }
 .volume-section h5::before { content: '\25a0'; font-size: 8px; color: var(--green); }
 .volume-toggle { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 
-/* ── Backup Tab ───────────────────────────────────── */
-.backup-section { margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
-.backup-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
-.backup-section h5 { font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
-.backup-section h5::before { content: '\25a0'; font-size: 8px; color: var(--green); }
-.backup-subtabs { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 16px; min-width: 50%; }
-.backup-subtab { flex: 1; padding: 7px 18px; font-size: 12px; font-weight: 500; border: none; background: var(--white); color: var(--text-secondary); cursor: pointer; transition: all .15s; position: relative; text-align: center; }
-.backup-subtab:not(:last-child) { border-right: 1px solid var(--border); }
-.backup-subtab:hover { background: var(--green-light); color: var(--text); }
-.backup-subtab.active { background: var(--green); color: var(--white); }
-.backup-subtab .backup-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; margin-left: 6px; opacity: .6; }
-.backup-subtab.active .backup-dot { opacity: 1; }
-.backup-sticky-header { position: sticky; top: 0; z-index: 1; background: var(--white); padding-bottom: 4px; }
-.backup-disabled-fields { opacity: .45; pointer-events: none; }
-
 /* ── Replication User ─────────────────────────────── */
 .repl-user-row td { background: var(--green-light); }
 .repl-user-info { margin-bottom: 10px; }
@@ -591,11 +572,6 @@ tbody tr:hover { background: var(--green-light); }
   gap: 8px;
   justify-content: flex-end;
 }
-
-/* Backup profile modal */
-.backup-profile-modal { width: 740px; }
-.backup-profile-modal .tab-bar { margin-bottom: 16px; }
-.backup-profile-modal .form-section { border: none; box-shadow: none; padding: 0; }
 
 /* Switchover confirmation modal */
 .switchover-modal { width: 520px; }
@@ -1150,20 +1126,6 @@ tbody tr:hover { background: var(--green-light); }
 }
 .cd-progress-btn:hover { background: var(--blue-bg); opacity: .85; }
 
-/* Backup type badges */
-.cd-type-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 3px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: capitalize;
-}
-.cd-type-base { background: var(--green-bg); color: var(--green); }
-.cd-type-incremental { background: #dbeafe; color: #2563eb; }
-.cd-type-logical { background: #f3e8ff; color: #7c3aed; }
-.cd-type-physical { background: var(--green-bg); color: var(--green); }
-.cd-type-pitr { background: #fef3c7; color: #d97706; }
 
 /* Events */
 .cd-event-row {

@@ -10,10 +10,7 @@ import {
   deploymentRules,
   postgresVersions,
   postgresVariants,
-  backupStores,
   storageTiers,
-  backups,
-  restores,
   recoveryRuleSets,
   generateLogs,
 } from './data.js';
@@ -41,7 +38,6 @@ export default function mockApiPlugin() {
     deploymentRules: [...deploymentRules],
     postgresVersions: [...postgresVersions],
     postgresVariants: [...postgresVariants],
-    backupStores: [...backupStores],
     storageTiers: [...storageTiers],
     recoveryRuleSets: recoveryRuleSets.map(rs => ({ ...rs, rules: rs.rules.map(r => ({ ...r })) })),
   };
@@ -140,18 +136,6 @@ export default function mockApiPlugin() {
         if (path.match(/^\/clusters\/[^/]+\/switchover$/) && method === 'POST') {
           return json(res, { ok: true, message: 'Switchover initiated' });
         }
-        if (path.match(/^\/clusters\/[^/]+\/backups$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, backups.filter((b) => b.cluster_id === id));
-        }
-        if (path.match(/^\/clusters\/[^/]+\/restore$/) && method === 'POST') {
-          return json(res, { restore_id: 'rst-' + Date.now(), status: 'running' });
-        }
-        if (path.match(/^\/clusters\/[^/]+\/restores$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, restores.filter((r) => r.cluster_id === id));
-        }
-
         // ---- Health ----
         if (path === '/health' && method === 'GET') {
           return json(res, health);
@@ -284,43 +268,6 @@ export default function mockApiPlugin() {
           const id = path.split('/')[2];
           state.postgresVariants = state.postgresVariants.filter((v) => v.id !== id);
           return json(res, { ok: true });
-        }
-
-        // ---- Backup Stores ----
-        if (path === '/backup-stores' && method === 'GET') {
-          return json(res, state.backupStores);
-        }
-        if (path === '/backup-stores' && method === 'POST') {
-          body(req).then((b) => {
-            const bs = { id: 'bs-' + Date.now(), created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...b };
-            state.backupStores.push(bs);
-            json(res, bs, 201);
-          });
-          return;
-        }
-        if (path.match(/^\/backup-stores\/[^/]+$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, state.backupStores.find((bs) => bs.id === id) || { error: 'not found' });
-        }
-        if (path.match(/^\/backup-stores\/[^/]+$/) && method === 'PUT') {
-          const id = path.split('/')[2];
-          body(req).then((b) => {
-            const idx = state.backupStores.findIndex((bs) => bs.id === id);
-            if (idx >= 0) { Object.assign(state.backupStores[idx], b, { updated_at: new Date().toISOString() }); json(res, state.backupStores[idx]); }
-            else json(res, { error: 'not found' }, 404);
-          });
-          return;
-        }
-        if (path.match(/^\/backup-stores\/[^/]+$/) && method === 'DELETE') {
-          const id = path.split('/')[2];
-          state.backupStores = state.backupStores.filter((bs) => bs.id !== id);
-          return json(res, { ok: true });
-        }
-
-        // ---- Backups ----
-        if (path.match(/^\/backups\/[^/]+$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, backups.find((b) => b.id === id) || { error: 'not found' });
         }
 
         // ---- Storage Tiers ----

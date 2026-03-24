@@ -67,15 +67,6 @@ func buildFailoverRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 			},
 		},
 	}
-	// When backup is also enabled the backup sidecar runs under the failover SA
-	// (only one ServiceAccountName per pod), so grant it configmap access too.
-	if backupEnabled(cfg) {
-		role.Rules = append(role.Rules, rbacv1.PolicyRule{
-			APIGroups: []string{""},
-			Resources: []string{"configmaps"},
-			Verbs:     []string{"get", "create", "update", "patch"},
-		})
-	}
 	return role
 }
 

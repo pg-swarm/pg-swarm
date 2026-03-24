@@ -60,19 +60,6 @@ export const api = {
   deletePostgresVariant: (id) => request('/postgres-variants/' + id, { method: 'DELETE' }),
   satelliteLogs: (id, limit, level) => request('/satellites/' + id + '/logs?limit=' + (limit || 200) + '&level=' + (level || 'info')),
   setSatelliteLogLevel: (id, level) => request('/satellites/' + id + '/log-level', { method: 'POST', body: JSON.stringify({ level }) }),
-
-  // Backup Stores
-  backupStores:        ()           => request('/backup-stores'),
-  createBackupStore:   (data)       => request('/backup-stores', { method: 'POST', body: JSON.stringify(data) }),
-  getBackupStore:      (id)         => request('/backup-stores/' + id),
-  updateBackupStore:   (id, data)   => request('/backup-stores/' + id, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteBackupStore:   (id)         => request('/backup-stores/' + id, { method: 'DELETE' }),
-
-  // Backup Inventory & Restore
-  clusterBackups:     (id)         => request('/clusters/' + id + '/backups'),
-  getBackup:          (id)         => request('/backups/' + id),
-  initiateRestore:    (clusterId, data) => request('/clusters/' + clusterId + '/restore', { method: 'POST', body: JSON.stringify(data) }),
-  clusterRestores:    (id)         => request('/clusters/' + id + '/restores'),
 };
 
 export function subscribeSatelliteLogs(satelliteId, onEntry, onError) {

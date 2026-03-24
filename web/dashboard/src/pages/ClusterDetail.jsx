@@ -15,23 +15,15 @@ import {
   ArrowUpRight, Pause, Play, HardDrive, BarChart3,
   Table2, SearchCode, ArrowLeft, X, Info, AlertTriangle,
   AlertCircle, Flame, Database, Activity, ChevronDown, ChevronRight,
-  Archive, RotateCcw, CheckCircle, Clock, XCircle, Loader, Trash2,
+  Loader, Trash2,
 } from 'lucide-react';
 
 const SEV_ICONS = { info: Info, warning: AlertTriangle, error: AlertCircle, critical: Flame };
 
 const TABS = [
   { id: 'instances', label: 'Instances' },
-  { id: 'backups', label: 'Backups' },
   { id: 'events', label: 'Events' },
 ];
-
-const STATUS_ICON = {
-  completed: { icon: CheckCircle, color: 'var(--green)' },
-  running: { icon: Loader, color: 'var(--blue)' },
-  failed: { icon: XCircle, color: 'var(--red)' },
-  pending: { icon: Clock, color: 'var(--amber)' },
-};
 
 export default function ClusterDetail() {
   const { id } = useParams();
@@ -41,8 +33,6 @@ export default function ClusterDetail() {
   const [health, setHealth] = useState([]);
   const [events, setEvents] = useState([]);
   const [deploymentRules, setDeploymentRules] = useState([]);
-  const [backups, setBackups] = useState([]);
-  const [restores, setRestores] = useState([]);
   const [busy, setBusy] = useState(false);
   const [detailInstId, setDetailInstId] = useState(null);
   const [switchoverOpId, setSwitchoverOpId] = useState(null);
@@ -88,18 +78,14 @@ export default function ClusterDetail() {
 
   const refresh = useCallback(async () => {
     try {
-      const [c, s, h, e, dr, b, r] = await Promise.all([
+      const [c, s, h, e, dr] = await Promise.all([
         api.clusters(), api.satellites(), api.health(), api.events(50), api.deploymentRules(),
-        id ? api.clusterBackups(id).catch(() => []) : Promise.resolve([]),
-        id ? api.clusterRestores(id).catch(() => []) : Promise.resolve([]),
       ]);
       setClusters(c || []);
       setSatellites(s || []);
       setHealth(h || []);
       setEvents(e || []);
       setDeploymentRules(dr || []);
-      setBackups(b || []);
-      setRestores(r || []);
     } catch (err) {
       console.error('ClusterDetail refresh failed:', err);
     }
@@ -272,8 +258,7 @@ export default function ClusterDetail() {
   const tags = [];
   if (cluster.paused) tags.push('paused');
   if (s.failover?.enabled) tags.push('failover');
-  if (s.backups?.length) tags.push('backup sidecar');
-  else if (s.archive?.mode) tags.push('archive:' + s.archive.mode);
+  if (s.archive?.mode) tags.push('archive:' + s.archive.mode);
   if (s.databases?.length) tags.push(s.databases.length + ' db' + (s.databases.length > 1 ? 's' : ''));
 
   return (
@@ -362,7 +347,6 @@ export default function ClusterDetail() {
           <div className="tab-bar" style={{ marginBottom: 16, borderRadius: 8, overflow: 'hidden' }}>
             {TABS.map(tab => {
               const count = tab.id === 'instances' ? instances.length
-                : tab.id === 'backups' ? backups.length
                 : tab.id === 'events' ? clusterEvents.length : 0;
               return (
                 <button
@@ -495,129 +479,6 @@ export default function ClusterDetail() {
             </>
           )}
 
-          {/* ── Backups Tab ── */}
-          {activeTab === 'backups' && (
-            <>
-              {/* Backup Inventory */}
-              <div className="cd-card">
-                <div className="cd-card-header">
-                  <Archive size={14} />
-                  Backup Inventory ({backups.length})
-                </div>
-                <div className="cd-card-body" style={{ padding: 0 }}>
-                  {backups.length === 0 ? (
-                    <div className="cd-empty">No backups recorded for this cluster.</div>
-                  ) : (
-                    <div style={{ overflowX: 'auto' }}>
-                      <table className="cd-table">
-                        <thead>
-                          <tr>
-                            <th>Type</th>
-                            <th>Status</th>
-                            <th>Path</th>
-                            <th>Size</th>
-                            <th>PG</th>
-                            <th>Started</th>
-                            <th>Duration</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {backups.map(b => {
-                            const si = STATUS_ICON[b.status] || STATUS_ICON.pending;
-                            const Icon = si.icon;
-                            const dur = b.started_at && b.completed_at
-                              ? Math.round((new Date(b.completed_at) - new Date(b.started_at)) / 1000)
-                              : null;
-                            return (
-                              <tr key={b.id}>
-                                <td>
-                                  <span className={'cd-type-badge cd-type-' + b.backup_type}>
-                                    {b.backup_type}
-                                  </span>
-                                </td>
-                                <td>
-                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: si.color }}>
-                                    <Icon size={13} />
-                                    {b.status}
-                                  </span>
-                                </td>
-                                <td className="mono" title={b.backup_path} style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {b.backup_path}
-                                </td>
-                                <td className="mono">{formatDisk(b.size_bytes)}</td>
-                                <td className="mono muted">{b.pg_version || '-'}</td>
-                                <td className="muted">{timeAgo(b.started_at)}</td>
-                                <td className="mono muted">{dur !== null ? formatDuration(dur) : '-'}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Restore History */}
-              <div className="cd-card">
-                <div className="cd-card-header">
-                  <RotateCcw size={14} />
-                  Restore History ({restores.length})
-                </div>
-                <div className="cd-card-body" style={{ padding: 0 }}>
-                  {restores.length === 0 ? (
-                    <div className="cd-empty">No restores performed on this cluster.</div>
-                  ) : (
-                    <div style={{ overflowX: 'auto' }}>
-                      <table className="cd-table">
-                        <thead>
-                          <tr>
-                            <th>Type</th>
-                            <th>Status</th>
-                            <th>Backup Path</th>
-                            <th>Target DB</th>
-                            <th>Started</th>
-                            <th>Duration</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {restores.map(r => {
-                            const si = STATUS_ICON[r.status] || STATUS_ICON.pending;
-                            const Icon = si.icon;
-                            const dur = r.started_at && r.completed_at
-                              ? Math.round((new Date(r.completed_at) - new Date(r.started_at)) / 1000)
-                              : null;
-                            return (
-                              <tr key={r.id}>
-                                <td>
-                                  <span className={'cd-type-badge cd-type-' + r.restore_type}>
-                                    {r.restore_type}
-                                  </span>
-                                </td>
-                                <td>
-                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: si.color }}>
-                                    <Icon size={13} />
-                                    {r.status}
-                                  </span>
-                                </td>
-                                <td className="mono" title={r.backup_path} style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {r.backup_path}
-                                </td>
-                                <td className="mono">{r.target_database || 'all'}</td>
-                                <td className="muted">{timeAgo(r.started_at)}</td>
-                                <td className="mono muted">{dur !== null ? formatDuration(dur) : '-'}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-
           {/* ── Events Tab ── */}
           {activeTab === 'events' && (
             <div className="cd-card">
@@ -696,15 +557,6 @@ export default function ClusterDetail() {
       )}
     </div>
   );
-}
-
-function formatDuration(seconds) {
-  if (seconds < 60) return seconds + 's';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  if (m < 60) return m + 'm ' + s + 's';
-  const h = Math.floor(m / 60);
-  return h + 'h ' + (m % 60) + 'm';
 }
 
 /* ── Instance Detail (inline section, not modal) ────── */

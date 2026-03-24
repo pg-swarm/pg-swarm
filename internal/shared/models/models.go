@@ -3,7 +3,6 @@ package models
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,7 +96,6 @@ type ClusterSpec struct {
 	Databases          []DatabaseSpec    `json:"databases,omitempty"`           // databases to create with owner users
 	Failover           *FailoverSpec     `json:"failover,omitempty"`            // nil = failover disabled
 	DeletionProtection bool              `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
-	Backup             *BackupSpec       `json:"backup,omitempty"`              // nil = no backup configured
 }
 
 type PostgresSpec struct {
@@ -141,37 +139,6 @@ type FailoverSpec struct {
 	Enabled                    bool   `json:"enabled"`
 	HealthCheckIntervalSeconds int32  `json:"health_check_interval_seconds,omitempty"`
 	SidecarImage               string `json:"sidecar_image,omitempty"`
-}
-
-type BackupSpec struct {
-	StoreID  *uuid.UUID            `json:"store_id,omitempty"` // references a BackupStore
-	Physical *PhysicalBackupConfig `json:"physical,omitempty"`
-	Logical  *LogicalBackupConfig  `json:"logical,omitempty"`
-}
-
-type PhysicalBackupConfig struct {
-	BaseSchedule        string            `json:"base_schedule"`
-	IncrementalSchedule string            `json:"incremental_schedule,omitempty"`
-	WalArchiveEnabled   bool              `json:"wal_archive_enabled"`
-	ArchiveTimeoutSecs  int32             `json:"archive_timeout_seconds,omitempty"`
-	Retention           PhysicalRetention `json:"retention"`
-}
-
-type PhysicalRetention struct {
-	BaseBackupCount        int `json:"base_backup_count,omitempty"`
-	IncrementalBackupCount int `json:"incremental_backup_count,omitempty"`
-	WalRetentionDays       int `json:"wal_retention_days,omitempty"`
-}
-
-type LogicalBackupConfig struct {
-	Schedule  string           `json:"schedule"`
-	Databases []string         `json:"databases,omitempty"`
-	Format    string           `json:"format,omitempty"`
-	Retention LogicalRetention `json:"retention"`
-}
-
-type LogicalRetention struct {
-	BackupCount int `json:"backup_count,omitempty"`
 }
 
 type DatabaseSpec struct {
@@ -219,60 +186,6 @@ func ValidateDatabases(dbs []DatabaseSpec) error {
 			return fmt.Errorf("databases[%d]: duplicate database name %q", i, db.Name)
 		}
 		seen[db.Name] = true
-	}
-	return nil
-}
-
-// cronRe is a basic structural check for 5-field cron expressions.
-var cronRe = regexp.MustCompile(`^(\S+\s+){4}\S+$`)
-
-// ValidateBackupSpec validates the backup configuration.
-// nil is valid (no backup configured).
-func ValidateBackupSpec(b *BackupSpec) error {
-	if b == nil {
-		return nil
-	}
-	if (b.Physical != nil || b.Logical != nil) && b.StoreID == nil {
-		return fmt.Errorf("backup: store_id is required when physical or logical backups are configured")
-	}
-	if b.Physical != nil {
-		p := b.Physical
-		if p.BaseSchedule == "" {
-			return fmt.Errorf("backup.physical: base_schedule is required")
-		}
-		if !cronRe.MatchString(p.BaseSchedule) {
-			return fmt.Errorf("backup.physical: base_schedule must be a 5-field cron expression")
-		}
-		if p.IncrementalSchedule != "" && !cronRe.MatchString(p.IncrementalSchedule) {
-			return fmt.Errorf("backup.physical: incremental_schedule must be a 5-field cron expression")
-		}
-		if p.ArchiveTimeoutSecs < 0 {
-			return fmt.Errorf("backup.physical: archive_timeout_seconds must be >= 0")
-		}
-		if p.Retention.BaseBackupCount < 1 {
-			return fmt.Errorf("backup.physical: retention.base_backup_count must be >= 1")
-		}
-		if p.WalArchiveEnabled && p.Retention.WalRetentionDays < 1 {
-			return fmt.Errorf("backup.physical: retention.wal_retention_days must be >= 1 when WAL archiving is enabled")
-		}
-	}
-	if b.Logical != nil {
-		l := b.Logical
-		if l.Schedule == "" {
-			return fmt.Errorf("backup.logical: schedule is required")
-		}
-		if !cronRe.MatchString(l.Schedule) {
-			return fmt.Errorf("backup.logical: schedule must be a 5-field cron expression")
-		}
-		switch l.Format {
-		case "", "custom", "plain", "directory":
-			// valid
-		default:
-			return fmt.Errorf("backup.logical: format must be \"custom\", \"plain\", or \"directory\"")
-		}
-		if l.Retention.BackupCount < 1 {
-			return fmt.Errorf("backup.logical: retention.backup_count must be >= 1")
-		}
 	}
 	return nil
 }
@@ -351,171 +264,6 @@ type Event struct {
 	Message     string    `json:"message" db:"message"`
 	Source      string    `json:"source" db:"source"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
-}
-
-// ---------- Backup Stores ----------
-
-type BackupStore struct {
-	ID             uuid.UUID       `json:"id"`
-	Name           string          `json:"name"`
-	Description    string          `json:"description"`
-	StoreType      string          `json:"store_type"`
-	Config         json.RawMessage `json:"config"`
-	Credentials    []byte          `json:"-"`                         // never serialized to API
-	CredentialsSet map[string]bool `json:"credentials_set,omitempty"` // computed on read
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-}
-
-// Non-secret config (stored as plaintext JSONB)
-type S3StoreConfig struct {
-	Bucket         string `json:"bucket"`
-	Region         string `json:"region"`
-	Endpoint       string `json:"endpoint,omitempty"`
-	ForcePathStyle bool   `json:"force_path_style,omitempty"`
-}
-type GCSStoreConfig struct {
-	Bucket     string `json:"bucket"`
-	PathPrefix string `json:"path_prefix,omitempty"`
-}
-type SFTPStoreConfig struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port,omitempty"`
-	User     string `json:"user"`
-	BasePath string `json:"base_path"`
-}
-type LocalStoreConfig struct {
-	Size         string `json:"size"`
-	StorageClass string `json:"storage_class,omitempty"`
-}
-
-// Secret credentials (stored encrypted as BYTEA)
-type S3StoreCredentials struct {
-	AccessKeyID    string `json:"access_key_id,omitempty"`
-	SecretAccessKey string `json:"secret_access_key,omitempty"`
-}
-type GCSStoreCredentials struct {
-	ServiceAccountJSON string `json:"service_account_json,omitempty"`
-}
-type SFTPStoreCredentials struct {
-	Password   string `json:"password,omitempty"`
-	PrivateKey string `json:"private_key,omitempty"`
-}
-
-// ValidateBackupStore validates a backup store's required fields.
-func ValidateBackupStore(store *BackupStore) error {
-	if store.Name == "" {
-		return fmt.Errorf("name is required")
-	}
-	switch store.StoreType {
-	case "s3":
-		var cfg S3StoreConfig
-		if err := json.Unmarshal(store.Config, &cfg); err != nil {
-			return fmt.Errorf("invalid s3 config: %w", err)
-		}
-		if cfg.Bucket == "" {
-			return fmt.Errorf("s3 store requires bucket")
-		}
-	case "gcs":
-		var cfg GCSStoreConfig
-		if err := json.Unmarshal(store.Config, &cfg); err != nil {
-			return fmt.Errorf("invalid gcs config: %w", err)
-		}
-		if cfg.Bucket == "" {
-			return fmt.Errorf("gcs store requires bucket")
-		}
-	case "sftp":
-		var cfg SFTPStoreConfig
-		if err := json.Unmarshal(store.Config, &cfg); err != nil {
-			return fmt.Errorf("invalid sftp config: %w", err)
-		}
-		if cfg.Host == "" || cfg.BasePath == "" {
-			return fmt.Errorf("sftp store requires host and base_path")
-		}
-	case "local":
-		var cfg LocalStoreConfig
-		if err := json.Unmarshal(store.Config, &cfg); err != nil {
-			return fmt.Errorf("invalid local config: %w", err)
-		}
-		if cfg.Size == "" {
-			return fmt.Errorf("local store requires size")
-		}
-	default:
-		return fmt.Errorf("store_type must be \"s3\", \"gcs\", \"sftp\", or \"local\"")
-	}
-	return nil
-}
-
-// ComputeCredentialsSet unmarshals decrypted credential JSON and returns which fields are non-empty.
-func ComputeCredentialsSet(storeType string, creds []byte) map[string]bool {
-	if len(creds) == 0 {
-		return nil
-	}
-	result := make(map[string]bool)
-	switch storeType {
-	case "s3":
-		var c S3StoreCredentials
-		if json.Unmarshal(creds, &c) == nil {
-			result["access_key_id"] = c.AccessKeyID != ""
-			result["secret_access_key"] = c.SecretAccessKey != ""
-		}
-	case "gcs":
-		var c GCSStoreCredentials
-		if json.Unmarshal(creds, &c) == nil {
-			result["service_account_json"] = c.ServiceAccountJSON != ""
-		}
-	case "sftp":
-		var c SFTPStoreCredentials
-		if json.Unmarshal(creds, &c) == nil {
-			result["password"] = c.Password != ""
-			result["private_key"] = c.PrivateKey != ""
-		}
-	case "local":
-		return nil
-	}
-	// Remove entries where value is false
-	for k, v := range result {
-		if !v {
-			delete(result, k)
-		}
-	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
-}
-
-type BackupInventory struct {
-	ID              uuid.UUID  `json:"id" db:"id"`
-	SatelliteID     uuid.UUID  `json:"satellite_id" db:"satellite_id"`
-	ClusterName     string     `json:"cluster_name" db:"cluster_name"`
-	BackupProfileID *uuid.UUID `json:"backup_profile_id,omitempty" db:"backup_profile_id"`
-	BackupType      string     `json:"backup_type" db:"backup_type"` // "base", "wal", "logical"
-	Status          string     `json:"status" db:"status"`           // "running", "completed", "failed"
-	StartedAt       time.Time  `json:"started_at" db:"started_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty" db:"completed_at"`
-	SizeBytes       int64      `json:"size_bytes" db:"size_bytes"`
-	BackupPath      string     `json:"backup_path" db:"backup_path"`
-	PgVersion       string     `json:"pg_version" db:"pg_version"`
-	WalStartLSN     string     `json:"wal_start_lsn,omitempty" db:"wal_start_lsn"`
-	WalEndLSN       string     `json:"wal_end_lsn,omitempty" db:"wal_end_lsn"`
-	ErrorMessage    string     `json:"error_message,omitempty" db:"error_message"`
-	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
-}
-
-type RestoreOperation struct {
-	ID             uuid.UUID  `json:"id" db:"id"`
-	SatelliteID    uuid.UUID  `json:"satellite_id" db:"satellite_id"`
-	ClusterName    string     `json:"cluster_name" db:"cluster_name"`
-	BackupID       uuid.UUID  `json:"backup_id" db:"backup_id"`
-	RestoreType    string     `json:"restore_type" db:"restore_type"` // "pitr", "logical"
-	TargetTime     *time.Time `json:"target_time,omitempty" db:"target_time"`
-	TargetDatabase string     `json:"target_database,omitempty" db:"target_database"`
-	Status         string     `json:"status" db:"status"` // "pending", "running", "completed", "failed"
-	ErrorMessage   string     `json:"error_message,omitempty" db:"error_message"`
-	StartedAt      *time.Time `json:"started_at,omitempty" db:"started_at"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty" db:"completed_at"`
-	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
 }
 
 // ---------- Recovery Rule Sets ----------

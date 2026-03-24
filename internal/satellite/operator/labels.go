@@ -11,9 +11,6 @@ const (
 
 	LabelTombstone = "pg-swarm.io/tombstone"
 
-	LabelBackupType    = "pg-swarm/backup-type"
-	LabelBackupProfile = "pg-swarm/backup-profile"
-
 	ManagedByValue = "pg-swarm"
 	AppNameValue   = "postgresql"
 
