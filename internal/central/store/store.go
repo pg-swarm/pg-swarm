@@ -76,29 +76,6 @@ type Store interface {
 	CreatePostgresVariant(ctx context.Context, v *models.PostgresVariant) error
 	DeletePostgresVariant(ctx context.Context, id uuid.UUID) error
 
-	// Backup Profiles
-	CreateBackupProfile(ctx context.Context, rule *models.BackupProfile) error
-	GetBackupProfile(ctx context.Context, id uuid.UUID) (*models.BackupProfile, error)
-	ListBackupProfiles(ctx context.Context) ([]*models.BackupProfile, error)
-	UpdateBackupProfile(ctx context.Context, rule *models.BackupProfile) error
-	DeleteBackupProfile(ctx context.Context, id uuid.UUID) error
-	AttachBackupProfileToProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
-	DetachBackupProfileFromProfile(ctx context.Context, profileID, backupProfileID uuid.UUID) error
-	ListBackupProfilesForProfile(ctx context.Context, profileID uuid.UUID) ([]*models.BackupProfile, error)
-	ListProfileIDsForBackupProfile(ctx context.Context, backupProfileID uuid.UUID) ([]uuid.UUID, error)
-
-	// Backup Inventory
-	CreateBackupInventory(ctx context.Context, inv *models.BackupInventory) error
-	UpdateBackupInventory(ctx context.Context, inv *models.BackupInventory) error
-	ListBackupInventory(ctx context.Context, satelliteID uuid.UUID, clusterName string) ([]*models.BackupInventory, error)
-	GetBackupInventory(ctx context.Context, id uuid.UUID) (*models.BackupInventory, error)
-
-	// Restore Operations
-	CreateRestoreOperation(ctx context.Context, op *models.RestoreOperation) error
-	UpdateRestoreOperation(ctx context.Context, op *models.RestoreOperation) error
-	GetRestoreOperation(ctx context.Context, id uuid.UUID) (*models.RestoreOperation, error)
-	ListRestoreOperations(ctx context.Context, satelliteID uuid.UUID, clusterName string) ([]*models.RestoreOperation, error)
-
 	// Health
 	UpdateClusterConfigState(ctx context.Context, satelliteID uuid.UUID, clusterName string, state models.ClusterState) error
 	UpsertClusterHealth(ctx context.Context, health *models.ClusterHealth) error

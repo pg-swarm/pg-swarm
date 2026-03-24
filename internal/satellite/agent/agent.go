@@ -93,7 +93,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// 2. Create operator (requires K8s client)
 	if a.k8sClient != nil {
-		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage, a.identity.SatelliteID)
+		a.operator = operator.New(a.k8sClient, a.config.K8sClusterName, a.config.DeployNamespace, a.config.DefaultFailoverImage)
 		log.Trace().Msg("operator created")
 	} else {
 		log.Warn().Msg("K8s client unavailable — operator disabled, configs will be logged only")
@@ -160,24 +160,6 @@ func (a *Agent) Run(ctx context.Context) error {
 		log.Trace().Msg("switchover callback wired")
 	}
 
-	// 6b. Wire restore command callback
-	if a.k8sClient != nil {
-		a.connector.OnRestoreCommand = func(cmd *pgswarmv1.RestoreCommand) {
-			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
-				Payload: &pgswarmv1.SatelliteMessage_RestoreStatus{
-					RestoreStatus: &pgswarmv1.RestoreStatusReport{
-						ClusterName: cmd.ClusterName,
-						Namespace:   cmd.Namespace,
-						RestoreId:   cmd.RestoreId,
-						Status:      "running",
-					},
-				},
-			})
-			log.Info().Str("cluster", cmd.ClusterName).Str("restore_id", cmd.RestoreId).Msg("restore command acknowledged")
-		}
-		log.Trace().Msg("restore command callback wired")
-	}
-
 	// 7. Start health monitor
 	if a.operator != nil && a.k8sClient != nil {
 		a.healthMon = health.New(a.k8sClient, a.operator, 30*time.Second)
@@ -193,13 +175,6 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
 				Payload: &pgswarmv1.SatelliteMessage_EventReport{
 					EventReport: event,
-				},
-			})
-		})
-		mon.SetOnBackup(func(report *pgswarmv1.BackupStatusReport) {
-			a.connector.SendMessage(&pgswarmv1.SatelliteMessage{
-				Payload: &pgswarmv1.SatelliteMessage_BackupStatus{
-					BackupStatus: report,
 				},
 			})
 		})

@@ -29,12 +29,12 @@ type Monitor struct {
 	operator     *operator.Operator
 	onHealth     func(*pgswarmv1.ClusterHealthReport)
 	onEvent      func(*pgswarmv1.EventReport)
-	onBackup     func(*pgswarmv1.BackupStatusReport)
-	interval     time.Duration
-	lastStates   map[string]pgswarmv1.ClusterState
-	mu           sync.Mutex
-	firstSeen    map[string]time.Time // tracks when each cluster was first observed
-	lastBackupCM map[string]string    // tracks last-seen backup status ConfigMap resourceVersion
+	interval   time.Duration
+	lastStates map[string]pgswarmv1.ClusterState
+	mu         sync.Mutex
+	firstSeen  map[string]time.Time // tracks when each cluster was first observed
+
+	transitionSince map[string]time.Time // tracks when TRANSITION state started per cluster
 
 	// Adaptive interval: Boost() temporarily switches to fast polling.
 	boostInterval time.Duration
@@ -45,14 +45,14 @@ type Monitor struct {
 // New creates a new health Monitor.
 func New(client kubernetes.Interface, op *operator.Operator, interval time.Duration) *Monitor {
 	return &Monitor{
-		client:        client,
-		operator:      op,
-		interval:      interval,
-		boostInterval: 3 * time.Second,
-		lastStates:    make(map[string]pgswarmv1.ClusterState),
-		firstSeen:     make(map[string]time.Time),
-		lastBackupCM:  make(map[string]string),
-		poke:          make(chan struct{}, 1),
+		client:          client,
+		operator:        op,
+		interval:        interval,
+		boostInterval:   3 * time.Second,
+		lastStates:      make(map[string]pgswarmv1.ClusterState),
+		firstSeen:       make(map[string]time.Time),
+		transitionSince: make(map[string]time.Time),
+		poke:            make(chan struct{}, 1),
 	}
 }
 
@@ -90,11 +90,6 @@ func (m *Monitor) SetOnHealth(fn func(*pgswarmv1.ClusterHealthReport)) {
 // SetOnEvent sets the callback for event reports.
 func (m *Monitor) SetOnEvent(fn func(*pgswarmv1.EventReport)) {
 	m.onEvent = fn
-}
-
-// SetOnBackup sets the callback for backup status reports.
-func (m *Monitor) SetOnBackup(fn func(*pgswarmv1.BackupStatusReport)) {
-	m.onBackup = fn
 }
 
 // Run starts the health check loop. It blocks until ctx is cancelled.
@@ -177,12 +172,6 @@ func (m *Monitor) checkAll(ctx context.Context) {
 				})
 			}
 		}
-		// Trigger pending base backups when cluster first becomes RUNNING
-		if r.report.State == pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING &&
-			(!existed || prev != pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING) {
-			m.operator.TriggerPendingBackups(ctx, r.mc.Namespace, r.mc.ClusterName)
-		}
-
 		// Auto-boost: new cluster appearing, or any cluster not yet RUNNING
 		if !existed {
 			needsBoost = true
@@ -193,6 +182,10 @@ func (m *Monitor) checkAll(ctx context.Context) {
 			needsBoost = true
 		}
 
+		// Update cluster-status ConfigMap with lifecycle state
+		lifecycle, reason := m.mapToLifecycleState(key, r.report.State, prev, existed)
+		m.updateClusterStatus(ctx, r.mc.Namespace, r.mc.ClusterName, lifecycle, reason, r.report.State)
+
 		m.lastStates[key] = r.report.State
 	}
 
@@ -201,45 +194,6 @@ func (m *Monitor) checkAll(ctx context.Context) {
 		m.Boost(1 * time.Minute)
 	}
 
-	// Check for backup status ConfigMap updates
-	if m.onBackup != nil {
-		m.checkBackupStatuses(ctx, clusters)
-	}
-}
-
-// checkBackupStatuses looks for backup-status ConfigMaps and reports new completions.
-func (m *Monitor) checkBackupStatuses(ctx context.Context, clusters []operator.ManagedCluster) {
-	for _, mc := range clusters {
-		cmName := mc.ClusterName + "-backup-status"
-		cm, err := m.client.CoreV1().ConfigMaps(mc.Namespace).Get(ctx, cmName, metav1.GetOptions{})
-		if err != nil {
-			continue // no backup status ConfigMap = no backup running
-		}
-
-		key := mc.Namespace + "/" + cmName
-		if cm.ResourceVersion == m.lastBackupCM[key] {
-			continue // no change since last check
-		}
-		m.lastBackupCM[key] = cm.ResourceVersion
-
-		report := &pgswarmv1.BackupStatusReport{
-			ClusterName:  mc.ClusterName,
-			Namespace:    mc.Namespace,
-			BackupType:   cm.Data["backup_type"],
-			Status:       cm.Data["status"],
-			BackupPath:   cm.Data["backup_path"],
-			ErrorMessage: cm.Data["error_message"],
-		}
-
-		if t, err := time.Parse(time.RFC3339, cm.Data["started_at"]); err == nil {
-			report.StartedAt = timestamppb.New(t)
-		}
-		if t, err := time.Parse(time.RFC3339, cm.Data["completed_at"]); err == nil {
-			report.CompletedAt = timestamppb.New(t)
-		}
-
-		m.onBackup(report)
-	}
 }
 
 func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) *pgswarmv1.ClusterHealthReport {
@@ -258,7 +212,7 @@ func (m *Monitor) checkCluster(ctx context.Context, mc operator.ManagedCluster) 
 	defer cancel()
 
 	pods, err := m.client.CoreV1().Pods(mc.Namespace).List(checkCtx, metav1.ListOptions{
-		LabelSelector: operator.LabelCluster + "=" + mc.ClusterName + ",!" + operator.LabelBackupType,
+		LabelSelector: operator.LabelCluster + "=" + mc.ClusterName,
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("cluster", mc.ClusterName).Msg("failed to list pods for health check")
@@ -707,6 +661,81 @@ func isPodReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// transitionTimeout is how long a cluster stays in TRANSITION before downgrading to UNSTABLE.
+const transitionTimeout = 60 * time.Second
+
+// mapToLifecycleState maps a proto ClusterState to a lifecycle state string for the ConfigMap.
+// The TRANSITION state is used when a cluster was RUNNING and becomes non-RUNNING (e.g. failover),
+// giving it 60s to recover before downgrading to UNSTABLE.
+func (m *Monitor) mapToLifecycleState(key string, current, prev pgswarmv1.ClusterState, hadPrev bool) (string, string) {
+	switch current {
+	case pgswarmv1.ClusterState_CLUSTER_STATE_CREATING:
+		delete(m.transitionSince, key)
+		return "INIT", "cluster creating"
+
+	case pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING:
+		delete(m.transitionSince, key)
+		return "RUNNING", "primary and all replicas ready"
+
+	case pgswarmv1.ClusterState_CLUSTER_STATE_DEGRADED, pgswarmv1.ClusterState_CLUSTER_STATE_FAILED:
+		if hadPrev && prev == pgswarmv1.ClusterState_CLUSTER_STATE_RUNNING {
+			// Was RUNNING, now degraded/failed — enter TRANSITION
+			if _, ok := m.transitionSince[key]; !ok {
+				m.transitionSince[key] = time.Now()
+			}
+		}
+		if since, ok := m.transitionSince[key]; ok {
+			if time.Since(since) < transitionTimeout {
+				return "TRANSITION", fmt.Sprintf("was RUNNING, now %s (transition for %.0fs)", current, time.Since(since).Seconds())
+			}
+			// Timeout expired — downgrade to UNSTABLE
+			delete(m.transitionSince, key)
+		}
+		return "UNSTABLE", fmt.Sprintf("cluster %s", current)
+
+	case pgswarmv1.ClusterState_CLUSTER_STATE_PAUSED:
+		delete(m.transitionSince, key)
+		return "UNSTABLE", "cluster paused"
+
+	case pgswarmv1.ClusterState_CLUSTER_STATE_DELETING:
+		delete(m.transitionSince, key)
+		return "UNSTABLE", "cluster deleting"
+
+	default:
+		delete(m.transitionSince, key)
+		return "UNSTABLE", fmt.Sprintf("unknown state %s", current)
+	}
+}
+
+// updateClusterStatus writes the lifecycle state to the cluster-status ConfigMap.
+// Silently skips if the ConfigMap doesn't exist yet (operator hasn't created it).
+func (m *Monitor) updateClusterStatus(ctx context.Context, namespace, clusterName, lifecycle, reason string, protoState pgswarmv1.ClusterState) {
+	cmName := clusterName + "-cluster-status"
+	cm, err := m.client.CoreV1().ConfigMaps(namespace).Get(ctx, cmName, metav1.GetOptions{})
+	if err != nil {
+		// ConfigMap not found — operator hasn't created it yet, skip silently
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	cm.Data["lifecycle_state"] = lifecycle
+	cm.Data["updated_at"] = now
+	cm.Data["reason"] = reason
+	cm.Data["proto_state"] = protoState.String()
+
+	if lifecycle == "TRANSITION" {
+		if cm.Data["transition_since"] == "" {
+			cm.Data["transition_since"] = now
+		}
+	} else {
+		cm.Data["transition_since"] = ""
+	}
+
+	if _, err := m.client.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		log.Warn().Err(err).Str("configmap", cmName).Msg("failed to update cluster-status ConfigMap")
+	}
 }
 
 func severityForTransition(newState pgswarmv1.ClusterState) string {

@@ -7,7 +7,6 @@ Centralized management system for PostgreSQL HA clusters across edge Kubernetes 
 - **Central** (`cmd/central`): gRPC server (:9090) + REST API (:8080, 60+ endpoints) + embedded React dashboard + WebSocket hub
 - **Satellite** (`cmd/satellite`): Lightweight agent on each edge K8s cluster, sidecar streaming, log capture
 - **Failover sidecar** (`cmd/failover-sidecar`): Per-pod sidecar for leader election, promotion, log watcher, sidecar streaming
-- **Backup sidecar** (`cmd/backup-sidecar`): Per-pod sidecar for WAL archiving, base/incremental/logical backups, metadata (SQLite), retention. Role-aware (primary: WAL + metadata, replica: backups + scheduling)
 - **Protobuf** definitions in `api/proto/v1/`, generated code in `api/gen/v1/`
 
 ## Build & Test
@@ -44,8 +43,6 @@ make dashboard         # Build React dashboard
 - `internal/failover/` — Failover monitor (leader lease, pg_promote, log watcher, sidecar connector)
 - `internal/failover/logwatcher.go` — Real-time PG log monitoring (40+ recovery patterns)
 - `internal/failover/connector.go` — Bidirectional gRPC streaming to satellite
-- `internal/backup/` — Backup sidecar (sidecar lifecycle, HTTP API, metadata, physical/logical backups, scheduler, retention)
-- `internal/backup/destination/` — Storage backend interface (S3, GCS, SFTP, local)
 - `internal/shared/models/` — Shared Go types
 - `web/dashboard/` — React SPA (10 pages)
 - `deploy/docker/` — Dockerfiles + docker-compose

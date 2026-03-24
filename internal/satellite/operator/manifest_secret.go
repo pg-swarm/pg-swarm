@@ -16,7 +16,6 @@ func buildSecret(cfg *pgswarmv1.ClusterConfig) *corev1.Secret {
 	data := map[string]string{
 		"superuser-password":   randomPassword(24),
 		"replication-password": randomPassword(24),
-		"backup-password":      randomPassword(24),
 		"sidecar-stream-token": randomPassword(32),
 	}
 

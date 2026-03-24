@@ -23,7 +23,6 @@ type Operator struct {
 	k8sClusterName       string // used in config-storage ConfigMap naming
 	defaultNamespace     string // fallback when ClusterConfig.Namespace is empty
 	defaultFailoverImage string // fallback failover sidecar image
-	satelliteID          string // satellite identity for backup sidecar
 	mu                   sync.RWMutex
 	desired              map[string]*pgswarmv1.ClusterConfig // key: "ns/cluster"
 	applied              map[string]int64                    // key -> last applied config version
@@ -32,24 +31,18 @@ type Operator struct {
 // New creates a new Operator backed by the given Kubernetes client.
 // k8sClusterName is used for config-storage ConfigMap naming (pg-swarm-<k8s>-<pg>).
 // defaultNamespace is used when a ClusterConfig has no namespace set.
-// satelliteID is passed to the backup sidecar for destination folder naming.
-func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string, satelliteID ...string) *Operator {
+func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string) *Operator {
 	if defaultNamespace == "" {
 		defaultNamespace = "default"
 	}
 	if defaultFailoverImage == "" {
 		defaultFailoverImage = "ghcr.io/pg-swarm/pg-swarm-failover:latest"
 	}
-	satID := ""
-	if len(satelliteID) > 0 {
-		satID = satelliteID[0]
-	}
 	return &Operator{
 		client:               client,
 		k8sClusterName:       k8sClusterName,
 		defaultNamespace:     defaultNamespace,
 		defaultFailoverImage: defaultFailoverImage,
-		satelliteID:          satID,
 		desired:              make(map[string]*pgswarmv1.ClusterConfig),
 		applied:              make(map[string]int64),
 	}
@@ -193,15 +186,17 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 		log.Warn().Err(err).Str("resource", "lease/"+leaseName).Msg("delete failed")
 	}
 
+	// Delete cluster-status ConfigMap
+	clusterStatusCMName := clusterStatusConfigMapName(name)
+	if err := o.client.CoreV1().ConfigMaps(ns).Delete(ctx, clusterStatusCMName, metav1.DeleteOptions{}); err != nil {
+		log.Warn().Err(err).Str("resource", "configmap/"+clusterStatusCMName).Msg("delete failed")
+	}
+
 	// Delete config-store ConfigMap
 	cfgStoreName := o.configStoreName(name)
 	if err := o.client.CoreV1().ConfigMaps(ns).Delete(ctx, cfgStoreName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "configmap/"+cfgStoreName).Msg("delete failed")
 	}
-
-	// Delete backup resources (credential secrets, RBAC, status ConfigMap)
-	log.Trace().Msg("HandleDelete cleaning up backup resources")
-	cleanupBackupResources(ctx, o.client, ns, name)
 
 	// Remove finalizers from PVCs and delete them
 	removeFinalizedPVCs(ctx, o.client, ns, name)
@@ -221,13 +216,6 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 
 	log.Info().Str("cluster", key).Msg("cluster resources deleted")
 	return nil
-}
-
-// TriggerPendingBackups is a no-op in the sidecar architecture.
-// The backup sidecar automatically triggers an initial base backup on startup.
-// Retained for interface compatibility with the health monitor.
-func (o *Operator) TriggerPendingBackups(ctx context.Context, ns, clusterName string) {
-	// No-op: sidecar handles initial backup automatically
 }
 
 // ManagedCluster is a snapshot of a cluster managed by this operator.
@@ -368,6 +356,16 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		}
 	}
 
+	// 4c. Cluster status ConfigMap (create-only — health monitor owns updates)
+	clusterStatusCM := clusterStatusConfigMapName(cfg.ClusterName)
+	if _, err := o.client.CoreV1().ConfigMaps(cfg.Namespace).Get(ctx, clusterStatusCM, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		log.Trace().Msg("reconcile: seeding cluster-status configmap")
+		statusCM := buildClusterStatusConfigMap(cfg)
+		if _, err := o.client.CoreV1().ConfigMaps(cfg.Namespace).Create(ctx, statusCM, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("cluster-status configmap: %w", err)
+		}
+	}
+
 	// 5. Services
 	log.Trace().Msg("reconcile: ensuring services")
 	if err := createOrUpdateService(ctx, o.client, buildHeadlessService(cfg)); err != nil {
@@ -403,9 +401,9 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		}
 	}
 
-	// 7. StatefulSet (pass satelliteID for backup sidecar)
+	// 7. StatefulSet
 	log.Trace().Msg("reconcile: ensuring statefulset")
-	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage, o.satelliteID)
+	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage)
 	if err := createOrUpdateStatefulSet(ctx, o.client, sts); err != nil {
 		return fmt.Errorf("statefulset: %w", err)
 	}
@@ -427,26 +425,6 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 	if !failoverEnabled(cfg) {
 		go o.ensurePodLabels(cfg.Namespace, cfg.ClusterName, cfg.Replicas)
 	}
-
-	// TODO: Re-enable backup sidecar RBAC and credential secrets once core functionality is stable.
-	// // 10. Backup sidecar RBAC and credential secrets
-	// if backupEnabled(cfg) {
-	// 	log.Trace().Int("rule_count", len(cfg.Backups)).Msg("reconcile: ensuring backup RBAC and credential secrets")
-	// 	if err := ensureBackupRBAC(ctx, o.client, cfg); err != nil {
-	// 		return fmt.Errorf("backup RBAC: %w", err)
-	// 	}
-	// 	for _, backup := range cfg.Backups {
-	// 		backupSecret := buildBackupCredentialSecret(cfg, backup)
-	// 		if backupSecret != nil {
-	// 			if err := createOrPreserveSecret(ctx, o.client, backupSecret); err != nil {
-	// 				return fmt.Errorf("backup credential secret: %w", err)
-	// 			}
-	// 		}
-	// 	}
-	// } else {
-	// 	log.Trace().Msg("reconcile: cleaning up backup resources (backup disabled)")
-	// 	cleanupBackupResources(ctx, o.client, cfg.Namespace, cfg.ClusterName)
-	// }
 
 	return nil
 }

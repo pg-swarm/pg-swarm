@@ -12,12 +12,6 @@ import (
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 )
 
-// walRestoreCommand is the POSIX-compatible restore_command shell script that uses
-// shared emptyDir volumes to fetch WAL segments from the backup sidecar.
-// It checks for a pre-fetched file, then signals the sidecar via a .request file
-// and polls for up to 30s. Works with any postgres image (no curl/wget needed).
-const walRestoreCommand = `test -f /wal-restore/%f && cp /wal-restore/%f %p && rm -f /wal-restore/%f && exit 0; echo %f > /wal-restore/.request; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do sleep 1; test -f /wal-restore/%f && cp /wal-restore/%f %p && rm -f /wal-restore/%f && exit 0; test -f /wal-restore/.error && rm -f /wal-restore/.error && exit 1; done; exit 1`
-
 // mandatoryPgParams are HA-required PostgreSQL parameters that are always set.
 // User pg_params can override these.
 var mandatoryPgParams = map[string]string{
@@ -32,15 +26,15 @@ var mandatoryPgParams = map[string]string{
 	"wal_keep_size":             "'512MB'",
 	"shared_preload_libraries":  "'pg_stat_statements'",
 	"pg_stat_statements.track":  "all",
+	"password_encryption":       "'scram-sha-256'",
 }
 
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.
 var mandatoryHbaRules = []string{
 	"local all all trust",
-	"host all all 0.0.0.0/0 md5",
-	"host replication repl_user 0.0.0.0/0 md5",
-	"host replication backup_user 0.0.0.0/0 md5",
-	"host replication postgres 0.0.0.0/0 md5",
+	"host all all 0.0.0.0/0 scram-sha-256",
+	"host replication repl_user 0.0.0.0/0 scram-sha-256",
+	"host replication postgres 0.0.0.0/0 scram-sha-256",
 }
 
 // recoveryRulesConfigMapName returns the ConfigMap name for recovery rules.
@@ -103,14 +97,14 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Data: map[string]string{
-			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive, cfg.Backups),
+			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive),
 			"pg_hba.conf":    buildHbaConf(cfg.HbaRules),
 		},
 	}
 }
 
 // buildPostgresConf generates the postgresql.conf content by merging mandatory HA params with user overrides.
-func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec, backups []*pgswarmv1.BackupConfig) string {
+func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec) string {
 	merged := make(map[string]string, len(mandatoryPgParams)+len(userParams)+4)
 	for k, v := range mandatoryPgParams {
 		merged[k] = v
@@ -125,28 +119,8 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		}
 		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
 		merged["archive_command"] = fmt.Sprintf("'%s'", archive.ArchiveCommand)
-	// TODO: Re-enable when backup sidecar is restored.
-	// } else if len(backups) > 0 {
-	// 	merged["archive_mode"] = "on"
-	// 	timeout := int32(60)
-	// 	for _, b := range backups {
-	// 		if b.Physical != nil && b.Physical.ArchiveTimeoutSeconds > 0 {
-	// 			timeout = b.Physical.ArchiveTimeoutSeconds
-	// 			break
-	// 		}
-	// 	}
-	// 	merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
-	// 	merged["archive_command"] = "'cp %p /wal-staging/.tmp.%f && mv /wal-staging/.tmp.%f /wal-staging/%f'"
 	} else {
 		merged["archive_mode"] = "off"
-	}
-
-	// Incremental backups (PG 17+) require summarize_wal
-	for _, b := range backups {
-		if b.Physical != nil && b.Physical.IncrementalSchedule != "" {
-			merged["summarize_wal"] = "on"
-			break
-		}
 	}
 
 	// User params override everything (escape hatch)

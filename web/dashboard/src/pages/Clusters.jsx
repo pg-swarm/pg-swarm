@@ -5,7 +5,7 @@ import { api, parseSpec, timeAgo } from '../api';
 import {
   Server, Crown, Copy, Shield,
   Pause, Play, Database, AlertCircle,
-  ExternalLink, Search, Archive, ArchiveX
+  ExternalLink, Search
 } from 'lucide-react';
 
 /* ── Format helpers (shared with ClusterDetail) ──────── */
@@ -227,7 +227,7 @@ function NodeTable({ instances, storageBytes }) {
 /* ── Clusters page ───────────────────────────────────── */
 
 export default function Clusters() {
-  const { clusters, satellites, health, deploymentRules, backupProfiles, profiles, refresh } = useData();
+  const { clusters, satellites, health, deploymentRules, profiles, refresh } = useData();
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState('');
 
@@ -263,14 +263,6 @@ export default function Clusters() {
     if (!c.deployment_rule_id || !deploymentRules) return {};
     const rule = deploymentRules.find(r => r.id === c.deployment_rule_id);
     return rule?.label_selector || {};
-  }
-
-  function hasBackup(c) {
-    if (!c.deployment_rule_id) return false;
-    const rule = deploymentRules.find(r => r.id === c.deployment_rule_id);
-    if (!rule) return false;
-    // If there are backup profiles and the profile matches, assume backup is configured
-    return backupProfiles && backupProfiles.length > 0;
   }
 
   const term = search.toLowerCase().trim();
@@ -365,9 +357,6 @@ export default function Clusters() {
 
               {/* Footer */}
               <div className="cl-foot">
-                {hasBackup(c)
-                  ? <span title="Backup configured"><Archive size={13} style={{ color: 'var(--green)' }} /></span>
-                  : <span title="No backup configured"><ArchiveX size={13} style={{ color: 'var(--text-secondary)', opacity: 0.4 }} /></span>}
                 <span style={{ marginRight: 'auto' }} />
                 <button
                   className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-pause'}`}

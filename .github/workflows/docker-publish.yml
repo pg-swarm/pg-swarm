@@ -26,8 +26,6 @@ jobs:
             dockerfile: deploy/docker/Dockerfile.satellite
           - image: failover
             dockerfile: deploy/docker/Dockerfile.failover-sidecar
-          - image: backup
-            dockerfile: deploy/docker/Dockerfile.backup
     steps:
       - uses: actions/checkout@v4
 

@@ -10,10 +10,7 @@ import {
   deploymentRules,
   postgresVersions,
   postgresVariants,
-  backupProfiles,
   storageTiers,
-  backups,
-  restores,
   recoveryRuleSets,
   generateLogs,
 } from './data.js';
@@ -41,7 +38,6 @@ export default function mockApiPlugin() {
     deploymentRules: [...deploymentRules],
     postgresVersions: [...postgresVersions],
     postgresVariants: [...postgresVariants],
-    backupProfiles: [...backupProfiles],
     storageTiers: [...storageTiers],
     recoveryRuleSets: recoveryRuleSets.map(rs => ({ ...rs, rules: rs.rules.map(r => ({ ...r })) })),
   };
@@ -140,18 +136,6 @@ export default function mockApiPlugin() {
         if (path.match(/^\/clusters\/[^/]+\/switchover$/) && method === 'POST') {
           return json(res, { ok: true, message: 'Switchover initiated' });
         }
-        if (path.match(/^\/clusters\/[^/]+\/backups$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, backups.filter((b) => b.cluster_id === id));
-        }
-        if (path.match(/^\/clusters\/[^/]+\/restore$/) && method === 'POST') {
-          return json(res, { restore_id: 'rst-' + Date.now(), status: 'running' });
-        }
-        if (path.match(/^\/clusters\/[^/]+\/restores$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, restores.filter((r) => r.cluster_id === id));
-        }
-
         // ---- Health ----
         if (path === '/health' && method === 'GET') {
           return json(res, health);
@@ -199,15 +183,6 @@ export default function mockApiPlugin() {
             json(res, clone, 201);
           });
           return;
-        }
-        if (path.match(/^\/profiles\/[^/]+\/backup-profiles$/) && method === 'GET') {
-          return json(res, state.backupProfiles.slice(0, 1));
-        }
-        if (path.match(/^\/profiles\/[^/]+\/attach-backup-profile$/) && method === 'POST') {
-          return json(res, { ok: true });
-        }
-        if (path.match(/^\/profiles\/[^/]+\/detach-backup-profile$/) && method === 'POST') {
-          return json(res, { ok: true });
         }
 
         // ---- Deployment Rules ----
@@ -293,43 +268,6 @@ export default function mockApiPlugin() {
           const id = path.split('/')[2];
           state.postgresVariants = state.postgresVariants.filter((v) => v.id !== id);
           return json(res, { ok: true });
-        }
-
-        // ---- Backup Profiles ----
-        if (path === '/backup-profiles' && method === 'GET') {
-          return json(res, state.backupProfiles);
-        }
-        if (path === '/backup-profiles' && method === 'POST') {
-          body(req).then((b) => {
-            const bp = { id: 'bp-' + Date.now(), created_at: new Date().toISOString(), ...b };
-            state.backupProfiles.push(bp);
-            json(res, bp, 201);
-          });
-          return;
-        }
-        if (path.match(/^\/backup-profiles\/[^/]+$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, state.backupProfiles.find((bp) => bp.id === id) || { error: 'not found' });
-        }
-        if (path.match(/^\/backup-profiles\/[^/]+$/) && method === 'PUT') {
-          const id = path.split('/')[2];
-          body(req).then((b) => {
-            const idx = state.backupProfiles.findIndex((bp) => bp.id === id);
-            if (idx >= 0) { Object.assign(state.backupProfiles[idx], b); json(res, state.backupProfiles[idx]); }
-            else json(res, { error: 'not found' }, 404);
-          });
-          return;
-        }
-        if (path.match(/^\/backup-profiles\/[^/]+$/) && method === 'DELETE') {
-          const id = path.split('/')[2];
-          state.backupProfiles = state.backupProfiles.filter((bp) => bp.id !== id);
-          return json(res, { ok: true });
-        }
-
-        // ---- Backups ----
-        if (path.match(/^\/backups\/[^/]+$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, backups.find((b) => b.id === id) || { error: 'not found' });
         }
 
         // ---- Storage Tiers ----

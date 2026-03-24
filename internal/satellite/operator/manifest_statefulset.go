@@ -71,8 +71,30 @@ func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	return pvc
 }
 
+// clusterStatusConfigMapName returns the ConfigMap name for cluster lifecycle status.
+func clusterStatusConfigMapName(clusterName string) string {
+	return clusterName + "-cluster-status"
+}
+
+// buildClusterStatusConfigMap creates the initial cluster-status ConfigMap.
+// The health monitor owns updates; the operator only seeds it on first creation.
+func buildClusterStatusConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterStatusConfigMapName(cfg.ClusterName),
+			Namespace: cfg.Namespace,
+			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
+		},
+		Data: map[string]string{
+			"lifecycle_state": "PROVISIONING",
+			"reason":          "initial seed by operator",
+		},
+	}
+}
+
 // buildStatefulSet creates the StatefulSet for the PostgreSQL cluster.
-func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string, satelliteID ...string) *appsv1.StatefulSet {
+func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) *appsv1.StatefulSet {
 	selLabels := selectorLabels(cfg.ClusterName)
 	allLabels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
@@ -156,52 +178,6 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		})
 	}
 
-	// TODO: Re-enable backup sidecar injection once core functionality is stable.
-	_ = satelliteID // keep parameter for re-enablement
-	// // Backup sidecar
-	// if backupEnabled(cfg) {
-	// 	satID := ""
-	// 	if len(satelliteID) > 0 {
-	// 		satID = satelliteID[0]
-	// 	}
-	// 	sts.Spec.Template.Spec.Containers = append(
-	// 		sts.Spec.Template.Spec.Containers,
-	// 		buildBackupSidecar(cfg, secretName, satID),
-	// 	)
-	// 	if !failoverEnabled(cfg) {
-	// 		sts.Spec.Template.Spec.ServiceAccountName = backupServiceAccountName(cfg.ClusterName)
-	// 	}
-	// }
-	//
-	// // Shared emptyDir volumes for WAL staging (archive) and WAL restore (fetch).
-	// if backupEnabled(cfg) {
-	// 	sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes,
-	// 		corev1.Volume{
-	// 			Name:         "wal-staging",
-	// 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	// 		},
-	// 		corev1.Volume{
-	// 			Name:         "wal-restore",
-	// 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	// 		},
-	// 	)
-	//
-	// 	if cfg.Backups[0].Destination != nil && cfg.Backups[0].Destination.Type == "gcs" {
-	// 		ruleShort := ruleShortID(cfg.Backups[0].BackupProfileId)
-	// 		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
-	// 			Name: "gcp-creds",
-	// 			VolumeSource: corev1.VolumeSource{
-	// 				Secret: &corev1.SecretVolumeSource{
-	// 					SecretName: backupCredentialSecretName(cfg.ClusterName, ruleShort),
-	// 					Items: []corev1.KeyToPath{
-	// 						{Key: "service-account-json", Path: "service-account.json"},
-	// 					},
-	// 				},
-	// 			},
-	// 		})
-	// 	}
-	// }
-
 	// Mount custom archive credentials as a volume
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" && cfg.Archive.CredentialsSecret != nil {
 		optional := true
@@ -273,10 +249,6 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 
 	// Determine restore_command for replicas
 	restoreCmd := ""
-	// TODO: Re-enable when backup sidecar is restored.
-	// if backupEnabled(cfg) {
-	// 	restoreCmd = walRestoreCommand
-	// } else
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" {
 		restoreCmd = cfg.Archive.RestoreCommand
 	}
@@ -362,15 +334,6 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 					},
 				},
 			},
-			{
-				Name: "BACKUP_PASSWORD",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-						Key:                  "backup-password",
-					},
-				},
-			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: "/var/lib/postgresql/data"},
@@ -398,15 +361,6 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 			MountPath: "/var/lib/postgresql/wal",
 		})
 	}
-
-	// TODO: Re-enable when backup sidecar is restored.
-	// // Mount wal-restore on init container (needed for recovery during init)
-	// if backupEnabled(cfg) {
-	// 	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-	// 		Name:      "wal-restore",
-	// 		MountPath: "/wal-restore",
-	// 	})
-	// }
 
 	return c
 }
@@ -518,15 +472,6 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 			MountPath: "/var/lib/postgresql/wal",
 		})
 	}
-
-	// TODO: Re-enable when backup sidecar is restored.
-	// // Shared emptyDir mounts for file-based WAL archive/restore
-	// if backupEnabled(cfg) {
-	// 	c.VolumeMounts = append(c.VolumeMounts,
-	// 		corev1.VolumeMount{Name: "wal-staging", MountPath: "/wal-staging"},
-	// 		corev1.VolumeMount{Name: "wal-restore", MountPath: "/wal-restore"},
-	// 	)
-	// }
 
 	// Custom archive mode with credentials: mount secret as env vars AND as a volume
 	// (so file-based credentials like GOOGLE_APPLICATION_CREDENTIALS can be used).

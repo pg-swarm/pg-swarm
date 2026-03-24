@@ -47,7 +47,6 @@
 }
 
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
   background: var(--bg); color: var(--text); line-height: 1.5;
@@ -368,10 +367,6 @@ tbody tr:hover { background: var(--green-light); }
 .input-warn { border-color: var(--amber); }
 .btn-link { background: none; border: none; color: var(--green); cursor: pointer; font-size: 11px; font-weight: 600; padding: 0; text-decoration: underline; }
 .btn-link:hover { color: var(--green-dark); }
-.backup-profiles-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-.backup-profiles-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-.backup-profiles-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--text-secondary); }
-.backup-profile-chip { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
 .form-row-wide { grid-column: 1 / -1; }
 
 .param-list { display: flex; flex-direction: column; gap: 4px; }
@@ -456,7 +451,7 @@ tbody tr:hover { background: var(--green-light); }
 }
 .input-error { border-color: var(--red); }
 .form-error { font-size: 11px; color: var(--red); margin-top: 2px; }
-.tab-content { min-height: 300px; }
+.tab-content { min-height: 300px; max-height: calc(100vh - 180px); overflow-y: auto; scrollbar-gutter: stable; }
 
 /* ── PG Config Categories ─────────────────────────── */
 .pg-search-bar {
@@ -464,6 +459,11 @@ tbody tr:hover { background: var(--green-light); }
   align-items: center;
   gap: 12px;
   margin-bottom: 14px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--white);
+  padding: 4px 0 8px;
 }
 .pg-search-bar .input { max-width: 300px; }
 
@@ -572,11 +572,6 @@ tbody tr:hover { background: var(--green-light); }
   gap: 8px;
   justify-content: flex-end;
 }
-
-/* Backup profile modal */
-.backup-profile-modal { width: 740px; }
-.backup-profile-modal .tab-bar { margin-bottom: 16px; }
-.backup-profile-modal .form-section { border: none; box-shadow: none; padding: 0; }
 
 /* Switchover confirmation modal */
 .switchover-modal { width: 520px; }
@@ -1131,20 +1126,6 @@ tbody tr:hover { background: var(--green-light); }
 }
 .cd-progress-btn:hover { background: var(--blue-bg); opacity: .85; }
 
-/* Backup type badges */
-.cd-type-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 3px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: capitalize;
-}
-.cd-type-base { background: var(--green-bg); color: var(--green); }
-.cd-type-incremental { background: #dbeafe; color: #2563eb; }
-.cd-type-logical { background: #f3e8ff; color: #7c3aed; }
-.cd-type-physical { background: var(--green-bg); color: var(--green); }
-.cd-type-pitr { background: #fef3c7; color: #d97706; }
 
 /* Events */
 .cd-event-row {

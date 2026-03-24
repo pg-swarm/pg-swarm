@@ -148,7 +148,7 @@ function emptySpec() {
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, postgresVariants, clusters, backupProfiles, storageTiers, recoveryRuleSets, refresh } = useData();
+  const { profiles, postgresVersions, postgresVariants, clusters, storageTiers, recoveryRuleSets, refresh } = useData();
   const toast = useToast();
 
   useEffect(() => { document.title = 'Profiles - PG-Swarm'; }, []);
@@ -172,7 +172,6 @@ export default function Profiles() {
       name: profile.name,
       description: profile.description,
       recovery_rule_set_id: profile.recovery_rule_set_id || null,
-      backup_profile_id: profile.backup_profile_id || null,
       spec: { ...emptySpec(), ...spec, pg_params, hba_rules },
       isNew: false,
     });
@@ -199,7 +198,6 @@ export default function Profiles() {
       description: editing.description,
       config: editing.spec,
       recovery_rule_set_id: editing.recovery_rule_set_id || null,
-      backup_profile_id: editing.backup_profile_id || null,
     };
     try {
       if (editing.isNew) {
@@ -278,7 +276,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} backupProfiles={backupProfiles} recoveryRuleSets={recoveryRuleSets} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} recoveryRuleSets={recoveryRuleSets} />;
   }
 
   if (viewing) {
@@ -342,10 +340,6 @@ export default function Profiles() {
                   {spec.archive?.mode && <span className="tag">archive:{spec.archive.mode}</span>}
                   {Object.keys(spec.pg_params || {}).length > 0 && <span className="tag">{Object.keys(spec.pg_params).length} pg params</span>}
                   {(spec.hba_rules || []).length > 0 && <span className="tag">{spec.hba_rules.length} hba rules</span>}
-                  {p.backup_profile_id && (() => {
-                    const bp = backupProfiles.find(b => b.id === p.backup_profile_id);
-                    return bp ? <span className="tag">backup: {bp.name}</span> : null;
-                  })()}
                   {p.recovery_rule_set_id && (() => {
                     const rs = recoveryRuleSets.find(r => r.id === p.recovery_rule_set_id);
                     return rs ? <span className="tag">recovery: {rs.name}</span> : null;
@@ -439,9 +433,60 @@ const TABS = [
   { id: 'databases', label: 'Databases' },
 ];
 
+const CRON_RE = /^(\S+\s+){4}\S+$/;
+function isValidCron(s) { return !s || CRON_RE.test(s.trim()); }
+
+// Parse a cron step field like "* /5", "0/5", or "*" and return the step value, or 0 if not a step.
+function cronStep(field) {
+  const m = field.match(/^(?:\*|\d+)\/(\d+)$/);
+  return m ? parseInt(m[1]) : 0;
+}
+
+/** Convert a 5-field cron expression to a short human-readable string. */
+function cronToText(expr) {
+  if (!expr || !isValidCron(expr)) return '';
+  const [min, hr, dom, mon, dow] = expr.trim().split(/\s+/);
+
+  const minStep = cronStep(min);
+  const hrStep = cronStep(hr);
+
+  // Every N minutes: */5 (after start) or 0/5 (on the clock)
+  if (minStep && hr === '*' && dom === '*' && mon === '*' && dow === '*') {
+    if (minStep === 1) return 'Every minute';
+    const qualifier = min.startsWith('*') ? ' after start' : ' on the clock';
+    return `Every ${minStep} minutes${qualifier}`;
+  }
+  // Every N hours: */N (after start) or 0/N (on the clock)
+  if (/^\d+$/.test(min) && hrStep && dom === '*' && mon === '*' && dow === '*') {
+    if (hrStep === 1) return 'Every hour';
+    const qualifier = hr.startsWith('*') ? ' after start' : ' on the clock';
+    return `Every ${hrStep} hours${qualifier}`;
+  }
+  // Hourly at :MM: M * * * *
+  if (/^\d+$/.test(min) && hr === '*' && dom === '*' && mon === '*' && dow === '*') {
+    return `Hourly at :${min.padStart(2, '0')}`;
+  }
+  // Daily: 0 H * * *
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && mon === '*' && dow === '*') {
+    return `Daily at ${hr.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  }
+  // Weekly: 0 H * * D
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && mon === '*' && /^\d+$/.test(dow)) {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    return `${days[parseInt(dow)] || dow} at ${hr.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  }
+  // Monthly: 0 H D * *
+  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && /^\d+$/.test(dom) && mon === '*' && dow === '*') {
+    const d = parseInt(dom);
+    const suffix = d === 1 || d === 21 || d === 31 ? 'st' : d === 2 || d === 22 ? 'nd' : d === 3 || d === 23 ? 'rd' : 'th';
+    return `Monthly on ${d}${suffix} at ${hr.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  }
+  return '';
+}
+
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, backupProfiles, recoveryRuleSets }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
@@ -550,7 +595,7 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
   async function confirmSave() {
     setSaving(true);
     try {
-      await onSave(pendingAttach);
+      await onSave();
     } finally {
       setSaving(false);
     }
@@ -590,9 +635,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
             )}
             {tab.id === 'hba' && spec.hba_rules.length > 0 && (
               <span className="tab-badge">{spec.hba_rules.length}</span>
-            )}
-            {tab.id === 'backups' && attachedBackupProfiles.length > 0 && (
-              <span className="tab-badge">{attachedBackupProfiles.length}</span>
             )}
           </button>
         ))}
@@ -647,15 +689,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
                   <option value="">None</option>
                   {(recoveryRuleSets || []).map(rs => (
                     <option key={rs.id} value={rs.id}>{rs.name} ({rs.rules?.length || 0} rules)</option>
-                  ))}
-                </select>
-              </div>
-              <div className="form-row">
-                <label>Backup Profile</label>
-                <select className="input" value={state.backup_profile_id || ''} onChange={e => setState(prev => ({ ...prev, backup_profile_id: e.target.value || null }))}>
-                  <option value="">None</option>
-                  {(backupProfiles || []).map(bp => (
-                    <option key={bp.id} value={bp.id}>{bp.name}</option>
                   ))}
                 </select>
               </div>
