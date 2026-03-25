@@ -52,24 +52,24 @@
       <a href="#quickstart" class="btn btn-primary">Get Started</a>
       <a href="#architecture" class="btn btn-ghost">How It Works</a>
     </div>
-    <div class="hero-stats">
-      <div class="stat">
+    <div class="hero-stats" data-reveal-stagger>
+      <div class="stat" data-reveal>
         <span class="stat-num">&lt;5s</span>
         <span class="stat-label">Failover Time</span>
       </div>
-      <div class="stat">
+      <div class="stat" data-reveal>
         <span class="stat-num">100s</span>
         <span class="stat-label">of Edge Clusters</span>
       </div>
-      <div class="stat">
+      <div class="stat" data-reveal>
         <span class="stat-num">0</span>
         <span class="stat-label">CRDs</span>
       </div>
-      <div class="stat">
+      <div class="stat" data-reveal>
         <span class="stat-num">4</span>
         <span class="stat-label">Go Binaries</span>
       </div>
-      <div class="stat">
+      <div class="stat" data-reveal>
         <span class="stat-num">60+</span>
         <span class="stat-label">REST Endpoints</span>
       </div>
@@ -83,29 +83,29 @@
     <div class="two-col">
       <div class="col">
         <h2 class="section-title">The Problem</h2>
-        <div class="problem-list">
-          <div class="problem-item">
+        <div class="problem-list" data-reveal-stagger>
+          <div class="problem-item" data-reveal>
             <span class="problem-icon">!</span>
             <div>
               <strong>Edge clusters are behind NAT</strong>
               <p>You can't reach them directly. Traditional push-based management doesn't work.</p>
             </div>
           </div>
-          <div class="problem-item">
+          <div class="problem-item" data-reveal>
             <span class="problem-icon">!</span>
             <div>
               <strong>Failover must be local</strong>
               <p>A round-trip to a central control plane during a primary failure adds unacceptable latency.</p>
             </div>
           </div>
-          <div class="problem-item">
+          <div class="problem-item" data-reveal>
             <span class="problem-icon">!</span>
             <div>
               <strong>Split-brain is catastrophic</strong>
               <p>Two primaries writing to the same cluster corrupts data permanently.</p>
             </div>
           </div>
-          <div class="problem-item">
+          <div class="problem-item" data-reveal>
             <span class="problem-icon">!</span>
             <div>
               <strong>No visibility at scale</strong>
@@ -116,29 +116,29 @@
       </div>
       <div class="col">
         <h2 class="section-title">The Solution</h2>
-        <div class="solution-list">
-          <div class="solution-item">
+        <div class="solution-list" data-reveal-stagger>
+          <div class="solution-item" data-reveal>
             <span class="solution-icon">&#10003;</span>
             <div>
               <strong>Satellite-initiated connections</strong>
               <p>Satellites connect outward via persistent gRPC streams. No inbound access required.</p>
             </div>
           </div>
-          <div class="solution-item">
+          <div class="solution-item" data-reveal>
             <span class="solution-icon">&#10003;</span>
             <div>
               <strong>Per-pod failover sidecar</strong>
               <p>Leader election via K8s Leases. Promotion in seconds with no central dependency.</p>
             </div>
           </div>
-          <div class="solution-item">
+          <div class="solution-item" data-reveal>
             <span class="solution-icon">&#10003;</span>
             <div>
               <strong>SQL fencing + timeline recovery</strong>
               <p>Immediate write blocking, automatic pg_rewind, zero-restart container recovery.</p>
             </div>
           </div>
-          <div class="solution-item">
+          <div class="solution-item" data-reveal>
             <span class="solution-icon">&#10003;</span>
             <div>
               <strong>Single pane of glass</strong>
@@ -156,71 +156,71 @@
 <section class="section" id="features">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">Features</h2>
-      <p class="section-sub center">Everything you need to run PostgreSQL HA at the edge, built from scratch in Go.</p>
+      <h2 class="section-title center" data-reveal>Features</h2>
+      <p class="section-sub center" data-reveal>Everything you need to run PostgreSQL HA at the edge, built from scratch in Go.</p>
     </div>
-    <div class="feature-grid">
-      <div class="feature-card">
+    <div class="feature-grid" data-reveal-stagger>
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#9889;</div>
         <h3>Automatic Failover</h3>
         <p>Per-pod sidecar with Kubernetes Lease-based leader election. Primary failure detected in 15 seconds, promotion in under 5.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128737;</div>
         <h3>Split-Brain Prevention</h3>
         <p>SQL fencing blocks writes and kills connections instantly. Old primary auto-demotes to standby via K8s exec. No data corruption.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128260;</div>
         <h3>Timeline Recovery</h3>
         <p>After failover, replicas auto-detect timeline divergence and recover via pg_rewind or re-basebackup. No manual intervention.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128200;</div>
         <h3>Deep Observability</h3>
         <p>Replication lag, connections, disk, WAL stats, per-database cache hit ratios, table stats, and slow queries from pg_stat_statements.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128736;</div>
         <h3>Planned Switchover</h3>
         <p>Satellite-controlled 9-step orchestration with real-time progress tracking via WebSocket. Fence with drain, checkpoint, promote, with point-of-no-return indicator.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128230;</div>
         <h3>Profiles & Rules</h3>
         <p>Reusable cluster templates with deployment rules that auto-deploy to satellites matching label selectors. Fleet-scale management.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128190;</div>
         <h3>Managed Backups</h3>
         <p>Per-pod backup sidecar with GCS and SFTP storage. Physical (base + incremental + WAL archiving) and logical (pg_dump) backups scheduled via internal cron. PITR support. Being reimplemented from scratch.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#127760;</div>
         <h3>No CRDs Required</h3>
         <p>Builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC from scratch. No Custom Resource Definitions, no operator frameworks, minimal footprint.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128274;</div>
         <h3>Secure by Default</h3>
         <p>Token-based auth with SHA-256 hashing. Constant-time comparison. Create-only secrets. Identity stored in K8s Secrets.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#9203;</div>
         <h3>Zero-Restart Recovery</h3>
         <p>Postgres container runs in a supervisor loop. Demotion, timeline recovery, and restart happen in-place without K8s restart counts.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128295;</div>
         <h3>Live Config Changes</h3>
         <p>Three-mode config update system: pg_reload_conf for sighup params, rolling restart for postmaster params, full cluster shutdown for replication-sensitive params. Database-driven parameter classification with admin panel.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128450;</div>
         <h3>Cluster Databases</h3>
         <p>Dynamic database and user management at the cluster level. CREATE ROLE + CREATE DATABASE via sidecar command. Per-database IP subnet access control (HBA rules). Zero pod restart.</p>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-reveal>
         <div class="feature-icon">&#128220;</div>
         <h3>Recovery Rules</h3>
         <p>Centrally managed log-based recovery rules with pattern matching. 40+ built-in patterns for WAL issues, replication failures, and crash loops. Admin panel with regex sandbox.</p>
@@ -233,55 +233,55 @@
 <section class="section section-alt" id="dashboard">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">Web Dashboard</h2>
-      <p class="section-sub center">Real-time visibility into every PostgreSQL instance across your fleet.</p>
+      <h2 class="section-title center" data-reveal>Web Dashboard</h2>
+      <p class="section-sub center" data-reveal>Real-time visibility into every PostgreSQL instance across your fleet.</p>
     </div>
-    <div class="dashboard-features">
-      <div class="dash-feature">
+    <div class="dashboard-features" data-reveal-stagger>
+      <div class="dash-feature" data-reveal>
         <h4>Cluster Overview</h4>
         <p>Instance table with role badges, ready/WAL status dots, connection bars, disk usage, and timeline IDs. Expand to see per-pod details.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Instance Detail</h4>
         <p>Drill down to see disk vs WAL breakdown, WAL statistics, per-database sizes with cache hit ratios, table stats, and slow queries.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Profile Editor</h4>
         <p>6-tab configuration editor: General, Volumes, Resources, PostgreSQL params (50+ parameters), HBA Rules, and Recovery Rules.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Deployment Rules</h4>
         <p>Map profiles to satellites via label selectors. When a rule matches, clusters are auto-created and pushed. Fleet-scale management.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Switchover Progress</h4>
         <p>9-step switchover progress modal with real-time WebSocket updates, point-of-no-return indicator, and rollback status for pre-PONR failures.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Update Rules</h4>
         <p>Admin panel for PostgreSQL parameter classification. Define which params use pg_reload_conf (sighup), rolling restart (postmaster), or full cluster shutdown (replication-sensitive).</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Cluster Databases</h4>
         <p>Per-cluster database management tab. CREATE ROLE + CREATE DATABASE via sidecar command. CIDR-based IP access control (HBA rules) per database. Zero pod restart.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Config Versioning</h4>
         <p>Version history with revert for profile changes. Per-cluster approval workflow before config updates are applied. Full audit trail of every configuration change.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Event Log</h4>
         <p>State transitions, failovers, switchovers, backup completions, and errors with severity icons. Per-cluster event filtering.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Satellite Logs</h4>
         <p>Terminal-style log viewer with SSE streaming, server-side and client-side level filtering, remote log level control, auto-scroll, and clear.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Recovery Rules</h4>
         <p>Centrally managed recovery rule sets with inline rule editing, pattern sandbox for testing regex against sample log lines, and per-cluster attachment.</p>
       </div>
-      <div class="dash-feature">
+      <div class="dash-feature" data-reveal>
         <h4>Admin Console</h4>
         <p>5-tab admin page: Storage Tiers with satellite mappings, Image Variants for postgres base images, PG Version registry, Recovery Rules editor, and Update Rules for parameter classification.</p>
       </div>
@@ -293,51 +293,51 @@
 <section class="section" id="screenshots">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">Screenshots</h2>
-      <p class="section-sub center">The embedded dashboard in action, running against mock data.</p>
+      <h2 class="section-title center" data-reveal>Screenshots</h2>
+      <p class="section-sub center" data-reveal>The embedded dashboard in action, running against mock data.</p>
     </div>
-    <div class="screenshot-gallery">
-      <div class="screenshot-item" data-modal="modal-overview">
+    <div class="screenshot-gallery" data-reveal-stagger>
+      <div class="screenshot-item" data-reveal data-modal="modal-overview">
         <img src="images/screenshots/overview.png" alt="Dashboard overview" loading="lazy">
         <span class="screenshot-caption">Overview</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-clusters">
+      <div class="screenshot-item" data-reveal data-modal="modal-clusters">
         <img src="images/screenshots/clusters.png" alt="Clusters grid" loading="lazy">
         <span class="screenshot-caption">Clusters</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-cluster-detail">
+      <div class="screenshot-item" data-reveal data-modal="modal-cluster-detail">
         <img src="images/screenshots/cluster-detail.png" alt="Cluster detail" loading="lazy">
         <span class="screenshot-caption">Cluster Detail</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-switchover">
+      <div class="screenshot-item" data-reveal data-modal="modal-switchover">
         <img src="images/screenshots/switchover-progress.png" alt="Switchover progress" loading="lazy">
         <span class="screenshot-caption">Switchover Progress</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-satellites">
+      <div class="screenshot-item" data-reveal data-modal="modal-satellites">
         <img src="images/screenshots/satellites.png" alt="Satellites" loading="lazy">
         <span class="screenshot-caption">Satellites</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-profiles">
+      <div class="screenshot-item" data-reveal data-modal="modal-profiles">
         <img src="images/screenshots/profiles.png" alt="Profiles" loading="lazy">
         <span class="screenshot-caption">Profiles</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-deployment-rules">
+      <div class="screenshot-item" data-reveal data-modal="modal-deployment-rules">
         <img src="images/screenshots/deployment-rules.png" alt="Deployment rules" loading="lazy">
         <span class="screenshot-caption">Deployment Rules</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-events">
+      <div class="screenshot-item" data-reveal data-modal="modal-events">
         <img src="images/screenshots/events.png" alt="Events" loading="lazy">
         <span class="screenshot-caption">Events</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-admin">
+      <div class="screenshot-item" data-reveal data-modal="modal-admin">
         <img src="images/screenshots/admin.png" alt="Admin - Storage Tiers" loading="lazy">
         <span class="screenshot-caption">Admin</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-recovery-rules">
+      <div class="screenshot-item" data-reveal data-modal="modal-recovery-rules">
         <img src="images/screenshots/admin-recovery-rules.png" alt="Recovery Rules" loading="lazy">
         <span class="screenshot-caption">Recovery Rules</span>
       </div>
-      <div class="screenshot-item" data-modal="modal-update-rules">
+      <div class="screenshot-item" data-reveal data-modal="modal-update-rules">
         <img src="images/screenshots/admin-update-rules.png" alt="Update Rules" loading="lazy">
         <span class="screenshot-caption">Update Rules</span>
       </div>
@@ -359,24 +359,24 @@
 <section class="section section-dark" id="architecture">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">Architecture</h2>
-      <p class="section-sub center">Bidirectional gRPC streaming across every layer. Continuous log monitoring with pattern-driven recovery rules. Real-time WebSocket state push. Sidecar command dispatch for zero-latency switchover.</p>
+      <h2 class="section-title center" data-reveal>Architecture</h2>
+      <p class="section-sub center" data-reveal>Bidirectional gRPC streaming across every layer. Continuous log monitoring with pattern-driven recovery rules. Real-time WebSocket state push. Sidecar command dispatch for zero-latency switchover.</p>
     </div>
-    <div class="arch-diagram">
+    <div class="arch-diagram" data-reveal>
       <img src="images/architecture.svg" alt="PG-Swarm architecture diagram" class="arch-svg">
     </div>
-    <div class="arch-components">
-      <div class="arch-card">
+    <div class="arch-components" data-reveal-stagger>
+      <div class="arch-card" data-reveal>
         <h3>Central</h3>
         <code>cmd/central</code>
         <p>gRPC server for satellite streams. REST API with 60+ endpoints. WebSocket hub for real-time updates. Embedded React dashboard. PostgreSQL metadata store with auto-migrations.</p>
       </div>
-      <div class="arch-card">
+      <div class="arch-card" data-reveal>
         <h3>Satellite</h3>
         <code>cmd/satellite</code>
         <p>Lightweight agent per edge cluster. Persistent gRPC stream with auto-reconnection. Kubernetes operator that builds PG clusters from JSON configs.</p>
       </div>
-      <div class="arch-card">
+      <div class="arch-card" data-reveal>
         <h3>Failover Sidecar</h3>
         <code>cmd/failover-sidecar</code>
         <p>Per-pod sidecar for leader election via K8s Leases. Detects split-brain, fences writes, demotes old primary, recovers timeline divergence. Log watcher with 40+ recovery patterns. Bidirectional gRPC streaming to satellite for command dispatch.</p>
@@ -389,46 +389,46 @@
 <section class="section" id="how-it-works">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">How Failover Works</h2>
-      <p class="section-sub center">From primary failure to full recovery in under 20 seconds, with zero manual intervention.</p>
+      <h2 class="section-title center" data-reveal>How Failover Works</h2>
+      <p class="section-sub center" data-reveal>From primary failure to full recovery in under 20 seconds, with zero manual intervention.</p>
     </div>
-    <div class="timeline">
-      <div class="timeline-item">
+    <div class="timeline" data-reveal-stagger>
+      <div class="timeline-item" data-reveal>
         <div class="timeline-marker">1</div>
         <div class="timeline-content">
           <h4>Primary Dies</h4>
           <p>The primary pod crashes or becomes unreachable. The failover sidecar's lease renewal stops.</p>
         </div>
       </div>
-      <div class="timeline-item">
+      <div class="timeline-item" data-reveal>
         <div class="timeline-marker">2</div>
         <div class="timeline-content">
           <h4>Lease Expires (15s)</h4>
           <p>After 15 seconds without renewal, the leader lease expires. All replica sidecars detect this on their next tick.</p>
         </div>
       </div>
-      <div class="timeline-item">
+      <div class="timeline-item" data-reveal>
         <div class="timeline-marker">3</div>
         <div class="timeline-content">
           <h4>Replica Acquires Lease</h4>
           <p>One replica wins the lease via optimistic locking (resourceVersion). The others see the conflict and back off.</p>
         </div>
       </div>
-      <div class="timeline-item">
+      <div class="timeline-item" data-reveal>
         <div class="timeline-marker">4</div>
         <div class="timeline-content">
           <h4>pg_promote()</h4>
           <p>The winning replica calls <code>pg_promote()</code>, transitions to primary, and labels its pod <code>pg-swarm.io/role=primary</code>.</p>
         </div>
       </div>
-      <div class="timeline-item">
+      <div class="timeline-item" data-reveal>
         <div class="timeline-marker">5</div>
         <div class="timeline-content">
           <h4>RW Service Routes</h4>
           <p>The Kubernetes RW Service selector picks up the new primary label. Applications reconnect transparently.</p>
         </div>
       </div>
-      <div class="timeline-item">
+      <div class="timeline-item" data-reveal>
         <div class="timeline-marker">6</div>
         <div class="timeline-content">
           <h4>Timeline Recovery</h4>
@@ -443,48 +443,48 @@
 <section class="section section-dark" id="backup">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">Backup & Restore</h2>
-      <p class="section-sub center">Per-pod backup sidecar with role-aware scheduling. Primary handles WAL archiving, replicas run scheduled backups. Internal cron, gzip compression, and point-in-time recovery.</p>
+      <h2 class="section-title center" data-reveal>Backup & Restore</h2>
+      <p class="section-sub center" data-reveal>Per-pod backup sidecar with role-aware scheduling. Primary handles WAL archiving, replicas run scheduled backups. Internal cron, gzip compression, and point-in-time recovery.</p>
     </div>
-    <div class="feature-grid">
-      <div class="feature-card feature-card-dark">
+    <div class="feature-grid" data-reveal-stagger>
+      <div class="feature-card feature-card-dark" data-reveal>
         <div class="feature-icon">&#128190;</div>
         <h3>Physical Backups</h3>
         <p>Full base backups and incremental backups (PG 17+ changed blocks). WAL archiving on the primary with <code>archive_command</code> auto-configured via pg_reload_conf. No pod restart needed.</p>
       </div>
-      <div class="feature-card feature-card-dark">
+      <div class="feature-card feature-card-dark" data-reveal>
         <div class="feature-icon">&#128194;</div>
         <h3>Logical Backups</h3>
         <p>pg_dump-based logical backups with gzip compression. Per-database or full cluster. Scheduled independently from physical backups via internal cron.</p>
       </div>
-      <div class="feature-card feature-card-dark">
+      <div class="feature-card feature-card-dark" data-reveal>
         <div class="feature-icon">&#128260;</div>
         <h3>Role-Aware Scheduling</h3>
         <p>Primary pod handles WAL archiving and metadata. Replica pods run scheduled base, incremental, and logical backups. Automatic role detection at sidecar startup.</p>
       </div>
-      <div class="feature-card feature-card-dark">
+      <div class="feature-card feature-card-dark" data-reveal>
         <div class="feature-icon">&#128203;</div>
         <h3>WAL Auto-Config</h3>
         <p>Backup configuration auto-sets <code>archive_mode</code>, <code>archive_command</code>, and <code>summarize_wal</code> in postgresql.conf. HBA changes applied via pg_reload_conf with zero downtime.</p>
       </div>
-      <div class="feature-card feature-card-dark">
+      <div class="feature-card feature-card-dark" data-reveal>
         <div class="feature-icon">&#9202;</div>
         <h3>Point-in-Time Recovery</h3>
         <p>Restore to any point in time from the dashboard. Select a base backup and target timestamp. The satellite handles StatefulSet scaling and recovery setup.</p>
       </div>
-      <div class="feature-card feature-card-dark">
+      <div class="feature-card feature-card-dark" data-reveal>
         <div class="feature-icon">&#128230;</div>
         <h3>Gzip Compression</h3>
         <p>All backups are compressed before upload. Base backups use <code>pg_basebackup -z</code>. Logical dumps are gzipped. Retention managed by the sidecar scheduler.</p>
       </div>
     </div>
-    <div class="arch-components" style="margin-top: 40px">
-      <div class="arch-card">
+    <div class="arch-components" data-reveal-stagger style="margin-top: 40px">
+      <div class="arch-card" data-reveal>
         <h3>Destinations</h3>
         <code>gcs / sftp</code>
         <p>Google Cloud Storage and SFTP servers. Credentials stored as K8s Secrets on each satellite. Destination configured per cluster.</p>
       </div>
-      <div class="arch-card">
+      <div class="arch-card" data-reveal>
         <h3>Backup Sidecar</h3>
         <code>cmd/backup-sidecar</code>
         <p>Per-pod sidecar container injected by the satellite operator. Runs alongside PostgreSQL with shared volume access. Internal cron scheduler for all backup types. HTTP API for status and on-demand triggers.</p>
@@ -497,16 +497,16 @@
 <section class="section" id="stack">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">Tech Stack</h2>
+      <h2 class="section-title center" data-reveal>Tech Stack</h2>
     </div>
-    <div class="stack-grid">
-      <div class="stack-item"><strong>Language</strong><span>Go 1.26</span></div>
-      <div class="stack-item"><strong>Communication</strong><span>gRPC + Protobuf v3</span></div>
-      <div class="stack-item"><strong>Database</strong><span>PostgreSQL (pgx/v5)</span></div>
-      <div class="stack-item"><strong>REST API</strong><span>GoFiber v2</span></div>
-      <div class="stack-item"><strong>Logging</strong><span>zerolog</span></div>
-      <div class="stack-item"><strong>Dashboard</strong><span>React 19 + Vite + JSX</span></div>
-      <div class="stack-item"><strong>K8s Client</strong><span>client-go v0.35</span></div>
+    <div class="stack-grid" data-reveal-stagger>
+      <div class="stack-item" data-reveal><strong>Language</strong><span>Go 1.26</span></div>
+      <div class="stack-item" data-reveal><strong>Communication</strong><span>gRPC + Protobuf v3</span></div>
+      <div class="stack-item" data-reveal><strong>Database</strong><span>PostgreSQL (pgx/v5)</span></div>
+      <div class="stack-item" data-reveal><strong>REST API</strong><span>GoFiber v2</span></div>
+      <div class="stack-item" data-reveal><strong>Logging</strong><span>zerolog</span></div>
+      <div class="stack-item" data-reveal><strong>Dashboard</strong><span>React 19 + Vite + JSX</span></div>
+      <div class="stack-item" data-reveal><strong>K8s Client</strong><span>client-go v0.35</span></div>
     </div>
   </div>
 </section>
@@ -515,23 +515,23 @@
 <section class="section section-dark" id="quickstart">
   <div class="container">
     <div class="section-header">
-      <h2 class="section-title center">Quick Start</h2>
-      <p class="section-sub center">Get PG-Swarm running locally in under a minute.</p>
+      <h2 class="section-title center" data-reveal>Quick Start</h2>
+      <p class="section-sub center" data-reveal>Get PG-Swarm running locally in under a minute.</p>
     </div>
-    <div class="code-blocks">
-      <div class="code-block">
+    <div class="code-blocks" data-reveal-stagger>
+      <div class="code-block" data-reveal>
         <div class="code-header">Build from source</div>
         <pre><code>make build        # Compile all binaries
 make test         # Run unit tests
 make lint         # golangci-lint</code></pre>
       </div>
-      <div class="code-block">
+      <div class="code-block" data-reveal>
         <div class="code-header">Minikube (local dev)</div>
         <pre><code>make minikube-build-all
 make k8s-deploy-all
 make k8s-status</code></pre>
       </div>
-      <div class="code-block code-block-wide">
+      <div class="code-block code-block-wide" data-reveal>
         <div class="code-header">Production / Other K8s</div>
         <pre><code># Push images to your registry
 DOCKER_REPO=your.registry/pg-swarm make docker-push-all
@@ -585,6 +585,17 @@ kubectl apply -k deploy/k8s/satellite/base/
 </footer>
 
 <script>
+// Scroll-reveal with IntersectionObserver
+const revealObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('revealed');
+      revealObserver.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+document.querySelectorAll('[data-reveal]').forEach(el => revealObserver.observe(el));
+
 // Mobile nav toggle
 document.querySelector('.nav-toggle').addEventListener('click', function() {
   document.querySelector('.nav-links').classList.toggle('open');
