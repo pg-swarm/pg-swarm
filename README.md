@@ -1,4 +1,5 @@
 [![Docker Image Build](https://github.com/pg-swarm/pg-swarm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/pg-swarm/pg-swarm/actions/workflows/docker-publish.yml)
+[![CodeQL](https://github.com/pg-swarm/pg-swarm/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/pg-swarm/pg-swarm/actions/workflows/github-code-scanning/codeql)
 
 # pg-swarm
 
