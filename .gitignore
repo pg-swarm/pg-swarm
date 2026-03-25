@@ -46,8 +46,8 @@ dashboard/static/
 .env
 .env.*
 
-central
-satellite
-failover-sidecar
-backup-sidecar
+/central
+/satellite
+/failover-sidecar
+/backup-sidecar
 
