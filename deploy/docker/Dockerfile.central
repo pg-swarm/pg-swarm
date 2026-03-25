@@ -3,10 +3,10 @@
 # ── Dashboard stage ───────────────────────────────────────────────────────────
 FROM --platform=$BUILDPLATFORM node:22-alpine AS dashboard
 
-WORKDIR /src/web/dashboard
-COPY web/dashboard/package.json web/dashboard/package-lock.json ./
+WORKDIR /src/dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci
-COPY web/dashboard/ .
+COPY dashboard/ .
 RUN npm run build
 
 # ── Build stage ───────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ RUN go mod download
 
 # Copy source and bring in built dashboard assets
 COPY . .
-COPY --from=dashboard /src/web/static/ ./web/static/
+COPY --from=dashboard /src/dashboard/static/ ./dashboard/static/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" \
     -o /out/central ./cmd/central

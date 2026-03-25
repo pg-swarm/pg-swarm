@@ -11,6 +11,7 @@ import {
   postgresVersions,
   postgresVariants,
   storageTiers,
+  pgParamClassifications,
   recoveryRuleSets,
   generateLogs,
 } from './data.js';
@@ -39,6 +40,7 @@ export default function mockApiPlugin() {
     postgresVersions: [...postgresVersions],
     postgresVariants: [...postgresVariants],
     storageTiers: [...storageTiers],
+    pgParamClassifications: [...pgParamClassifications],
     recoveryRuleSets: recoveryRuleSets.map(rs => ({ ...rs, rules: rs.rules.map(r => ({ ...r })) })),
   };
 
@@ -327,6 +329,31 @@ export default function mockApiPlugin() {
           const rs = state.recoveryRuleSets.find((r) => r.id === id);
           if (rs && rs.builtin) return json(res, { error: 'cannot delete built-in rule set' }, 400);
           state.recoveryRuleSets = state.recoveryRuleSets.filter((r) => r.id !== id);
+          return json(res, { ok: true });
+        }
+
+        // ---- PG Parameter Classifications ----
+        if (path === '/pg-param-classifications' && method === 'GET') {
+          return json(res, state.pgParamClassifications);
+        }
+        if (path === '/pg-param-classifications' && method === 'POST') {
+          body(req).then((b) => {
+            const idx = state.pgParamClassifications.findIndex((p) => p.name === b.name);
+            const now = new Date().toISOString();
+            if (idx >= 0) {
+              Object.assign(state.pgParamClassifications[idx], b, { updated_at: now });
+              json(res, state.pgParamClassifications[idx]);
+            } else {
+              const p = { created_at: now, updated_at: now, ...b };
+              state.pgParamClassifications.push(p);
+              json(res, p, 201);
+            }
+          });
+          return;
+        }
+        if (path.match(/^\/pg-param-classifications\/[^/]+$/) && method === 'DELETE') {
+          const name = decodeURIComponent(path.split('/')[2]);
+          state.pgParamClassifications = state.pgParamClassifications.filter((p) => p.name !== name);
           return json(res, { ok: true });
         }
 

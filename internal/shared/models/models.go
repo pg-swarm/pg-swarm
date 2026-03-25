@@ -55,18 +55,19 @@ type Satellite struct {
 }
 
 type ClusterConfig struct {
-	ID               uuid.UUID       `json:"id" db:"id"`
-	Name             string          `json:"name" db:"name"`
-	Namespace        string          `json:"namespace" db:"namespace"`
-	SatelliteID      *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
-	ProfileID        *uuid.UUID      `json:"profile_id,omitempty" db:"profile_id"`
-	DeploymentRuleID *uuid.UUID      `json:"deployment_rule_id,omitempty" db:"deployment_rule_id"`
-	Config           json.RawMessage `json:"config" db:"config"`
-	ConfigVersion    int64           `json:"config_version" db:"config_version"`
-	State            ClusterState    `json:"state" db:"state"`
-	Paused           bool            `json:"paused" db:"paused"`
-	CreatedAt        time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at" db:"updated_at"`
+	ID                    uuid.UUID       `json:"id" db:"id"`
+	Name                  string          `json:"name" db:"name"`
+	Namespace             string          `json:"namespace" db:"namespace"`
+	SatelliteID           *uuid.UUID      `json:"satellite_id,omitempty" db:"satellite_id"`
+	ProfileID             *uuid.UUID      `json:"profile_id,omitempty" db:"profile_id"`
+	DeploymentRuleID      *uuid.UUID      `json:"deployment_rule_id,omitempty" db:"deployment_rule_id"`
+	Config                json.RawMessage `json:"config" db:"config"`
+	ConfigVersion         int64           `json:"config_version" db:"config_version"`
+	AppliedProfileVersion int             `json:"applied_profile_version" db:"applied_profile_version"`
+	State                 ClusterState    `json:"state" db:"state"`
+	Paused                bool            `json:"paused" db:"paused"`
+	CreatedAt             time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt             time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // DeploymentRule maps a profile to satellites matching a label selector.
@@ -93,7 +94,6 @@ type ClusterSpec struct {
 	PgParams           map[string]string `json:"pg_params,omitempty"`
 	HbaRules           []string          `json:"hba_rules,omitempty"`
 	Archive            *ArchiveSpec      `json:"archive,omitempty"`             // nil = archiving disabled
-	Databases          []DatabaseSpec    `json:"databases,omitempty"`           // databases to create with owner users
 	Failover           *FailoverSpec     `json:"failover,omitempty"`            // nil = failover disabled
 	DeletionProtection bool              `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
 }
@@ -141,12 +141,6 @@ type FailoverSpec struct {
 	SidecarImage               string `json:"sidecar_image,omitempty"`
 }
 
-type DatabaseSpec struct {
-	Name     string `json:"name"`
-	User     string `json:"user"`
-	Password string `json:"password"`
-}
-
 // ValidateArchiveSpec validates the archive configuration.
 // nil is valid (archiving disabled).
 func ValidateArchiveSpec(a *ArchiveSpec) error {
@@ -169,27 +163,6 @@ func ValidateArchiveSpec(a *ArchiveSpec) error {
 	return nil
 }
 
-// ValidateDatabases validates the databases configuration.
-func ValidateDatabases(dbs []DatabaseSpec) error {
-	seen := make(map[string]bool, len(dbs))
-	for i, db := range dbs {
-		if db.Name == "" {
-			return fmt.Errorf("databases[%d]: name is required", i)
-		}
-		if db.User == "" {
-			return fmt.Errorf("databases[%d] (%s): user is required", i, db.Name)
-		}
-		if db.Password == "" {
-			return fmt.Errorf("databases[%d] (%s): password is required", i, db.Name)
-		}
-		if seen[db.Name] {
-			return fmt.Errorf("databases[%d]: duplicate database name %q", i, db.Name)
-		}
-		seen[db.Name] = true
-	}
-	return nil
-}
-
 // ParseSpec deserializes the Config JSON into a ClusterSpec.
 func (c *ClusterConfig) ParseSpec() (*ClusterSpec, error) {
 	var spec ClusterSpec
@@ -200,14 +173,14 @@ func (c *ClusterConfig) ParseSpec() (*ClusterSpec, error) {
 }
 
 type ClusterProfile struct {
-	ID                 uuid.UUID       `json:"id" db:"id"`
-	Name               string          `json:"name" db:"name"`
-	Description        string          `json:"description" db:"description"`
-	Config             json.RawMessage `json:"config" db:"config"`
-	Locked             bool            `json:"locked" db:"locked"`
-	RecoveryRuleSetID  *uuid.UUID      `json:"recovery_rule_set_id" db:"recovery_rule_set_id"`
-	CreatedAt          time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at" db:"updated_at"`
+	ID                uuid.UUID       `json:"id" db:"id"`
+	Name              string          `json:"name" db:"name"`
+	Description       string          `json:"description" db:"description"`
+	Config            json.RawMessage `json:"config" db:"config"`
+	InUse             bool            `json:"locked" db:"in_use"` // computed: true when referenced by clusters or rules
+	RecoveryRuleSetID *uuid.UUID      `json:"recovery_rule_set_id" db:"recovery_rule_set_id"`
+	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // ParseSpec deserializes the Config JSON into a ClusterSpec.
@@ -278,4 +251,48 @@ type RecoveryRuleSet struct {
 	Config      json.RawMessage `json:"config" db:"config"` // JSON array of RecoveryRule
 	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// ---------- Cluster Databases ----------
+
+// ClusterDatabase represents a database + user dynamically managed at the cluster level.
+type ClusterDatabase struct {
+	ID           uuid.UUID `json:"id" db:"id"`
+	ClusterID    uuid.UUID `json:"cluster_id" db:"cluster_id"`
+	DBName       string    `json:"db_name" db:"db_name"`
+	DBUser       string    `json:"db_user" db:"db_user"`
+	Password     []byte    `json:"-" db:"password"`                        // encrypted, never serialized to API
+	AllowedCIDRs []string  `json:"allowed_cidrs" db:"allowed_cidrs"`       // e.g. ["10.0.0.0/8"]
+	Status       string    `json:"status" db:"status"`                     // pending, created, failed
+	ErrorMessage string    `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// ---------- Config Versions ----------
+
+// ConfigVersion stores a complete configuration snapshot for a profile.
+// Each update creates a new version; versions are append-only.
+type ConfigVersion struct {
+	ID            uuid.UUID       `json:"id" db:"id"`
+	ProfileID     uuid.UUID       `json:"profile_id" db:"profile_id"`
+	Version       int             `json:"version" db:"version"`
+	Config        json.RawMessage `json:"config" db:"config"`
+	ChangeSummary string          `json:"change_summary" db:"change_summary"`
+	ApplyStatus   string          `json:"apply_status" db:"apply_status"`
+	CreatedBy     string          `json:"created_by" db:"created_by"`
+	CreatedAt     time.Time       `json:"created_at" db:"created_at"`
+}
+
+// ---------- PG Parameter Classifications ----------
+
+// PgParamClassification defines the restart behavior for a PostgreSQL parameter.
+// Parameters not in this table default to sequential restart.
+type PgParamClassification struct {
+	Name        string    `json:"name" db:"name"`
+	RestartMode string    `json:"restart_mode" db:"restart_mode"` // "sequential" or "full_restart"
+	Description string    `json:"description" db:"description"`
+	PgContext   string    `json:"pg_context" db:"pg_context"` // "postmaster", "sighup", etc.
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
 }

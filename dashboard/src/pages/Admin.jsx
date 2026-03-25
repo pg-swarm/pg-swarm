@@ -3,7 +3,7 @@ import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api } from '../api';
 import {
-  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database, Shield
+  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database, Shield, SlidersHorizontal
 } from 'lucide-react';
 import RecoveryRulesTab from '../components/RecoveryRulesTab';
 
@@ -19,6 +19,7 @@ export default function Admin() {
     { key: 'variants', label: 'Image Variants', icon: <Box size={14} /> },
     { key: 'versions', label: 'PG Versions', icon: <Database size={14} /> },
     { key: 'recovery', label: 'Recovery Rules', icon: <Shield size={14} /> },
+    { key: 'pgparams', label: 'Update Rules', icon: <SlidersHorizontal size={14} /> },
   ];
 
   return (
@@ -40,6 +41,7 @@ export default function Admin() {
       {activeTab === 'variants' && <VariantsTab postgresVariants={postgresVariants} refresh={refresh} toast={toast} />}
       {activeTab === 'versions' && <VersionsTab postgresVersions={postgresVersions} postgresVariants={postgresVariants} refresh={refresh} toast={toast} />}
       {activeTab === 'recovery' && <RecoveryRulesTab toast={toast} />}
+      {activeTab === 'pgparams' && <PgParamClassificationsTab toast={toast} />}
       </div>
     </>
   );
@@ -332,6 +334,151 @@ function VersionsTab({ postgresVersions, postgresVariants, refresh, toast }) {
                 </td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
+// --- PG Parameter Classifications Tab ---
+
+function PgParamClassificationsTab({ toast }) {
+  const [params, setParams] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [search, setSearch] = useState('');
+  const [form, setForm] = useState({ name: '', restart_mode: 'reload', description: '', pg_context: 'sighup' });
+
+  async function load() {
+    try {
+      const data = await api.pgParamClassifications();
+      setParams(data || []);
+    } catch (e) {
+      toast('Failed to load param classifications: ' + e.message, true);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  function startCreate() {
+    setForm({ name: '', restart_mode: 'reload', description: '', pg_context: 'sighup' });
+    setEditing('new');
+  }
+
+  function startEdit(p) {
+    setForm({ name: p.name, restart_mode: p.restart_mode, description: p.description, pg_context: p.pg_context });
+    setEditing(p.name);
+  }
+
+  async function save() {
+    try {
+      await api.upsertPgParamClassification(form);
+      toast(editing === 'new' ? 'Parameter added' : 'Parameter updated');
+      setEditing(null);
+      load();
+    } catch (e) {
+      toast('Save failed: ' + e.message, true);
+    }
+  }
+
+  async function remove(name) {
+    try {
+      await api.deletePgParamClassification(name);
+      toast('Parameter removed (defaults to reload)');
+      load();
+    } catch (e) {
+      toast('Delete failed: ' + e.message, true);
+    }
+  }
+
+  const modeBadge = (mode) => {
+    const styles = {
+      reload:       { cls: 'badge-green',  label: 'Reload' },
+      sequential:   { cls: 'badge-amber',  label: 'Restart' },
+      full_restart: { cls: 'badge-red',    label: 'Full Restart' },
+    };
+    const s = styles[mode] || styles.reload;
+    return <span className={'badge ' + s.cls}><span className="dot" />{s.label}</span>;
+  };
+
+  const term = search.toLowerCase().trim();
+  const filtered = term
+    ? params.filter(p => p.name.includes(term) || (p.description && p.description.toLowerCase().includes(term)) || (p.pg_context && p.pg_context.includes(term)))
+    : params;
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', gap: 12 }}>
+        <span className="sm muted" style={{ flex: 1 }}>
+          Update rules for PostgreSQL parameters. <strong>Reload</strong> = pg_reload_conf() with no restart.
+          <strong> Restart</strong> = rolling pod restart. <strong>Full Restart</strong> = full cluster shutdown.
+          Parameters not listed default to reload.
+        </span>
+        <input className="input" placeholder="Search parameters..." value={search}
+          onChange={e => setSearch(e.target.value)} style={{ width: 220 }} />
+        <button className="btn btn-approve" onClick={startCreate} style={{ whiteSpace: 'nowrap' }}><Plus size={14} /> Add</button>
+      </div>
+
+      {editing && (
+        <div className="admin-form-bar">
+          <input className="input" placeholder="Parameter name" value={form.name}
+            onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+            disabled={editing !== 'new'} style={{ width: 200 }} />
+          <select className="input" value={form.restart_mode}
+            onChange={e => setForm(f => ({ ...f, restart_mode: e.target.value }))} style={{ width: 150 }}>
+            <option value="reload">Reload</option>
+            <option value="sequential">Restart</option>
+            <option value="full_restart">Full Restart</option>
+          </select>
+          <select className="input" value={form.pg_context}
+            onChange={e => setForm(f => ({ ...f, pg_context: e.target.value }))} style={{ width: 140 }}>
+            <option value="sighup">sighup</option>
+            <option value="postmaster">postmaster</option>
+            <option value="superuser">superuser</option>
+            <option value="user">user</option>
+          </select>
+          <input className="input" placeholder="Description" value={form.description}
+            onChange={e => setForm(f => ({ ...f, description: e.target.value }))} style={{ flex: 1 }} />
+          <button className="btn btn-approve" onClick={save}><Save size={13} /> Save</button>
+          <button className="btn btn-reject" onClick={() => setEditing(null)}><X size={13} /> Cancel</button>
+        </div>
+      )}
+
+      {params.length === 0 && !editing ? (
+        <div className="empty-state" style={{ padding: '40px 20px' }}>
+          <SlidersHorizontal size={48} strokeWidth={1.2} />
+          <h3>No parameter classifications</h3>
+          <p>All parameters default to reload (pg_reload_conf). Add entries to classify parameters that need a pod restart or full cluster shutdown.</p>
+        </div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Parameter</th>
+              <th>Update Mode</th>
+              <th>PG Context</th>
+              <th>Description</th>
+              <th style={{ width: 180 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(p => (
+              <tr key={p.name}>
+                <td className="mono">{p.name}</td>
+                <td>{modeBadge(p.restart_mode)}</td>
+                <td className="sm muted">{p.pg_context || '-'}</td>
+                <td className="sm muted">{p.description || '-'}</td>
+                <td>
+                  <div className="actions">
+                    <button className="btn btn-sm" onClick={() => startEdit(p)}><Pencil size={12} /> Edit</button>
+                    <button className="btn btn-sm btn-reject" onClick={() => remove(p.name)}><Trash2 size={12} /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && term && (
+              <tr><td colSpan={5} className="sm muted" style={{ textAlign: 'center', padding: 20 }}>No parameters matching "{search}"</td></tr>
+            )}
           </tbody>
         </table>
       )}

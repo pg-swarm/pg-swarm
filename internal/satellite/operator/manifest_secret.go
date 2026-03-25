@@ -3,7 +3,6 @@ package operator
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,11 +18,8 @@ func buildSecret(cfg *pgswarmv1.ClusterConfig) *corev1.Secret {
 		"sidecar-stream-token": randomPassword(32),
 	}
 
-	// Add per-database user passwords
-	for _, db := range cfg.Databases {
-		key := fmt.Sprintf("password-%s", db.User)
-		data[key] = db.Password
-	}
+	// NOTE: Cluster-level database passwords are NOT stored in the Secret.
+	// They are passed directly via sidecar CreateDatabaseCmd proto message.
 
 	return &corev1.Secret{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},

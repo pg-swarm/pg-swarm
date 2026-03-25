@@ -337,6 +337,10 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					log.Info().Str("satellite_id", satID.String()).Int("count", len(classes)).Msg("storage classes updated")
 				}
 
+			case *pgswarmv1.SatelliteMessage_DatabaseStatus:
+				report := payload.DatabaseStatus
+				s.handleDatabaseStatusReport(ctx, satID, report)
+
 			}
 		}
 	}()
@@ -805,4 +809,46 @@ func protoInstancesToJSON(instances []*pgswarmv1.InstanceHealth) (json.RawMessag
 		out = append(out, ij)
 	}
 	return json.Marshal(out)
+}
+
+// handleDatabaseStatusReport processes a database creation status report from a satellite.
+func (s *GRPCServer) handleDatabaseStatusReport(ctx context.Context, satID uuid.UUID, report *pgswarmv1.DatabaseStatusReport) {
+	log.Info().
+		Str("satellite_id", satID.String()).
+		Str("cluster", report.ClusterName).
+		Str("db", report.DbName).
+		Str("status", report.Status).
+		Msg("database status report received")
+
+	// Find the cluster config to get the cluster ID
+	clusters, err := s.store.GetClusterConfigsBySatellite(ctx, satID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get cluster configs for database status")
+		return
+	}
+
+	for _, cfg := range clusters {
+		if cfg.Name != report.ClusterName {
+			continue
+		}
+		// Find the database record by name
+		db, err := s.store.GetClusterDatabaseByName(ctx, cfg.ID, report.DbName)
+		if err != nil {
+			log.Warn().Err(err).Str("db", report.DbName).Msg("database record not found for status update")
+			return
+		}
+		// Update status
+		if err := s.store.UpdateClusterDatabaseStatus(ctx, db.ID, report.Status, report.ErrorMessage); err != nil {
+			log.Error().Err(err).Str("db", report.DbName).Msg("failed to update database status")
+			return
+		}
+
+		// Notify dashboard via WebSocket
+		if s.wsHub != nil {
+			s.wsHub.Notify()
+		}
+		return
+	}
+
+	log.Warn().Str("cluster", report.ClusterName).Msg("cluster not found for database status report")
 }

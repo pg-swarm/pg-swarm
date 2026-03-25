@@ -29,14 +29,14 @@ help: ## Show this help
 proto: ## Generate Go code from .proto files (requires buf)
 	buf generate
 
-dashboard: ## Build the React dashboard into web/static/
-	cd web/dashboard && npm install && npm run build
+dashboard: ## Build the React dashboard into dashboard/static/
+	cd dashboard && npm install && npm run build
 
 dashboard-dev: ## Run React dashboard with hot-reload (proxies API to localhost:8080)
-	cd web/dashboard && npm install && npm run dev
+	cd dashboard && npm install && npm run dev
 
 dashboard-mock: ## Run React dashboard with mock data (no backend needed)
-	cd web/dashboard && npm install && MOCK=true npm run dev
+	cd dashboard && npm install && MOCK=true npm run dev
 
 build: proto dashboard ## Compile central, satellite, and failover-sidecar binaries
 	go build -o bin/central ./cmd/central

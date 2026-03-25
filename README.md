@@ -4,7 +4,7 @@ Centralized management system for PostgreSQL High Availability clusters deployed
 
 A cloud-hosted **Central** control plane handles satellite registration, configuration distribution, and fleet-wide health monitoring. A lightweight **Satellite** agent runs on each edge cluster as a Kubernetes operator — constructing PG cluster manifests from JSON configs, performing health checks, and reporting metrics. A **Failover Sidecar** runs alongside each PG pod, managing leader election via Kubernetes Leases and performing automatic promotion, fencing, and demotion — with no central round-trip required.
 
-No dependency on CloudNativePG (CNPG) or any external operator framework. pg-swarm builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC resources from scratch.
+No CRDs, no external operator frameworks. pg-swarm builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC resources from scratch.
 
 > For detailed architecture, protocol definitions, and design decisions, see [DESIGN.md](DESIGN.md).
 

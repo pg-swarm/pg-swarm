@@ -1,8 +1,11 @@
 package operator
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -116,6 +119,9 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: selLabels,
+					Annotations: map[string]string{
+						"pg-swarm.io/config-hash": configHash(cfg),
+					},
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: podSecurityContext(cfg.Postgres.Image),
@@ -221,25 +227,6 @@ func buildVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	return pvc
 }
 
-// buildDatabaseSQL generates SQL to create users and databases from the config.
-func buildDatabaseSQL(databases []*pgswarmv1.DatabaseSpec) string {
-	if len(databases) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString("\n    # Create application databases and users")
-	for _, db := range databases {
-		// Use password from the secret env var (password-<user>)
-		envVar := fmt.Sprintf("DB_PASSWORD_%s", strings.ToUpper(db.User))
-		sb.WriteString(fmt.Sprintf(`
-    psql -U postgres -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='%s') THEN CREATE ROLE %s WITH LOGIN PASSWORD '$%s'; END IF; END \$\$;"
-    psql -U postgres -c "SELECT 'CREATE DATABASE %s OWNER %s' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s')" --no-align -t | psql -U postgres`,
-			db.User, db.User, envVar,
-			db.Name, db.User, db.Name))
-	}
-	return sb.String()
-}
-
 // buildInitContainer creates the init container that bootstraps PG data and handles replication setup.
 func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.Container {
 	rwSvc := resourceName(cfg.ClusterName, "rw")
@@ -256,21 +243,6 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 		replicaRestoreBlock = fmt.Sprintf(`
     # Inject restore_command for archive recovery
     echo "restore_command = '%s'" >> "$PGDATA/postgresql.auto.conf"`, restoreCmd)
-	}
-
-	databaseSQL := buildDatabaseSQL(cfg.Databases)
-
-	// Block for creating databases on an already-initialised primary (config updates / pod restarts).
-	// Only runs on ordinal 0 when databases are defined and standby.signal is absent.
-	reinitDatabaseBlock := ""
-	if len(cfg.Databases) > 0 {
-		reinitDatabaseBlock = fmt.Sprintf(`
-    if [ "$ORDINAL" = "0" ] && [ ! -f "$PGDATA/standby.signal" ]; then
-        echo "Ensuring application databases exist"
-        pg_ctl -D "$PGDATA" start -w -o "-c listen_addresses='localhost'"
-%s
-        pg_ctl -D "$PGDATA" stop -w
-    fi`, databaseSQL)
 	}
 
 	// WAL symlink script block (used after initdb/pg_basebackup and in re-init path)
@@ -297,8 +269,6 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 		"{{RW_SVC}}", rwSvc,
 		"{{NAMESPACE}}", cfg.Namespace,
 		"{{WAL_SYMLINK_IDEMPOTENT}}", walSymlinkIdempotentBlock,
-		"{{REINIT_DATABASE}}", reinitDatabaseBlock,
-		"{{DATABASE_SQL}}", databaseSQL,
 		"{{PRIMARY_ARCHIVE}}", primaryArchiveBlock,
 		"{{WAL_SYMLINK}}", walSymlinkBlock,
 		"{{REPLICA_RESTORE}}", replicaRestoreBlock,
@@ -341,18 +311,9 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 		},
 	}
 
-	// Add env vars for database user passwords
-	for _, db := range cfg.Databases {
-		c.Env = append(c.Env, corev1.EnvVar{
-			Name: fmt.Sprintf("DB_PASSWORD_%s", strings.ToUpper(db.User)),
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  fmt.Sprintf("password-%s", db.User),
-				},
-			},
-		})
-	}
+	// NOTE: Cluster-level database passwords are NOT injected as env vars.
+	// Databases are created via sidecar CreateDatabaseCmd which carries the
+	// password directly in the proto message. No init container involvement.
 
 	// Mount WAL volume on init container
 	if walStorageEnabled(cfg) {
@@ -569,4 +530,42 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 			{Name: "recovery-rules", MountPath: "/etc/recovery-rules", ReadOnly: true},
 		},
 	}
+}
+
+// configHash computes a short hash of the config-affecting fields in a ClusterConfig.
+// This is used as a pod template annotation so that K8s triggers a rolling restart
+// when the ConfigMap content changes (K8s doesn't track ConfigMap data changes natively).
+func configHash(cfg *pgswarmv1.ClusterConfig) string {
+	h := sha256.New()
+	// Include all fields that affect postgresql.conf and pg_hba.conf
+	keys := make([]string, 0, len(cfg.PgParams))
+	for k := range cfg.PgParams {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(h, "%s=%s\n", k, cfg.PgParams[k])
+	}
+	for _, rule := range cfg.HbaRules {
+		fmt.Fprintf(h, "hba:%s\n", rule)
+	}
+	if cfg.Archive != nil {
+		fmt.Fprintf(h, "archive:%s:%s:%d\n", cfg.Archive.Mode, cfg.Archive.ArchiveCommand, cfg.Archive.ArchiveTimeoutSeconds)
+	}
+	if cfg.Resources != nil {
+		fmt.Fprintf(h, "res:%s:%s:%s:%s\n", cfg.Resources.CpuRequest, cfg.Resources.CpuLimit, cfg.Resources.MemoryRequest, cfg.Resources.MemoryLimit)
+	}
+	if cfg.Postgres != nil {
+		fmt.Fprintf(h, "pg:%s:%s\n", cfg.Postgres.Version, cfg.Postgres.Image)
+	}
+	if cfg.Failover != nil {
+		fmt.Fprintf(h, "fo:%v:%s\n", cfg.Failover.Enabled, cfg.Failover.SidecarImage)
+	}
+	// NOTE: ClusterDatabases are intentionally NOT included in the hash.
+	// Database changes are handled via sidecar SQL commands + pg_reload_conf()
+	// without requiring a pod restart.
+	// NOTE: ConfigVersion is intentionally NOT included. The hash should only
+	// change when actual config content changes, not on every version bump.
+	// Scale-only changes should not trigger a rolling restart.
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }

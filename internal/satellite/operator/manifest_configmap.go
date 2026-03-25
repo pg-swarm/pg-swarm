@@ -98,7 +98,7 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 		},
 		Data: map[string]string{
 			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive),
-			"pg_hba.conf":    buildHbaConf(cfg.HbaRules),
+			"pg_hba.conf":    buildHbaConf(cfg),
 		},
 	}
 }
@@ -141,17 +141,35 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 	return sb.String()
 }
 
-// buildHbaConf generates the pg_hba.conf content with mandatory HA rules followed by user rules.
-func buildHbaConf(userRules []string) string {
+// buildHbaConf generates the pg_hba.conf content with mandatory HA rules,
+// profile-level user rules, and cluster-level database access rules.
+func buildHbaConf(cfg *pgswarmv1.ClusterConfig) string {
 	var sb strings.Builder
 	sb.WriteString("# TYPE  DATABASE  USER  ADDRESS  METHOD\n")
+
+	// 1. Mandatory rules (replication, local access)
 	for _, rule := range mandatoryHbaRules {
 		sb.WriteString(rule)
 		sb.WriteByte('\n')
 	}
-	for _, rule := range userRules {
+
+	// 2. Profile-level user rules
+	for _, rule := range cfg.HbaRules {
 		sb.WriteString(rule)
 		sb.WriteByte('\n')
 	}
+
+	// 3. Cluster-level database access rules (auto-generated from cluster_databases)
+	for _, cdb := range cfg.ClusterDatabases {
+		cidrs := cdb.AllowedCidrs
+		if len(cidrs) == 0 {
+			cidrs = []string{"0.0.0.0/0"}
+		}
+		for _, cidr := range cidrs {
+			sb.WriteString(fmt.Sprintf("host %s %s %s scram-sha-256", cdb.DbName, cdb.DbUser, cidr))
+			sb.WriteByte('\n')
+		}
+	}
+
 	return sb.String()
 }

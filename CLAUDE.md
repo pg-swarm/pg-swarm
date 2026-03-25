@@ -44,6 +44,6 @@ make dashboard         # Build React dashboard
 - `internal/failover/logwatcher.go` — Real-time PG log monitoring (40+ recovery patterns)
 - `internal/failover/connector.go` — Bidirectional gRPC streaming to satellite
 - `internal/shared/models/` — Shared Go types
-- `web/dashboard/` — React SPA (10 pages)
+- `dashboard/` — React SPA + Go embed (10 pages)
 - `deploy/docker/` — Dockerfiles + docker-compose
 - `deploy/k8s/` — Kubernetes manifests (kustomize)
