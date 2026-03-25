@@ -93,4 +93,22 @@ type Store interface {
 	GetRecoveryRuleSet(ctx context.Context, id uuid.UUID) (*models.RecoveryRuleSet, error)
 	UpdateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error
 	DeleteRecoveryRuleSet(ctx context.Context, id uuid.UUID) error
+
+	// Config Versions
+	CreateConfigVersion(ctx context.Context, v *models.ConfigVersion) error
+	ListConfigVersions(ctx context.Context, profileID uuid.UUID) ([]*models.ConfigVersion, error)
+	GetConfigVersion(ctx context.Context, profileID uuid.UUID, version int) (*models.ConfigVersion, error)
+
+	// Cluster Databases
+	ListClusterDatabases(ctx context.Context, clusterID uuid.UUID) ([]*models.ClusterDatabase, error)
+	GetClusterDatabaseByName(ctx context.Context, clusterID uuid.UUID, dbName string) (*models.ClusterDatabase, error)
+	CreateClusterDatabase(ctx context.Context, db *models.ClusterDatabase) error
+	UpdateClusterDatabase(ctx context.Context, db *models.ClusterDatabase) error
+	UpdateClusterDatabaseStatus(ctx context.Context, id uuid.UUID, status, errorMsg string) error
+	DeleteClusterDatabase(ctx context.Context, id uuid.UUID) error
+
+	// PG Parameter Classifications
+	ListPgParamClassifications(ctx context.Context) ([]*models.PgParamClassification, error)
+	UpsertPgParamClassification(ctx context.Context, p *models.PgParamClassification) error
+	DeletePgParamClassification(ctx context.Context, name string) error
 }

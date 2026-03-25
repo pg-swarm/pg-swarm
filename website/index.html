@@ -22,10 +22,11 @@
     </a>
     <div class="nav-links">
       <a href="#features">Features</a>
+      <a href="#dashboard">Dashboard</a>
+      <a href="#screenshots">Screenshots</a>
       <a href="#architecture">Architecture</a>
       <a href="#how-it-works">How It Works</a>
       <a href="#backup">Backup</a>
-      <a href="#dashboard">Dashboard</a>
       <a href="#quickstart">Quick Start</a>
       <a href="concepts.html">Concepts</a>
       <a href="https://github.com/pg-swarm/pg-swarm" class="nav-github" aria-label="GitHub">
@@ -38,7 +39,6 @@
   </div>
 </nav>
 
-<!-- Hero -->
 <section class="hero">
   <div class="container">
     <div class="hero-badge">Open Source / Apache 2.0</div>
@@ -54,24 +54,24 @@
     </div>
     <div class="hero-stats">
       <div class="stat">
-        <span class="stat-num">500+</span>
-        <span class="stat-label">Edge Clusters</span>
-      </div>
-      <div class="stat">
         <span class="stat-num">&lt;5s</span>
         <span class="stat-label">Failover Time</span>
       </div>
       <div class="stat">
-        <span class="stat-num">4</span>
-        <span class="stat-label">Go Binaries</span>
+        <span class="stat-num">100s</span>
+        <span class="stat-label">of Edge Clusters</span>
       </div>
       <div class="stat">
         <span class="stat-num">0</span>
         <span class="stat-label">CRDs</span>
       </div>
       <div class="stat">
-        <span class="stat-num">3</span>
-        <span class="stat-label">Backup Types</span>
+        <span class="stat-num">4</span>
+        <span class="stat-label">Go Binaries</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">60+</span>
+        <span class="stat-label">REST Endpoints</span>
       </div>
     </div>
   </div>
@@ -151,11 +151,14 @@
   </div>
 </section>
 
+
 <!-- Features -->
 <section class="section" id="features">
   <div class="container">
-    <h2 class="section-title center">Features</h2>
-    <p class="section-sub center">Everything you need to run PostgreSQL HA at the edge, built from scratch in Go.</p>
+    <div class="section-header">
+      <h2 class="section-title center">Features</h2>
+      <p class="section-sub center">Everything you need to run PostgreSQL HA at the edge, built from scratch in Go.</p>
+    </div>
     <div class="feature-grid">
       <div class="feature-card">
         <div class="feature-icon">&#9889;</div>
@@ -190,12 +193,12 @@
       <div class="feature-card">
         <div class="feature-icon">&#128190;</div>
         <h3>Managed Backups</h3>
-        <p>Full, incremental, and logical backups with SQLite metadata tracking. Gzip compression, multi-PG-version support, and automatic retention.</p>
+        <p>Per-pod backup sidecar with GCS and SFTP storage. Physical (base + incremental + WAL archiving) and logical (pg_dump) backups scheduled via internal cron. PITR support. Being reimplemented from scratch.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#127760;</div>
-        <h3>No CNPG Dependency</h3>
-        <p>Builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC from scratch. No CRDs, no operator frameworks, minimal footprint.</p>
+        <h3>No CRDs Required</h3>
+        <p>Builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC from scratch. No Custom Resource Definitions, no operator frameworks, minimal footprint.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#128274;</div>
@@ -207,15 +210,158 @@
         <h3>Zero-Restart Recovery</h3>
         <p>Postgres container runs in a supervisor loop. Demotion, timeline recovery, and restart happen in-place without K8s restart counts.</p>
       </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128295;</div>
+        <h3>Live Config Changes</h3>
+        <p>Three-mode config update system: pg_reload_conf for sighup params, rolling restart for postmaster params, full cluster shutdown for replication-sensitive params. Database-driven parameter classification with admin panel.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128450;</div>
+        <h3>Cluster Databases</h3>
+        <p>Dynamic database and user management at the cluster level. CREATE ROLE + CREATE DATABASE via sidecar command. Per-database IP subnet access control (HBA rules). Zero pod restart.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128220;</div>
+        <h3>Recovery Rules</h3>
+        <p>Centrally managed log-based recovery rules with pattern matching. 40+ built-in patterns for WAL issues, replication failures, and crash loops. Admin panel with regex sandbox.</p>
+      </div>
     </div>
   </div>
 </section>
 
+<!-- Dashboard Preview -->
+<section class="section section-alt" id="dashboard">
+  <div class="container">
+    <div class="section-header">
+      <h2 class="section-title center">Web Dashboard</h2>
+      <p class="section-sub center">Real-time visibility into every PostgreSQL instance across your fleet.</p>
+    </div>
+    <div class="dashboard-features">
+      <div class="dash-feature">
+        <h4>Cluster Overview</h4>
+        <p>Instance table with role badges, ready/WAL status dots, connection bars, disk usage, and timeline IDs. Expand to see per-pod details.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Instance Detail</h4>
+        <p>Drill down to see disk vs WAL breakdown, WAL statistics, per-database sizes with cache hit ratios, table stats, and slow queries.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Profile Editor</h4>
+        <p>6-tab configuration editor: General, Volumes, Resources, PostgreSQL params (50+ parameters), HBA Rules, and Recovery Rules.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Deployment Rules</h4>
+        <p>Map profiles to satellites via label selectors. When a rule matches, clusters are auto-created and pushed. Fleet-scale management.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Switchover Progress</h4>
+        <p>9-step switchover progress modal with real-time WebSocket updates, point-of-no-return indicator, and rollback status for pre-PONR failures.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Update Rules</h4>
+        <p>Admin panel for PostgreSQL parameter classification. Define which params use pg_reload_conf (sighup), rolling restart (postmaster), or full cluster shutdown (replication-sensitive).</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Cluster Databases</h4>
+        <p>Per-cluster database management tab. CREATE ROLE + CREATE DATABASE via sidecar command. CIDR-based IP access control (HBA rules) per database. Zero pod restart.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Config Versioning</h4>
+        <p>Version history with revert for profile changes. Per-cluster approval workflow before config updates are applied. Full audit trail of every configuration change.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Event Log</h4>
+        <p>State transitions, failovers, switchovers, backup completions, and errors with severity icons. Per-cluster event filtering.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Satellite Logs</h4>
+        <p>Terminal-style log viewer with SSE streaming, server-side and client-side level filtering, remote log level control, auto-scroll, and clear.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Recovery Rules</h4>
+        <p>Centrally managed recovery rule sets with inline rule editing, pattern sandbox for testing regex against sample log lines, and per-cluster attachment.</p>
+      </div>
+      <div class="dash-feature">
+        <h4>Admin Console</h4>
+        <p>5-tab admin page: Storage Tiers with satellite mappings, Image Variants for postgres base images, PG Version registry, Recovery Rules editor, and Update Rules for parameter classification.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Screenshots -->
+<section class="section" id="screenshots">
+  <div class="container">
+    <div class="section-header">
+      <h2 class="section-title center">Screenshots</h2>
+      <p class="section-sub center">The embedded dashboard in action, running against mock data.</p>
+    </div>
+    <div class="screenshot-gallery">
+      <div class="screenshot-item" data-modal="modal-overview">
+        <img src="images/screenshots/overview.png" alt="Dashboard overview" loading="lazy">
+        <span class="screenshot-caption">Overview</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-clusters">
+        <img src="images/screenshots/clusters.png" alt="Clusters grid" loading="lazy">
+        <span class="screenshot-caption">Clusters</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-cluster-detail">
+        <img src="images/screenshots/cluster-detail.png" alt="Cluster detail" loading="lazy">
+        <span class="screenshot-caption">Cluster Detail</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-switchover">
+        <img src="images/screenshots/switchover-progress.png" alt="Switchover progress" loading="lazy">
+        <span class="screenshot-caption">Switchover Progress</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-satellites">
+        <img src="images/screenshots/satellites.png" alt="Satellites" loading="lazy">
+        <span class="screenshot-caption">Satellites</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-profiles">
+        <img src="images/screenshots/profiles.png" alt="Profiles" loading="lazy">
+        <span class="screenshot-caption">Profiles</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-deployment-rules">
+        <img src="images/screenshots/deployment-rules.png" alt="Deployment rules" loading="lazy">
+        <span class="screenshot-caption">Deployment Rules</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-events">
+        <img src="images/screenshots/events.png" alt="Events" loading="lazy">
+        <span class="screenshot-caption">Events</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-admin">
+        <img src="images/screenshots/admin.png" alt="Admin - Storage Tiers" loading="lazy">
+        <span class="screenshot-caption">Admin</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-recovery-rules">
+        <img src="images/screenshots/admin-recovery-rules.png" alt="Recovery Rules" loading="lazy">
+        <span class="screenshot-caption">Recovery Rules</span>
+      </div>
+      <div class="screenshot-item" data-modal="modal-update-rules">
+        <img src="images/screenshots/admin-update-rules.png" alt="Update Rules" loading="lazy">
+        <span class="screenshot-caption">Update Rules</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Screenshot Modal -->
+<div class="ss-modal-overlay" id="ssModal">
+  <div class="ss-modal">
+    <button class="ss-modal-close" aria-label="Close">&times;</button>
+    <h3 class="ss-modal-title"></h3>
+    <p class="ss-modal-desc"></p>
+    <div class="ss-modal-images"></div>
+  </div>
+</div>
+
 <!-- Architecture -->
 <section class="section section-dark" id="architecture">
   <div class="container">
-    <h2 class="section-title center">Architecture</h2>
-    <p class="section-sub center">Bidirectional gRPC streaming across every layer. Continuous log monitoring with pattern-driven recovery rules. Real-time WebSocket state push. Sidecar command dispatch for zero-latency switchover.</p>
+    <div class="section-header">
+      <h2 class="section-title center">Architecture</h2>
+      <p class="section-sub center">Bidirectional gRPC streaming across every layer. Continuous log monitoring with pattern-driven recovery rules. Real-time WebSocket state push. Sidecar command dispatch for zero-latency switchover.</p>
+    </div>
     <div class="arch-diagram">
       <img src="images/architecture.svg" alt="PG-Swarm architecture diagram" class="arch-svg">
     </div>
@@ -242,8 +388,10 @@
 <!-- How It Works -->
 <section class="section" id="how-it-works">
   <div class="container">
-    <h2 class="section-title center">How Failover Works</h2>
-    <p class="section-sub center">From primary failure to full recovery in under 20 seconds, with zero manual intervention.</p>
+    <div class="section-header">
+      <h2 class="section-title center">How Failover Works</h2>
+      <p class="section-sub center">From primary failure to full recovery in under 20 seconds, with zero manual intervention.</p>
+    </div>
     <div class="timeline">
       <div class="timeline-item">
         <div class="timeline-marker">1</div>
@@ -294,31 +442,30 @@
 <!-- Backup & Restore -->
 <section class="section section-dark" id="backup">
   <div class="container">
-    <h2 class="section-title center">Backup & Restore</h2>
-    <p class="section-sub center">Managed backups with incremental support, SQLite metadata tracking, gzip compression, and point-in-time recovery.</p>
-    <div class="arch-diagram">
-      <img src="images/backup-architecture.svg" alt="Backup architecture diagram" class="arch-svg">
+    <div class="section-header">
+      <h2 class="section-title center">Backup & Restore</h2>
+      <p class="section-sub center">Per-pod backup sidecar with role-aware scheduling. Primary handles WAL archiving, replicas run scheduled backups. Internal cron, gzip compression, and point-in-time recovery.</p>
     </div>
     <div class="feature-grid">
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128190;</div>
-        <h3>Backup Profiles</h3>
-        <p>Reusable configurations defining backup type (physical or logical), destination, schedule, and retention. Attach one of each type to a cluster profile.</p>
+        <h3>Physical Backups</h3>
+        <p>Full base backups and incremental backups (PG 17+ changed blocks). WAL archiving on the primary with <code>archive_command</code> auto-configured via pg_reload_conf. No pod restart needed.</p>
       </div>
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128194;</div>
-        <h3>Full + Incremental</h3>
-        <p>Daily full base backups with hourly incrementals (PG 17+). Incrementals capture only changed blocks. First run always takes a full backup automatically.</p>
+        <h3>Logical Backups</h3>
+        <p>pg_dump-based logical backups with gzip compression. Per-database or full cluster. Scheduled independently from physical backups via internal cron.</p>
       </div>
       <div class="feature-card feature-card-dark">
-        <div class="feature-icon">&#128451;</div>
-        <h3>SQLite Metadata Store</h3>
-        <p>Each destination has a <code>backups.db</code> tracking every backup with parent chains, manifests, sizes, and WAL segments. No external database needed.</p>
+        <div class="feature-icon">&#128260;</div>
+        <h3>Role-Aware Scheduling</h3>
+        <p>Primary pod handles WAL archiving and metadata. Replica pods run scheduled base, incremental, and logical backups. Automatic role detection at sidecar startup.</p>
       </div>
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128203;</div>
         <h3>WAL Auto-Config</h3>
-        <p>Physical backup profiles with WAL archiving enabled auto-set <code>archive_mode</code>, <code>archive_command</code>, and <code>summarize_wal</code> in postgresql.conf.</p>
+        <p>Backup configuration auto-sets <code>archive_mode</code>, <code>archive_command</code>, and <code>summarize_wal</code> in postgresql.conf. HBA changes applied via pg_reload_conf with zero downtime.</p>
       </div>
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#9202;</div>
@@ -328,78 +475,19 @@
       <div class="feature-card feature-card-dark">
         <div class="feature-icon">&#128230;</div>
         <h3>Gzip Compression</h3>
-        <p>All backups are compressed before upload. Base backups use <code>pg_basebackup -z</code>. Logical dumps are gzipped. Custom format uses built-in zlib.</p>
+        <p>All backups are compressed before upload. Base backups use <code>pg_basebackup -z</code>. Logical dumps are gzipped. Retention managed by the sidecar scheduler.</p>
       </div>
     </div>
     <div class="arch-components" style="margin-top: 40px">
       <div class="arch-card">
         <h3>Destinations</h3>
-        <code>s3 / gcs / sftp / local</code>
-        <p>S3 and S3-compatible (MinIO), Google Cloud Storage, SFTP servers, or local PersistentVolumeClaims. Credentials stored as K8s Secrets on each satellite.</p>
+        <code>gcs / sftp</code>
+        <p>Google Cloud Storage and SFTP servers. Credentials stored as K8s Secrets on each satellite. Destination configured per cluster.</p>
       </div>
       <div class="arch-card">
-        <h3>Backup Image</h3>
-        <code>pg-swarm-backup:latest</code>
-        <p>Alpine-based image with PG 16/17/18 client tools, aws-cli, rclone, kubectl, and sqlite3. Auto-selects the right PG version at runtime.</p>
-      </div>
-      <div class="arch-card">
-        <h3>Default Profiles</h3>
-        <code>daily-logical-2am / daily-physical-4am</code>
-        <p>Seeded on first run. Logical dump at 2 AM (7 retained). Full base at 4 AM + hourly incrementals + WAL archiving (7 full, 23 incremental, 7 days WAL).</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- Dashboard Preview -->
-<section class="section section-alt" id="dashboard">
-  <div class="container">
-    <h2 class="section-title center">Web Dashboard</h2>
-    <p class="section-sub center">Real-time visibility into every PostgreSQL instance across your fleet.</p>
-    <div class="dashboard-features">
-      <div class="dash-feature">
-        <h4>Cluster Overview</h4>
-        <p>Instance table with role badges, ready/WAL status dots, connection bars, disk usage, and timeline IDs. Expand to see per-pod details.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Instance Detail</h4>
-        <p>Drill down to see disk vs WAL breakdown, WAL statistics, per-database sizes with cache hit ratios, table stats, and slow queries.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Profile Editor</h4>
-        <p>7-tab configuration editor: General, Volumes, Resources, PostgreSQL params (50+ parameters), HBA Rules, Databases, and Backups.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Deployment Rules</h4>
-        <p>Map profiles to satellites via label selectors. When a rule matches, clusters are auto-created and pushed. Fleet-scale management.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Switchover Progress</h4>
-        <p>9-step switchover progress modal with real-time WebSocket updates, point-of-no-return indicator, and rollback status for pre-PONR failures.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Backup Profiles</h4>
-        <p>Create physical and logical backup profiles with cron schedules, destination config, and retention policies. Human-readable schedule preview.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Backup Inventory</h4>
-        <p>View all backups per cluster with type, status, size, and WAL range. Initiate point-in-time or logical restores from the cluster detail page.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Event Log</h4>
-        <p>State transitions, failovers, switchovers, backup completions, and errors with severity icons. Per-cluster event filtering.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Satellite Logs</h4>
-        <p>Terminal-style log viewer with SSE streaming, server-side and client-side level filtering, remote log level control, auto-scroll, and clear.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Recovery Rules</h4>
-        <p>Centrally managed recovery rule sets with inline rule editing, pattern sandbox for testing regex against sample log lines, and per-cluster attachment.</p>
-      </div>
-      <div class="dash-feature">
-        <h4>Admin Console</h4>
-        <p>4-tab admin page: Storage Tiers with satellite mappings, Image Variants for postgres base images, PG Version registry, and Recovery Rules editor.</p>
+        <h3>Backup Sidecar</h3>
+        <code>cmd/backup-sidecar</code>
+        <p>Per-pod sidecar container injected by the satellite operator. Runs alongside PostgreSQL with shared volume access. Internal cron scheduler for all backup types. HTTP API for status and on-demand triggers.</p>
       </div>
     </div>
   </div>
@@ -408,7 +496,9 @@
 <!-- Tech Stack -->
 <section class="section" id="stack">
   <div class="container">
-    <h2 class="section-title center">Tech Stack</h2>
+    <div class="section-header">
+      <h2 class="section-title center">Tech Stack</h2>
+    </div>
     <div class="stack-grid">
       <div class="stack-item"><strong>Language</strong><span>Go 1.26</span></div>
       <div class="stack-item"><strong>Communication</strong><span>gRPC + Protobuf v3</span></div>
@@ -417,7 +507,6 @@
       <div class="stack-item"><strong>Logging</strong><span>zerolog</span></div>
       <div class="stack-item"><strong>Dashboard</strong><span>React 19 + Vite + JSX</span></div>
       <div class="stack-item"><strong>K8s Client</strong><span>client-go v0.35</span></div>
-      <div class="stack-item"><strong>Backup Metadata</strong><span>SQLite</span></div>
     </div>
   </div>
 </section>
@@ -425,8 +514,10 @@
 <!-- Quick Start -->
 <section class="section section-dark" id="quickstart">
   <div class="container">
-    <h2 class="section-title center">Quick Start</h2>
-    <p class="section-sub center">Get PG-Swarm running locally in under a minute.</p>
+    <div class="section-header">
+      <h2 class="section-title center">Quick Start</h2>
+      <p class="section-sub center">Get PG-Swarm running locally in under a minute.</p>
+    </div>
     <div class="code-blocks">
       <div class="code-block">
         <div class="code-header">Build from source</div>
@@ -483,6 +574,7 @@ kubectl apply -k deploy/k8s/satellite/base/
         <a href="concepts.html">Concepts</a>
         <a href="https://github.com/pg-swarm/pg-swarm/blob/main/README.md">Documentation</a>
         <a href="https://github.com/pg-swarm/pg-swarm/blob/main/BACKUP.md">Backup Guide</a>
+        <a href="https://github.com/pg-swarm/pg-swarm/blob/main/CONFIG.md">Config Guide</a>
         <a href="https://github.com/pg-swarm/pg-swarm/blob/main/LICENSE">License (Apache 2.0)</a>
       </div>
     </div>
@@ -515,6 +607,103 @@ window.addEventListener('scroll', () => {
     if (s.offsetTop - 100 <= window.scrollY) current = '#' + s.id;
   }
   navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === current));
+});
+
+// Screenshot modal data — each key matches a data-modal attribute
+const ssData = {
+  'modal-overview': {
+    title: 'Overview',
+    desc: 'Fleet-wide dashboard showing satellite count, cluster count, total instances, and recent events. The activity feed surfaces state transitions, failovers, switchovers, config changes, and errors across every edge cluster in real time.',
+    images: ['images/screenshots/overview.png'],
+  },
+  'modal-clusters': {
+    title: 'Clusters',
+    desc: 'Card grid of every PostgreSQL cluster across the fleet. Each card shows instance roles (primary/replica), PostgreSQL and WAL ready status, replication lag, connection utilization bars, disk usage with color-coded thresholds, and timeline IDs. Search and filter by name, namespace, satellite, or label.',
+    images: ['images/screenshots/clusters.png'],
+  },
+  'modal-cluster-detail': {
+    title: 'Cluster Detail',
+    desc: 'Deep dive into a single cluster. The header shows satellite, region, PostgreSQL version, replica count, storage, config version, and tags. The instances table lists every pod with role badges, PG/WAL status dots, replication lag, connection bars, disk usage, and timeline. Click any row to expand the instance detail panel with disk vs WAL breakdown, connection stats, replication info, and per-database sizes.',
+    images: ['images/screenshots/cluster-detail.png', 'images/screenshots/clusters.png'],
+  },
+  'modal-switchover': {
+    title: 'Switchover Progress',
+    desc: 'Nine-step planned switchover modal with real-time WebSocket updates. Steps: verify target, discover primary, check replica status, fence primary, checkpoint, transfer lease, promote replica, label pods, renew lease. Each step shows its target pod, status, and timestamps. A point-of-no-return indicator marks when rollback is no longer possible. Pre-PONR failures trigger automatic rollback.',
+    images: ['images/screenshots/switchover-progress.png', 'images/screenshots/cluster-detail.png'],
+  },
+  'modal-satellites': {
+    title: 'Satellites',
+    desc: 'Table of all registered edge satellites with hostname, K8s cluster name, region, labels, connection state, and last heartbeat. Pending satellites can be approved or rejected. Each satellite row expands to show storage class discovery and tier mappings. Labels drive deployment rule matching for fleet-scale auto-provisioning.',
+    images: ['images/screenshots/satellites.png'],
+  },
+  'modal-profiles': {
+    title: 'Profiles',
+    desc: 'Reusable cluster configuration templates. Each profile card shows replica count, PostgreSQL version, resource requests, storage size, and attached tags. The 6-tab editor covers General, Volumes, Resources, PostgreSQL parameters (50+ params), HBA Rules, and Recovery Rules. Profiles can be cloned, versioned, and locked once referenced by a deployment rule.',
+    images: ['images/screenshots/profiles.png'],
+  },
+  'modal-deployment-rules': {
+    title: 'Deployment Rules',
+    desc: 'Map profiles to satellites using label selectors. When a satellite\'s labels match a rule, a cluster config is automatically created and pushed. Each rule shows its profile, matched satellites, created clusters, and status. Rules enable fleet-scale management — define once, deploy everywhere.',
+    images: ['images/screenshots/deployment-rules.png'],
+  },
+  'modal-events': {
+    title: 'Events',
+    desc: 'Chronological event log across the fleet. Severity icons (info, warning, error, critical) highlight state transitions, failovers, switchovers, backup completions, config changes, and errors. Filter by cluster or severity. Each event shows its source satellite, cluster, and timestamp.',
+    images: ['images/screenshots/events.png'],
+  },
+  'modal-admin': {
+    title: 'Admin Console',
+    desc: 'Five-tab administration page. Storage Tiers define abstract storage classes (fast, standard, replicated, archive) that each satellite maps to its concrete provisioners. Image Variants manage postgres base images. PG Versions track supported PostgreSQL releases with default selection. Recovery Rules and Update Rules are managed in their own tabs.',
+    images: ['images/screenshots/admin.png', 'images/screenshots/admin-recovery-rules.png', 'images/screenshots/admin-update-rules.png'],
+  },
+  'modal-recovery-rules': {
+    title: 'Recovery Rules',
+    desc: 'Centrally managed recovery rule sets with 38 built-in rules across 9 categories: WAL & Checkpoint, Timeline & Replication, Corruption, Connections, Replication Slots, Authentication, Recovery, Streaming, and Archive. Each rule defines a regex pattern, severity, action (event, restart, rewind, rebasebackup), and cooldown. Rule sets can be cloned and customized per environment. Active and auto-recovery counts shown per set.',
+    images: ['images/screenshots/admin-recovery-rules.png', 'images/screenshots/admin.png'],
+  },
+  'modal-update-rules': {
+    title: 'Update Rules',
+    desc: 'PostgreSQL parameter classification for safe config changes. Every parameter is classified into one of three restart modes: Reload (pg_reload_conf, zero downtime), Rolling Restart (sequential pod restart, brief per-pod downtime), or Full Restart (scale to zero, full outage — only wal_level). 106 parameters with descriptions, PostgreSQL context (postmaster, sighup, user, superuser), and color-coded mode badges. Search and filter by name or mode.',
+    images: ['images/screenshots/admin-update-rules.png', 'images/screenshots/admin.png'],
+  },
+};
+
+// Screenshot modal logic
+const modal = document.getElementById('ssModal');
+const modalTitle = modal.querySelector('.ss-modal-title');
+const modalDesc = modal.querySelector('.ss-modal-desc');
+const modalImages = modal.querySelector('.ss-modal-images');
+
+document.querySelectorAll('.screenshot-item[data-modal]').forEach(item => {
+  item.addEventListener('click', () => {
+    const key = item.dataset.modal;
+    const data = ssData[key];
+    if (!data) return;
+    modalTitle.textContent = data.title;
+    modalDesc.textContent = data.desc;
+    modalImages.innerHTML = data.images.map(src =>
+      '<img src="' + src + '" alt="' + data.title + '" loading="lazy">'
+    ).join('');
+    modal.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  });
+});
+
+modal.querySelector('.ss-modal-close').addEventListener('click', () => {
+  modal.classList.remove('open');
+  document.body.style.overflow = '';
+});
+modal.addEventListener('click', (e) => {
+  if (e.target === modal) {
+    modal.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && modal.classList.contains('open')) {
+    modal.classList.remove('open');
+    document.body.style.overflow = '';
+  }
 });
 </script>
 </body>

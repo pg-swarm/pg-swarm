@@ -18,7 +18,7 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/central/registry"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
-	"github.com/pg-swarm/pg-swarm/web"
+	"github.com/pg-swarm/pg-swarm/dashboard"
 	"github.com/rs/zerolog/log"
 )
 
@@ -70,12 +70,12 @@ func (s *RESTServer) GetWSHub() *WSHub {
 func (s *RESTServer) setupRoutes() {
 	// Dashboard (embedded React SPA)
 	s.app.Use("/assets", filesystem.New(filesystem.Config{
-		Root:       http.FS(web.StaticFS),
+		Root:       http.FS(dashboard.StaticFS),
 		PathPrefix: "static/assets",
 	}))
 	// Serve favicon from embedded static root
 	s.app.Get("/favicon.svg", func(c *fiber.Ctx) error {
-		data, err := web.StaticFS.ReadFile("static/favicon.svg")
+		data, err := dashboard.StaticFS.ReadFile("static/favicon.svg")
 		if err != nil {
 			return c.SendStatus(fiber.StatusNotFound)
 		}
@@ -89,7 +89,7 @@ func (s *RESTServer) setupRoutes() {
 		if len(path) >= 4 && path[:4] == "/api" {
 			return c.Next()
 		}
-		data, err := web.StaticFS.ReadFile("static/index.html")
+		data, err := dashboard.StaticFS.ReadFile("static/index.html")
 		if err != nil {
 			return c.Next()
 		}
@@ -143,6 +143,11 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/clusters/:id/pause", s.pauseCluster)
 	api.Post("/clusters/:id/resume", s.resumeCluster)
 	api.Post("/clusters/:id/switchover", s.switchoverCluster)
+	api.Post("/clusters/:id/apply", s.applyCluster)
+	api.Get("/clusters/:id/databases", s.listClusterDatabases)
+	api.Post("/clusters/:id/databases", s.createClusterDatabase)
+	api.Put("/clusters/:id/databases/:dbid", s.updateClusterDatabase)
+	api.Delete("/clusters/:id/databases/:dbid", s.deleteClusterDatabase)
 
 	// Deployment Rules
 	api.Get("/deployment-rules", s.listDeploymentRules)
@@ -160,6 +165,15 @@ func (s *RESTServer) setupRoutes() {
 	api.Delete("/profiles/:id", s.deleteProfile)
 	api.Get("/profiles/:id/cascade-preview", s.cascadePreview)
 	api.Post("/profiles/:id/clone", s.cloneProfile)
+	api.Post("/profiles/:id/apply", s.applyProfile)
+	api.Get("/profiles/:id/versions", s.listProfileVersions)
+	api.Get("/profiles/:id/versions/:version", s.getProfileVersion)
+	api.Post("/profiles/:id/revert", s.revertProfile)
+
+	// PG Parameter Classifications (admin)
+	api.Get("/pg-param-classifications", s.listPgParamClassifications)
+	api.Post("/pg-param-classifications", s.upsertPgParamClassification)
+	api.Delete("/pg-param-classifications/:name", s.deletePgParamClassification)
 
 	// Postgres Variants (admin)
 	api.Get("/postgres-variants", s.listPostgresVariants)
@@ -277,9 +291,6 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 	if err := models.ValidateArchiveSpec(spec.Archive); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := models.ValidateDatabases(spec.Databases); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -331,9 +342,6 @@ func (s *RESTServer) updateClusterConfig(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid config: " + err.Error()})
 	}
 	if err := models.ValidateArchiveSpec(spec.Archive); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
-	if err := models.ValidateDatabases(spec.Databases); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
@@ -1226,15 +1234,11 @@ func (s *RESTServer) createProfile(c *fiber.Ctx) error {
 	if err := models.ValidateArchiveSpec(spec.Archive); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := models.ValidateDatabases(spec.Databases); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	profile.ID = uuid.New()
-	profile.Locked = false
 
 	if err := s.store.CreateProfile(c.Context(), &profile); err != nil {
 		log.Error().Err(err).Msg("failed to create profile")
@@ -1275,13 +1279,31 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 	if err := models.ValidateArchiveSpec(spec.Archive); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := models.ValidateDatabases(spec.Databases); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
 	if err := validatePostgresImage(s.store, spec); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	// Load existing profile for diff computation
+	existing, err := s.store.GetProfile(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "profile not found"})
+	}
+	oldSpec, _ := existing.ParseSpec()
+
+	// Classify changes (load full-restart set from DB)
+	paramModes := s.loadParamClassifications(c.Context())
+	diff := classifyChanges(oldSpec, spec, paramModes)
+
+	// Check immutable fields if active clusters exist
+	clusters, _ := s.store.GetClusterConfigsByProfile(c.Context(), id)
+	if len(clusters) > 0 && len(diff.ImmutableErrors) > 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":            "immutable fields cannot be changed on profiles with active clusters",
+			"immutable_errors": diff.ImmutableErrors,
+		})
+	}
+
+	// Save profile (no lock check)
 	profile.ID = id
 	if err := s.store.UpdateProfile(c.Context(), &profile); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
@@ -1289,10 +1311,236 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 
 	log.Info().Str("profile_id", id.String()).Str("name", profile.Name).Msg("profile updated")
 
-	// Propagate changes to all clusters using this profile
-	s.rePushClustersForProfile(c.Context(), id)
+	// Create config version record
+	_ = s.store.CreateConfigVersion(c.Context(), &models.ConfigVersion{
+		ProfileID:     id,
+		Config:        profile.Config,
+		ChangeSummary: diff.Summary(),
+		ApplyStatus:   "pending",
+	})
+
+	// If active clusters exist, return change_impact for confirmation
+	if len(clusters) > 0 && diff.ApplyStrategy() != "no_change" {
+		clusterNames := make([]string, len(clusters))
+		for i, cfg := range clusters {
+			clusterNames[i] = cfg.Name
+		}
+		return c.JSON(fiber.Map{
+			"profile": profile,
+			"change_impact": fiber.Map{
+				"affected_clusters":    clusterNames,
+				"reload_changes":       diff.ReloadChanges,
+				"sequential_changes":   diff.SequentialChanges,
+				"full_restart_changes": diff.FullRestartChanges,
+				"apply_strategy":       diff.ApplyStrategy(),
+				"requires_confirmation": true,
+			},
+		})
+	}
 
 	return c.JSON(profile)
+}
+
+// applyProfile lists clusters that have pending profile updates.
+// Actual application is done per-cluster via POST /clusters/:id/apply.
+func (s *RESTServer) applyProfile(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+
+	// Get latest profile version
+	versions, err := s.store.ListConfigVersions(c.Context(), id)
+	if err != nil || len(versions) == 0 {
+		return c.JSON(fiber.Map{"pending_clusters": []string{}})
+	}
+	latestVersion := versions[0].Version
+
+	// Find clusters with outdated profile version
+	clusters, _ := s.store.GetClusterConfigsByProfile(c.Context(), id)
+	var pending []fiber.Map
+	for _, cfg := range clusters {
+		if cfg.AppliedProfileVersion < latestVersion {
+			pending = append(pending, fiber.Map{
+				"id":                      cfg.ID,
+				"name":                    cfg.Name,
+				"applied_profile_version": cfg.AppliedProfileVersion,
+				"latest_profile_version":  latestVersion,
+			})
+		}
+	}
+	if pending == nil {
+		pending = []fiber.Map{}
+	}
+
+	return c.JSON(fiber.Map{"pending_clusters": pending})
+}
+
+// applyCluster applies the latest profile config to a single cluster.
+func (s *RESTServer) applyCluster(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	var body struct {
+		Confirmed bool `json:"confirmed"`
+	}
+	if err := c.BodyParser(&body); err != nil || !body.Confirmed {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "confirmation required"})
+	}
+
+	cfg, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "cluster not found"})
+	}
+	if cfg.ProfileID == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cluster has no profile"})
+	}
+
+	// Load the profile's current config
+	profile, err := s.store.GetProfile(c.Context(), *cfg.ProfileID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "profile not found"})
+	}
+
+	// Get latest profile version
+	versions, err := s.store.ListConfigVersions(c.Context(), *cfg.ProfileID)
+	if err != nil || len(versions) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no profile versions found"})
+	}
+	latestVersion := versions[0].Version
+
+	// Update cluster config to match profile
+	cfg.Config = profile.Config
+	cfg.AppliedProfileVersion = latestVersion
+	if err := s.store.UpdateClusterConfig(c.Context(), cfg); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Push to satellite
+	spec, _ := cfg.ParseSpec()
+	log.Info().
+		Str("cluster", cfg.Name).
+		Int("profile_version", latestVersion).
+		Int64("config_version", cfg.ConfigVersion).
+		Interface("pg_params", spec.PgParams).
+		Msg("pushing cluster config to satellite")
+	s.pushConfigToSatellite(cfg)
+
+	return c.JSON(fiber.Map{
+		"status":                  "in_progress",
+		"cluster":                 cfg.Name,
+		"applied_profile_version": latestVersion,
+	})
+}
+
+func (s *RESTServer) listProfileVersions(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+	versions, err := s.store.ListConfigVersions(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if versions == nil {
+		versions = []*models.ConfigVersion{}
+	}
+	return c.JSON(versions)
+}
+
+func (s *RESTServer) getProfileVersion(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+	version, err := strconv.Atoi(c.Params("version"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid version number"})
+	}
+	v, err := s.store.GetConfigVersion(c.Context(), id, version)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "version not found"})
+	}
+	return c.JSON(v)
+}
+
+func (s *RESTServer) revertProfile(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid profile id"})
+	}
+
+	var body struct {
+		TargetVersion int `json:"target_version"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.TargetVersion < 1 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "target_version is required"})
+	}
+
+	// Load target version
+	v, err := s.store.GetConfigVersion(c.Context(), id, body.TargetVersion)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "version not found"})
+	}
+
+	// Load current profile for diff
+	existing, err := s.store.GetProfile(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "profile not found"})
+	}
+
+	oldSpec, _ := existing.ParseSpec()
+	var newSpec models.ClusterSpec
+	if err := json.Unmarshal(v.Config, &newSpec); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "invalid version config"})
+	}
+	diff := classifyChanges(oldSpec, &newSpec, s.loadParamClassifications(c.Context()))
+
+	// Check immutable fields
+	clusters, _ := s.store.GetClusterConfigsByProfile(c.Context(), id)
+	if len(clusters) > 0 && len(diff.ImmutableErrors) > 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":            "revert would change immutable fields on active clusters",
+			"immutable_errors": diff.ImmutableErrors,
+		})
+	}
+
+	// Update profile with reverted config
+	existing.Config = v.Config
+	if err := s.store.UpdateProfile(c.Context(), existing); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Create new version record for the revert
+	_ = s.store.CreateConfigVersion(c.Context(), &models.ConfigVersion{
+		ProfileID:     id,
+		Config:        v.Config,
+		ChangeSummary: fmt.Sprintf("Reverted to version %d", body.TargetVersion),
+		ApplyStatus:   "pending",
+	})
+
+	// Return change impact
+	if len(clusters) > 0 && diff.ApplyStrategy() != "no_change" {
+		clusterNames := make([]string, len(clusters))
+		for i, cfg := range clusters {
+			clusterNames[i] = cfg.Name
+		}
+		return c.JSON(fiber.Map{
+			"profile": existing,
+			"change_impact": fiber.Map{
+				"affected_clusters":    clusterNames,
+				"reload_changes":       diff.ReloadChanges,
+				"sequential_changes":   diff.SequentialChanges,
+				"full_restart_changes": diff.FullRestartChanges,
+				"apply_strategy":       diff.ApplyStrategy(),
+				"requires_confirmation": true,
+			},
+		})
+	}
+
+	return c.JSON(existing)
 }
 
 func (s *RESTServer) deleteProfile(c *fiber.Ctx) error {
@@ -1409,7 +1657,6 @@ func (s *RESTServer) cloneProfile(c *fiber.Ctx) error {
 		Name:        body.Name,
 		Description: source.Description,
 		Config:      source.Config,
-		Locked:      false,
 	}
 
 	if err := s.store.CreateProfile(c.Context(), clone); err != nil {
@@ -1681,14 +1928,6 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig, enc *cry
 		}
 	}
 
-	for _, db := range spec.Databases {
-		protoConfig.Databases = append(protoConfig.Databases, &pgswarmv1.DatabaseSpec{
-			Name:     db.Name,
-			User:     db.User,
-			Password: db.Password,
-		})
-	}
-
 	if spec.Failover != nil && spec.Failover.Enabled {
 		protoConfig.Failover = &pgswarmv1.FailoverSpec{
 			Enabled:                    true,
@@ -1729,12 +1968,38 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig, enc *cry
 		}
 	}
 
+	// Include cluster-level databases (dynamically managed, not from profile)
+	clusterDBs, err := st.ListClusterDatabases(context.Background(), cfg.ID)
+	if err == nil {
+		for _, cdb := range clusterDBs {
+			password := ""
+			if len(cdb.Password) > 0 && enc != nil {
+				if decrypted, err := enc.Decrypt(cdb.Password); err == nil {
+					password = string(decrypted)
+				}
+			}
+			protoConfig.ClusterDatabases = append(protoConfig.ClusterDatabases, &pgswarmv1.ClusterDatabase{
+				DbName:       cdb.DBName,
+				DbUser:       cdb.DBUser,
+				Password:     password,
+				AllowedCidrs: cdb.AllowedCIDRs,
+			})
+		}
+	}
+
 	return protoConfig, nil
 }
 
-// rePushClustersForProfile bumps config_version and re-pushes configs for all
-// clusters linked to the given profile via deployment rules.
+// rePushClustersForProfile updates the config on all clusters linked to the
+// given profile, bumps their config_version, and pushes to satellites.
 func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uuid.UUID) {
+	// Load the profile's current config
+	profile, err := s.store.GetProfile(ctx, profileID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get profile for re-push")
+		return
+	}
+
 	// Find all clusters using this profile (covers both manual and rule-based)
 	clusters, err := s.store.GetClusterConfigsByProfile(ctx, profileID)
 	if err != nil {
@@ -1742,12 +2007,210 @@ func (s *RESTServer) rePushClustersForProfile(ctx context.Context, profileID uui
 		return
 	}
 	for _, cfg := range clusters {
+		// Update the cluster's config to match the profile's current config
+		cfg.Config = profile.Config
 		if err := s.store.UpdateClusterConfig(ctx, cfg); err != nil {
-			log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to bump config version")
+			log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to update cluster config")
 			continue
 		}
 		s.pushConfigToSatellite(cfg)
 	}
+}
+
+// --- Cluster Databases ---
+
+func (s *RESTServer) listClusterDatabases(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+	dbs, err := s.store.ListClusterDatabases(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if dbs == nil {
+		dbs = []*models.ClusterDatabase{}
+	}
+	return c.JSON(dbs)
+}
+
+func (s *RESTServer) createClusterDatabase(c *fiber.Ctx) error {
+	clusterID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	var body struct {
+		DBName       string   `json:"db_name"`
+		DBUser       string   `json:"db_user"`
+		Password     string   `json:"password"`
+		AllowedCIDRs []string `json:"allowed_cidrs"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if body.DBName == "" || body.DBUser == "" || body.Password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "db_name, db_user, and password are required"})
+	}
+
+	// Encrypt password
+	var encPassword []byte
+	if s.encryptor != nil {
+		encPassword, err = s.encryptor.Encrypt([]byte(body.Password))
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to encrypt password"})
+		}
+	}
+
+	db := &models.ClusterDatabase{
+		ClusterID:    clusterID,
+		DBName:       body.DBName,
+		DBUser:       body.DBUser,
+		Password:     encPassword,
+		AllowedCIDRs: body.AllowedCIDRs,
+	}
+	if err := s.store.CreateClusterDatabase(c.Context(), db); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Push updated config to satellite
+	cfg, _ := s.store.GetClusterConfig(c.Context(), clusterID)
+	if cfg != nil {
+		_ = s.store.UpdateClusterConfig(c.Context(), cfg) // bump config_version
+		s.pushConfigToSatellite(cfg)
+	}
+
+	log.Info().Str("cluster_id", clusterID.String()).Str("db", body.DBName).Msg("cluster database created")
+	return c.Status(fiber.StatusCreated).JSON(db)
+}
+
+func (s *RESTServer) updateClusterDatabase(c *fiber.Ctx) error {
+	dbID, err := uuid.Parse(c.Params("dbid"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid database id"})
+	}
+	clusterID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	var body struct {
+		DBUser       string   `json:"db_user"`
+		Password     string   `json:"password"`
+		AllowedCIDRs []string `json:"allowed_cidrs"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	db := &models.ClusterDatabase{
+		ID:           dbID,
+		AllowedCIDRs: body.AllowedCIDRs,
+	}
+	if body.DBUser != "" {
+		db.DBUser = body.DBUser
+	}
+	if body.Password != "" && s.encryptor != nil {
+		encPassword, err := s.encryptor.Encrypt([]byte(body.Password))
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to encrypt password"})
+		}
+		db.Password = encPassword
+	}
+
+	if err := s.store.UpdateClusterDatabase(c.Context(), db); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Push updated config to satellite
+	cfg, _ := s.store.GetClusterConfig(c.Context(), clusterID)
+	if cfg != nil {
+		_ = s.store.UpdateClusterConfig(c.Context(), cfg)
+		s.pushConfigToSatellite(cfg)
+	}
+
+	log.Info().Str("db_id", dbID.String()).Msg("cluster database updated")
+	return c.JSON(db)
+}
+
+func (s *RESTServer) deleteClusterDatabase(c *fiber.Ctx) error {
+	dbID, err := uuid.Parse(c.Params("dbid"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid database id"})
+	}
+	clusterID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	if err := s.store.DeleteClusterDatabase(c.Context(), dbID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Push updated config to satellite (HBA rules will be regenerated without this DB)
+	cfg, _ := s.store.GetClusterConfig(c.Context(), clusterID)
+	if cfg != nil {
+		_ = s.store.UpdateClusterConfig(c.Context(), cfg)
+		s.pushConfigToSatellite(cfg)
+	}
+
+	log.Info().Str("db_id", dbID.String()).Msg("cluster database deleted")
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// --- PG Parameter Classifications ---
+
+// loadParamClassifications loads the parameter update modes from the database.
+func (s *RESTServer) loadParamClassifications(ctx context.Context) ParamClassifications {
+	classifications, err := s.store.ListPgParamClassifications(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to load pg param classifications, using defaults")
+		return DefaultParamClassifications
+	}
+	result := make(ParamClassifications, len(classifications))
+	for _, c := range classifications {
+		result[c.Name] = c.RestartMode
+	}
+	return result
+}
+
+func (s *RESTServer) listPgParamClassifications(c *fiber.Ctx) error {
+	classifications, err := s.store.ListPgParamClassifications(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if classifications == nil {
+		classifications = []*models.PgParamClassification{}
+	}
+	return c.JSON(classifications)
+}
+
+func (s *RESTServer) upsertPgParamClassification(c *fiber.Ctx) error {
+	var p models.PgParamClassification
+	if err := c.BodyParser(&p); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if p.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	if p.RestartMode != "reload" && p.RestartMode != "sequential" && p.RestartMode != "full_restart" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "restart_mode must be 'reload', 'sequential', or 'full_restart'"})
+	}
+	if err := s.store.UpsertPgParamClassification(c.Context(), &p); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(fiber.StatusOK).JSON(p)
+}
+
+func (s *RESTServer) deletePgParamClassification(c *fiber.Ctx) error {
+	name := c.Params("name")
+	if name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	if err := s.store.DeletePgParamClassification(c.Context(), name); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // --- Error handler ---

@@ -60,6 +60,16 @@ export const api = {
   deletePostgresVariant: (id) => request('/postgres-variants/' + id, { method: 'DELETE' }),
   satelliteLogs: (id, limit, level) => request('/satellites/' + id + '/logs?limit=' + (limit || 200) + '&level=' + (level || 'info')),
   setSatelliteLogLevel: (id, level) => request('/satellites/' + id + '/log-level', { method: 'POST', body: JSON.stringify({ level }) }),
+  clusterDatabases: (id) => request('/clusters/' + id + '/databases'),
+  createClusterDatabase: (id, data) => request('/clusters/' + id + '/databases', { method: 'POST', body: JSON.stringify(data) }),
+  updateClusterDatabase: (clusterId, dbId, data) => request('/clusters/' + clusterId + '/databases/' + dbId, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteClusterDatabase: (clusterId, dbId) => request('/clusters/' + clusterId + '/databases/' + dbId, { method: 'DELETE' }),
+  applyCluster: (id) => request('/clusters/' + id + '/apply', { method: 'POST', body: JSON.stringify({ confirmed: true }) }),
+  applyProfile: (id) => request('/profiles/' + id + '/apply', { method: 'POST', body: JSON.stringify({ confirmed: true }) }),
+  profileVersions: (id) => request('/profiles/' + id + '/versions'),
+  pgParamClassifications: () => request('/pg-param-classifications'),
+  upsertPgParamClassification: (data) => request('/pg-param-classifications', { method: 'POST', body: JSON.stringify(data) }),
+  deletePgParamClassification: (name) => request('/pg-param-classifications/' + encodeURIComponent(name), { method: 'DELETE' }),
 };
 
 export function subscribeSatelliteLogs(satelliteId, onEntry, onError) {

@@ -15,7 +15,7 @@ export default defineConfig(async () => {
     plugins,
     base: '/',
     build: {
-      outDir: '../static',
+      outDir: 'static',
       emptyOutDir: true,
     },
     server: {

@@ -17,15 +17,37 @@ import (
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 )
 
+// SidecarCommander can send commands to failover sidecars.
+type SidecarCommander interface {
+	SendCommandAndWait(ctx context.Context, namespace, podName string, cmd *pgswarmv1.SidecarCommand) (*pgswarmv1.CommandResult, error)
+}
+
+// StreamSender can send messages to central via the gRPC stream.
+type StreamSender interface {
+	SendMessage(msg *pgswarmv1.SatelliteMessage)
+}
+
 // Operator materializes ClusterConfig messages as running PostgreSQL HA clusters.
 type Operator struct {
 	client               kubernetes.Interface
 	k8sClusterName       string // used in config-storage ConfigMap naming
 	defaultNamespace     string // fallback when ClusterConfig.Namespace is empty
 	defaultFailoverImage string // fallback failover sidecar image
+	sidecarCmdr          SidecarCommander // optional, for sending sidecar commands
+	streamSender         StreamSender     // optional, for reporting status to central
 	mu                   sync.RWMutex
 	desired              map[string]*pgswarmv1.ClusterConfig // key: "ns/cluster"
 	applied              map[string]int64                    // key -> last applied config version
+}
+
+// SetSidecarCommander sets the sidecar command sender (typically the SidecarStreamManager).
+func (o *Operator) SetSidecarCommander(cmdr SidecarCommander) {
+	o.sidecarCmdr = cmdr
+}
+
+// SetStreamSender sets the stream sender for reporting status back to central.
+func (o *Operator) SetStreamSender(sender StreamSender) {
+	o.streamSender = sender
 }
 
 // New creates a new Operator backed by the given Kubernetes client.
@@ -96,16 +118,41 @@ func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
 		return nil
 	}
 
-	log.Info().
-		Str("cluster", key).
-		Int64("version", cfg.ConfigVersion).
-		Msg("reconciling cluster config")
+	// Check if a full restart is needed by comparing against previous config
+	o.mu.RLock()
+	previousCfg := o.desired[key]
+	o.mu.RUnlock()
 
-	log.Trace().Str("cluster", key).Msg("HandleConfig starting reconcile")
-	if err := o.reconcile(cfg); err != nil {
-		return fmt.Errorf("reconcile %s: %w", key, err)
+	needsFullRestart := previousCfg != nil && requiresFullRestart(previousCfg, cfg)
+
+	if needsFullRestart {
+		log.Info().
+			Str("cluster", key).
+			Int64("version", cfg.ConfigVersion).
+			Msg("replication-sensitive change detected — performing full cluster restart")
+
+		if err := o.fullRestart(cfg); err != nil {
+			return fmt.Errorf("full restart %s: %w", key, err)
+		}
+	} else {
+		log.Info().
+			Str("cluster", key).
+			Int64("version", cfg.ConfigVersion).
+			Msg("reconciling cluster config")
+
+		if err := o.reconcile(cfg); err != nil {
+			return fmt.Errorf("reconcile %s: %w", key, err)
+		}
 	}
-	log.Trace().Str("cluster", key).Msg("HandleConfig reconcile completed")
+
+	// Create new cluster-level databases via sidecar (no restart needed)
+	if o.sidecarCmdr != nil && len(cfg.ClusterDatabases) > 0 {
+		prev := previousCfg
+		if prev == nil {
+			prev = &pgswarmv1.ClusterConfig{} // treat all as new
+		}
+		o.createNewClusterDatabases(cfg, prev)
+	}
 
 	o.mu.Lock()
 	o.desired[key] = cfg
@@ -118,6 +165,90 @@ func (o *Operator) HandleConfig(cfg *pgswarmv1.ClusterConfig) error {
 		Msg("cluster config applied successfully")
 
 	return nil
+}
+
+// createNewClusterDatabases detects newly added cluster-level databases and
+// creates them on the primary via sidecar command (no pod restart needed).
+func (o *Operator) createNewClusterDatabases(newCfg, oldCfg *pgswarmv1.ClusterConfig) {
+	// Build set of existing database names
+	existing := make(map[string]bool, len(oldCfg.ClusterDatabases))
+	for _, db := range oldCfg.ClusterDatabases {
+		existing[db.DbName] = true
+	}
+
+	// Find the primary pod
+	primaryPod := ""
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pods, err := o.client.CoreV1().Pods(newCfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s,%s=%s", LabelCluster, newCfg.ClusterName, LabelRole, RolePrimary),
+	})
+	if err == nil && len(pods.Items) > 0 {
+		primaryPod = pods.Items[0].Name
+	}
+	if primaryPod == "" {
+		log.Warn().Str("cluster", newCfg.ClusterName).Msg("no primary pod found for database creation")
+		return
+	}
+
+	for _, db := range newCfg.ClusterDatabases {
+		if existing[db.DbName] {
+			continue // already exists
+		}
+		log.Info().Str("cluster", newCfg.ClusterName).Str("db", db.DbName).Str("user", db.DbUser).Msg("creating cluster database via sidecar")
+
+		result, err := o.sidecarCmdr.SendCommandAndWait(ctx, newCfg.Namespace, primaryPod, &pgswarmv1.SidecarCommand{
+			Cmd: &pgswarmv1.SidecarCommand_CreateDatabase{
+				CreateDatabase: &pgswarmv1.CreateDatabaseCmd{
+					DbName:   db.DbName,
+					DbUser:   db.DbUser,
+					Password: db.Password,
+				},
+			},
+		})
+
+		// Report status back to central
+		status := "created"
+		errorMsg := ""
+		if err != nil {
+			status = "failed"
+			errorMsg = err.Error()
+			log.Error().Err(err).Str("db", db.DbName).Msg("failed to send CreateDatabase command")
+		} else if !result.Success {
+			status = "failed"
+			errorMsg = result.Error
+			log.Error().Str("db", db.DbName).Str("error", result.Error).Msg("CreateDatabase command failed")
+		} else {
+			log.Info().Str("db", db.DbName).Msg("cluster database created successfully")
+		}
+
+		if o.streamSender != nil {
+			o.streamSender.SendMessage(&pgswarmv1.SatelliteMessage{
+				Payload: &pgswarmv1.SatelliteMessage_DatabaseStatus{
+					DatabaseStatus: &pgswarmv1.DatabaseStatusReport{
+						ClusterName:  newCfg.ClusterName,
+						Namespace:    newCfg.Namespace,
+						DbName:       db.DbName,
+						Status:       status,
+						ErrorMessage: errorMsg,
+					},
+				},
+			})
+		}
+	}
+
+	// Send pg_reload_conf to all pods (HBA rules updated via ConfigMap)
+	allPods, err := o.client.CoreV1().Pods(newCfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", LabelCluster, newCfg.ClusterName),
+	})
+	if err == nil {
+		for _, pod := range allPods.Items {
+			_, _ = o.sidecarCmdr.SendCommandAndWait(ctx, newCfg.Namespace, pod.Name, &pgswarmv1.SidecarCommand{
+				Cmd: &pgswarmv1.SidecarCommand_ReloadConf{ReloadConf: &pgswarmv1.ReloadConfCmd{}},
+			})
+		}
+		log.Info().Str("cluster", newCfg.ClusterName).Int("pods", len(allPods.Items)).Msg("pg_reload_conf sent to all pods")
+	}
 }
 
 // HandleDelete removes all K8s resources for the given cluster.
@@ -292,9 +423,6 @@ func (o *Operator) ValidateSidecarToken(token string) bool {
 func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	// Serialize proto to JSON (redact passwords for safety)
 	cfgCopy := proto.Clone(cfg).(*pgswarmv1.ClusterConfig)
-	for _, db := range cfgCopy.Databases {
-		db.Password = "***"
-	}
 	jsonBytes, err := protojson.MarshalOptions{Indent: "  "}.Marshal(cfgCopy)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to marshal config for storage")
@@ -311,6 +439,128 @@ func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.Config
 		Data: map[string]string{
 			"config.json": string(jsonBytes),
 		},
+	}
+}
+
+// replicationSensitiveParams lists pg_params keys where a mismatch between
+// primary and replica during a rolling update can break replication.
+var replicationSensitiveParams = map[string]bool{
+	"wal_level":            true,
+	"max_wal_senders":      true,
+	"max_replication_slots": true,
+}
+
+// requiresFullRestart returns true when the config change contains
+// replication-sensitive parameters that cannot tolerate a brief mismatch
+// between primary and replica pods during a rolling update.
+func requiresFullRestart(old, new *pgswarmv1.ClusterConfig) bool {
+	// Postgres version/image change
+	if old.Postgres != nil && new.Postgres != nil {
+		if old.Postgres.Version != new.Postgres.Version {
+			return true
+		}
+		if old.Postgres.Image != new.Postgres.Image {
+			return true
+		}
+	}
+
+	// Replication-sensitive pg_params
+	for key := range replicationSensitiveParams {
+		if old.PgParams[key] != new.PgParams[key] {
+			return true
+		}
+	}
+
+	return false
+}
+
+// fullRestart performs a coordinated full cluster restart: scale to 0, update
+// all resources, then scale back up. Used for replication-sensitive changes
+// where even a brief config mismatch between pods is dangerous.
+func (o *Operator) fullRestart(cfg *pgswarmv1.ClusterConfig) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// 1. Scale StatefulSet to 0
+	log.Info().Str("cluster", cfg.ClusterName).Msg("full restart: scaling to 0")
+	sts, err := o.client.AppsV1().StatefulSets(cfg.Namespace).Get(ctx, cfg.ClusterName, metav1.GetOptions{})
+	if err != nil {
+		// StatefulSet doesn't exist yet — just do a normal reconcile
+		if apierrors.IsNotFound(err) {
+			log.Info().Str("cluster", cfg.ClusterName).Msg("full restart: StatefulSet not found, falling back to reconcile")
+			return o.reconcile(cfg)
+		}
+		return fmt.Errorf("get statefulset for full restart: %w", err)
+	}
+
+	zero := int32(0)
+	sts.Spec.Replicas = &zero
+	if _, err := o.client.AppsV1().StatefulSets(cfg.Namespace).Update(ctx, sts, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("scale to 0: %w", err)
+	}
+
+	// 2. Wait for all pods to terminate
+	log.Info().Str("cluster", cfg.ClusterName).Msg("full restart: waiting for pods to terminate")
+	if err := o.waitForPodCount(ctx, cfg.Namespace, cfg.ClusterName, 0); err != nil {
+		return fmt.Errorf("wait for pod termination: %w", err)
+	}
+
+	// 3. Reconcile (updates ConfigMap, StatefulSet template, and sets replicas back to desired count)
+	log.Info().Str("cluster", cfg.ClusterName).Msg("full restart: reconciling with new config")
+	if err := o.reconcile(cfg); err != nil {
+		return fmt.Errorf("reconcile after scale-down: %w", err)
+	}
+
+	// 4. Wait for pods to become Ready
+	log.Info().Str("cluster", cfg.ClusterName).Int32("replicas", cfg.Replicas).Msg("full restart: waiting for pods to become ready")
+	if err := o.waitForPodCount(ctx, cfg.Namespace, cfg.ClusterName, int(cfg.Replicas)); err != nil {
+		return fmt.Errorf("wait for pods ready: %w", err)
+	}
+
+	log.Info().Str("cluster", cfg.ClusterName).Msg("full restart: completed")
+	return nil
+}
+
+// waitForPodCount polls until the number of Ready pods matches the target count.
+func (o *Operator) waitForPodCount(ctx context.Context, namespace, clusterName string, target int) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for %d pods in %s/%s", target, namespace, clusterName)
+		case <-ticker.C:
+			pods, err := o.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("%s=%s,%s=%s", LabelManagedBy, ManagedByValue, LabelCluster, clusterName),
+			})
+			if err != nil {
+				log.Warn().Err(err).Msg("waitForPodCount: failed to list pods")
+				continue
+			}
+
+			if target == 0 {
+				if len(pods.Items) == 0 {
+					return nil
+				}
+				log.Trace().Int("remaining", len(pods.Items)).Msg("waitForPodCount: waiting for termination")
+				continue
+			}
+
+			readyCount := 0
+			for _, pod := range pods.Items {
+				for _, cond := range pod.Status.Conditions {
+					if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+						readyCount++
+						break
+					}
+				}
+			}
+			if readyCount >= target {
+				return nil
+			}
+			log.Trace().Int("ready", readyCount).Int("target", target).Msg("waitForPodCount: waiting")
+		}
 	}
 }
 

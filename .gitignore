@@ -34,10 +34,10 @@ design/
 .claude/
 
 # Node
-web/dashboard/node_modules/
+dashboard/node_modules/
 
-# Dashboard build output (generated from web/dashboard/)
-web/static/
+# Dashboard build output
+dashboard/static/
 
 # Local dev PID files
 .run/

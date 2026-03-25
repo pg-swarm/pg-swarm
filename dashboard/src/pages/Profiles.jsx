@@ -142,7 +142,6 @@ function emptySpec() {
     resources: { cpu_request: '250m', cpu_limit: '1000m', memory_request: '512Mi', memory_limit: '1Gi' },
     pg_params: { ...DEFAULT_PG_PARAMS },
     hba_rules: [...DEFAULT_HBA_RULES],
-    databases: [],
     failover: { enabled: true, health_check_interval_seconds: 5 },
   };
 }
@@ -153,7 +152,7 @@ export default function Profiles() {
 
   useEffect(() => { document.title = 'Profiles - PG-Swarm'; }, []);
   const [editing, setEditing] = useState(null);
-  const [viewing, setViewing] = useState(null);
+
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
   const [cascadeTarget, setCascadeTarget] = useState(null);
@@ -177,16 +176,6 @@ export default function Profiles() {
     });
   }
 
-  function startView(profile) {
-    const spec = parseSpec(profile.config);
-    const pg_params = { ...DEFAULT_PG_PARAMS, ...spec.pg_params };
-    const hba_rules = spec.hba_rules?.length ? spec.hba_rules : [...DEFAULT_HBA_RULES];
-    setViewing({
-      name: profile.name,
-      description: profile.description,
-      spec: { ...emptySpec(), ...spec, pg_params, hba_rules },
-    });
-  }
 
   function clusterCountForProfile(profileId) {
     return (clusters || []).filter(c => c.profile_id === profileId).length;
@@ -279,10 +268,6 @@ export default function Profiles() {
     return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} recoveryRuleSets={recoveryRuleSets} />;
   }
 
-  if (viewing) {
-    return <ProfileView state={viewing} onClose={() => setViewing(null)} />;
-  }
-
   return (
     <>
       <div className="card-head-bar">
@@ -315,7 +300,7 @@ export default function Profiles() {
                 <h3>{p.name}</h3>
                 <div className="badges">
                   {p.locked
-                    ? <span className="badge badge-amber" title="Profile is in use by active clusters or deployment rules"><span className="dot" />In Use (Locked)</span>
+                    ? <span className="badge badge-amber" title="Profile is in use by active clusters or deployment rules"><span className="dot" />In Use</span>
                     : <span className="badge badge-green"><span className="dot" />Editable</span>}
                   {clusterCount > 0 && (
                     <span className="badge badge-gray">{clusterCount} cluster{clusterCount !== 1 ? 's' : ''}</span>
@@ -330,7 +315,6 @@ export default function Profiles() {
                   <KV label="Storage" value={spec.storage?.size || '-'} />
                   <KV label="CPU" value={`${spec.resources?.cpu_request || '-'} / ${spec.resources?.cpu_limit || '-'}`} />
                   <KV label="Memory" value={`${spec.resources?.memory_request || '-'} / ${spec.resources?.memory_limit || '-'}`} />
-                  <KV label="Databases" value={spec.databases?.length || 0} />
                 </dl>
                 <div className="cl-tags">
                   {spec.replicas > 1
@@ -349,9 +333,7 @@ export default function Profiles() {
               <div className="cl-foot">
                 <span>{timeAgo(p.created_at)}</span>
                 <span className="actions" style={{ marginLeft: 'auto' }}>
-                  {p.locked
-                    ? <button className="btn btn-sm" onClick={() => startView(p)}>View</button>
-                    : <button className="btn btn-sm" onClick={() => startEdit(p)}>Edit</button>}
+                  <button className="btn btn-sm" onClick={() => startEdit(p)}>Edit</button>
                   <button className="btn btn-sm" onClick={() => { setCloneTarget(p.id); setCloneName(p.name + '-copy'); }}>Clone</button>
                   <button className="btn btn-sm btn-reject" onClick={() => remove(p)}>Delete</button>
                 </span>
@@ -430,7 +412,6 @@ const TABS = [
   { id: 'resources', label: 'Resources' },
   { id: 'pgconfig', label: 'PostgreSQL' },
   { id: 'hba', label: 'HBA Rules' },
-  { id: 'databases', label: 'Databases' },
 ];
 
 const CRON_RE = /^(\S+\s+){4}\S+$/;
@@ -571,23 +552,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
     setSpec(s => ({ ...s, hba_rules: s.hba_rules.filter((_, i) => i !== idx) }));
   }
 
-  // Database helpers
-  function addDatabase() {
-    setSpec(s => ({ ...s, databases: [...(s.databases || []), { name: '', user: '', password: '' }] }));
-  }
-
-  function setDatabase(idx, field, value) {
-    setSpec(s => {
-      const dbs = [...s.databases];
-      dbs[idx] = { ...dbs[idx], [field]: value };
-      return { ...s, databases: dbs };
-    });
-  }
-
-  function removeDatabase(idx) {
-    setSpec(s => ({ ...s, databases: s.databases.filter((_, i) => i !== idx) }));
-  }
-
   function handleSave() {
     setShowConfirm(true);
   }
@@ -629,9 +593,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
             {tab.label}
             {tab.id === 'pgconfig' && changedParams.length > 0 && (
               <span className="tab-badge">{changedParams.length}</span>
-            )}
-            {tab.id === 'databases' && (spec.databases || []).length > 0 && (
-              <span className="tab-badge">{spec.databases.length}</span>
             )}
             {tab.id === 'hba' && spec.hba_rules.length > 0 && (
               <span className="tab-badge">{spec.hba_rules.length}</span>
@@ -917,49 +878,6 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
           </section>
         )}
 
-        {activeTab === 'databases' && (
-          <section className="form-section">
-            <h4>Databases & Users</h4>
-            {spec.replicas > 1 && (
-              <div className="repl-user-info">
-                <table className="db-table">
-                  <thead>
-                    <tr><th>Database</th><th>User</th><th>Password</th><th></th></tr>
-                  </thead>
-                  <tbody>
-                    <tr className="repl-user-row">
-                      <td><span className="mono muted">replication</span></td>
-                      <td><span className="mono muted">repl_user</span></td>
-                      <td><span className="muted">(auto-generated)</span></td>
-                      <td><span className="badge badge-green" style={{ fontSize: 10 }}>auto</span></td>
-                    </tr>
-                  </tbody>
-                </table>
-                <p className="muted sm" style={{ marginTop: 4, marginBottom: 8 }}>Replication user is automatically created when replicas &gt; 1</p>
-              </div>
-            )}
-            {(spec.databases || []).length === 0 && spec.replicas <= 1 ? (
-              <p className="muted sm">No databases configured. The default postgres database will be available.</p>
-            ) : (spec.databases || []).length > 0 ? (
-              <table className="db-table">
-                <thead>
-                  <tr><th>Database</th><th>User</th><th>Password</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {spec.databases.map((db, i) => (
-                    <tr key={i}>
-                      <td><input className="input" value={db.name} onChange={e => setDatabase(i, 'name', e.target.value)} placeholder="dbname" /></td>
-                      <td><input className="input" value={db.user} onChange={e => setDatabase(i, 'user', e.target.value)} placeholder="username" /></td>
-                      <td><input className="input" type="password" value={db.password} onChange={e => setDatabase(i, 'password', e.target.value)} placeholder="password" /></td>
-                      <td><button className="btn-icon" onClick={() => removeDatabase(i)}>&times;</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : null}
-            <button className="btn btn-sm" onClick={addDatabase} style={{ marginTop: 6 }}>+ Add Database</button>
-          </section>
-        )}
 
 
       </div>
@@ -979,41 +897,14 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
   );
 }
 
-// ── Profile View (read-only for locked profiles) ────────────────────────────
-
-function ProfileView({ state, onClose }) {
-  const spec = state.spec;
-  const changedParams = Object.entries(spec.pg_params || {}).filter(([k, v]) => DEFAULT_PG_PARAMS[k] !== v);
-
-  return (
-    <div className="profile-form">
-      <div className="card-head-bar">
-        <span className="card-head-title">Profile: {state.name}</span>
-        <div className="actions">
-          <button className="btn" onClick={onClose}>Close</button>
-        </div>
-      </div>
-      <ConfirmReport
-        state={state}
-        spec={spec}
-        changedParams={changedParams}
-        onConfirm={onClose}
-        onCancel={onClose}
-        readOnly
-      />
-    </div>
-  );
-}
-
 // ── Confirmation Report ─────────────────────────────────────────────────────
 
-function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOnly, saving }) {
+function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, saving }) {
   const content = (
     <>
       <div className="confirm-header">
-        <h3>{readOnly ? 'Profile Configuration' : 'Configuration Report'}</h3>
-        {!readOnly && <p className="muted sm">Review before saving profile <strong>{state.name || '(unnamed)'}</strong></p>}
-        {readOnly && state.description && <p className="muted sm">{state.description}</p>}
+        <h3>Configuration Report</h3>
+        <p className="muted sm">Review before saving profile <strong>{state.name || '(unnamed)'}</strong></p>
       </div>
 
         <div className="confirm-body">
@@ -1075,31 +966,14 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, readOn
             </div>
           </div>
 
-          {/* Databases */}
-          {(spec.databases || []).length > 0 && (
-            <div className="report-section">
-              <h5>Databases</h5>
-              <div className="report-grid">
-                {spec.databases.map((db, i) => (
-                  <ReportRow key={i} label={db.name} value={`owner: ${db.user}`} />
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
-        {!readOnly && (
-          <div className="confirm-footer">
-            <button className="btn btn-approve" onClick={onConfirm} disabled={saving}>{saving ? 'Saving...' : 'Confirm & Save'}</button>
-            <button className="btn btn-reject" onClick={onCancel} disabled={saving}>Back to Editing</button>
-          </div>
-        )}
+        <div className="confirm-footer">
+          <button className="btn btn-approve" onClick={onConfirm} disabled={saving}>{saving ? 'Saving...' : 'Confirm & Save'}</button>
+          <button className="btn btn-reject" onClick={onCancel} disabled={saving}>Back to Editing</button>
+        </div>
     </>
   );
-
-  if (readOnly) {
-    return <div className="confirm-body-standalone">{content}</div>;
-  }
 
   return (
     <div className="confirm-overlay">

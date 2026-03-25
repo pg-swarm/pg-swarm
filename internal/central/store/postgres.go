@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,7 +27,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 // Column lists used across queries (keep in sync with scanners below).
 const (
 	satCols  = `id, name, hostname, k8s_cluster_name, region, labels, storage_classes, tier_mappings, state, auth_token_hash, temp_token_hash, last_heartbeat, created_at, updated_at`
-	cfgCols  = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at`
+	cfgCols  = `id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, applied_profile_version, state, paused, created_at, updated_at`
 	ruleCols = `id, name, profile_id, label_selector, namespace, cluster_name, created_at, updated_at`
 )
 
@@ -94,6 +95,7 @@ func scanClusterConfig(row pgx.Row) (*models.ClusterConfig, error) {
 		&cfg.DeploymentRuleID,
 		&cfg.Config,
 		&cfg.ConfigVersion,
+		&cfg.AppliedProfileVersion,
 		&cfg.State,
 		&cfg.Paused,
 		&cfg.CreatedAt,
@@ -144,7 +146,7 @@ func scanProfile(row pgx.Row) (*models.ClusterProfile, error) {
 		&p.Name,
 		&p.Description,
 		&p.Config,
-		&p.Locked,
+		&p.InUse,
 		&p.RecoveryRuleSetID,
 		&p.CreatedAt,
 		&p.UpdatedAt,
@@ -538,10 +540,10 @@ func (s *PostgresStore) CreateClusterConfig(ctx context.Context, cfg *models.Clu
 	cfg.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO cluster_configs (id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, state, paused, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		`INSERT INTO cluster_configs (id, name, namespace, satellite_id, profile_id, deployment_rule_id, config, config_version, applied_profile_version, state, paused, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		cfg.ID, cfg.Name, cfg.Namespace, cfg.SatelliteID, cfg.ProfileID,
-		cfg.DeploymentRuleID, cfg.Config, cfg.ConfigVersion, cfg.State, cfg.Paused, cfg.CreatedAt, cfg.UpdatedAt,
+		cfg.DeploymentRuleID, cfg.Config, cfg.ConfigVersion, cfg.AppliedProfileVersion, cfg.State, cfg.Paused, cfg.CreatedAt, cfg.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create cluster config: %w", err)
@@ -589,11 +591,12 @@ func (s *PostgresStore) UpdateClusterConfig(ctx context.Context, cfg *models.Clu
 	var newVersion int64
 	err := s.pool.QueryRow(ctx,
 		`UPDATE cluster_configs SET name = $1, namespace = $2, satellite_id = $3,
-		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1, paused = $7, updated_at = $8
-		 WHERE id = $9
+		 profile_id = $4, deployment_rule_id = $5, config = $6, config_version = config_version + 1,
+		 applied_profile_version = $7, paused = $8, updated_at = $9
+		 WHERE id = $10
 		 RETURNING config_version`,
 		cfg.Name, cfg.Namespace, cfg.SatelliteID,
-		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.Paused, cfg.UpdatedAt, cfg.ID,
+		cfg.ProfileID, cfg.DeploymentRuleID, cfg.Config, cfg.AppliedProfileVersion, cfg.Paused, cfg.UpdatedAt, cfg.ID,
 	).Scan(&newVersion)
 	if err != nil {
 		return fmt.Errorf("update cluster config: %w", err)
@@ -687,9 +690,9 @@ func (s *PostgresStore) CreateProfile(ctx context.Context, p *models.ClusterProf
 	p.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO cluster_profiles (id, name, description, config, locked, recovery_rule_set_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		p.ID, p.Name, p.Description, p.Config, p.Locked, p.RecoveryRuleSetID, p.CreatedAt, p.UpdatedAt,
+		`INSERT INTO cluster_profiles (id, name, description, config, recovery_rule_set_id, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		p.ID, p.Name, p.Description, p.Config, p.RecoveryRuleSetID, p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create profile: %w", err)
@@ -702,7 +705,7 @@ func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.C
 	row := s.pool.QueryRow(ctx,
 		`SELECT p.id, p.name, p.description, p.config,
 		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR
-		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked,
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS in_use,
 		        p.recovery_rule_set_id, p.created_at, p.updated_at
 		 FROM cluster_profiles p WHERE p.id = $1`, id)
 	p, err := scanProfile(row)
@@ -717,7 +720,7 @@ func (s *PostgresStore) ListProfiles(ctx context.Context) ([]*models.ClusterProf
 	rows, err := s.pool.Query(ctx,
 		`SELECT p.id, p.name, p.description, p.config,
 		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR
-		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS locked,
+		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS in_use,
 		        p.recovery_rule_set_id, p.created_at, p.updated_at
 		 FROM cluster_profiles p ORDER BY p.created_at DESC`)
 	if err != nil {
@@ -736,23 +739,12 @@ func (s *PostgresStore) ListProfiles(ctx context.Context) ([]*models.ClusterProf
 	return result, rows.Err()
 }
 
-// UpdateProfile updates a cluster profile if it is not locked.
+// UpdateProfile updates a cluster profile if it is not in use.
 func (s *PostgresStore) UpdateProfile(ctx context.Context, p *models.ClusterProfile) error {
 	if p.Config == nil {
 		p.Config = json.RawMessage("{}")
 	}
 	p.UpdatedAt = time.Now()
-
-	var inUse bool
-	err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM deployment_rules WHERE profile_id = $1) OR 
-		       EXISTS(SELECT 1 FROM cluster_configs WHERE profile_id = $1)`, p.ID).Scan(&inUse)
-	if err != nil {
-		return fmt.Errorf("check profile lock state: %w", err)
-	}
-	if inUse {
-		return fmt.Errorf("profile %s is currently in use and cannot be edited", p.ID)
-	}
 
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, recovery_rule_set_id = $4, updated_at = $5
@@ -776,7 +768,7 @@ func (s *PostgresStore) TouchProfile(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-// DeleteProfile removes a cluster profile if it is not locked.
+// DeleteProfile removes a cluster profile if it is not in use.
 func (s *PostgresStore) DeleteProfile(ctx context.Context, id uuid.UUID) error {
 	var inUse bool
 	err := s.pool.QueryRow(ctx, `
@@ -1355,6 +1347,242 @@ func (s *PostgresStore) DeleteRecoveryRuleSet(ctx context.Context, id uuid.UUID)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("recovery rule set %s not found or is built-in", id)
+	}
+	return nil
+}
+
+// ---------- Config Versions ----------
+
+const configVersionCols = `id, profile_id, version, config, change_summary, apply_status, created_by, created_at`
+
+func scanConfigVersion(row pgx.Row) (*models.ConfigVersion, error) {
+	var v models.ConfigVersion
+	err := row.Scan(&v.ID, &v.ProfileID, &v.Version, &v.Config, &v.ChangeSummary, &v.ApplyStatus, &v.CreatedBy, &v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// CreateConfigVersion inserts a new config version with an auto-incremented version number.
+func (s *PostgresStore) CreateConfigVersion(ctx context.Context, v *models.ConfigVersion) error {
+	if v.ID == uuid.Nil {
+		v.ID = uuid.New()
+	}
+	v.CreatedAt = time.Now()
+	if v.ApplyStatus == "" {
+		v.ApplyStatus = "pending"
+	}
+
+	// Auto-increment version within the profile.
+	var nextVersion int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(MAX(version), 0) + 1 FROM config_versions WHERE profile_id = $1`,
+		v.ProfileID).Scan(&nextVersion)
+	if err != nil {
+		return fmt.Errorf("compute next config version: %w", err)
+	}
+	v.Version = nextVersion
+
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO config_versions (id, profile_id, version, config, change_summary, apply_status, created_by, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		v.ID, v.ProfileID, v.Version, v.Config, v.ChangeSummary, v.ApplyStatus, v.CreatedBy, v.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create config version: %w", err)
+	}
+	return nil
+}
+
+// ListConfigVersions returns all versions for a profile, newest first.
+func (s *PostgresStore) ListConfigVersions(ctx context.Context, profileID uuid.UUID) ([]*models.ConfigVersion, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+configVersionCols+` FROM config_versions WHERE profile_id = $1 ORDER BY version DESC`,
+		profileID)
+	if err != nil {
+		return nil, fmt.Errorf("list config versions: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.ConfigVersion
+	for rows.Next() {
+		v, err := scanConfigVersion(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan config version row: %w", err)
+		}
+		result = append(result, v)
+	}
+	return result, rows.Err()
+}
+
+// GetConfigVersion returns a specific version for a profile.
+func (s *PostgresStore) GetConfigVersion(ctx context.Context, profileID uuid.UUID, version int) (*models.ConfigVersion, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+configVersionCols+` FROM config_versions WHERE profile_id = $1 AND version = $2`,
+		profileID, version)
+	v, err := scanConfigVersion(row)
+	if err != nil {
+		return nil, fmt.Errorf("get config version %d for profile %s: %w", version, profileID, err)
+	}
+	return v, nil
+}
+
+// ---------- Cluster Databases ----------
+
+func (s *PostgresStore) ListClusterDatabases(ctx context.Context, clusterID uuid.UUID) ([]*models.ClusterDatabase, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, cluster_id, db_name, db_user, password, allowed_cidrs, status, error_message, created_at, updated_at
+		 FROM cluster_databases WHERE cluster_id = $1 ORDER BY db_name`, clusterID)
+	if err != nil {
+		return nil, fmt.Errorf("list cluster databases: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.ClusterDatabase
+	for rows.Next() {
+		var db models.ClusterDatabase
+		if err := rows.Scan(&db.ID, &db.ClusterID, &db.DBName, &db.DBUser, &db.Password, &db.AllowedCIDRs, &db.Status, &db.ErrorMessage, &db.CreatedAt, &db.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan cluster database: %w", err)
+		}
+		result = append(result, &db)
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) GetClusterDatabaseByName(ctx context.Context, clusterID uuid.UUID, dbName string) (*models.ClusterDatabase, error) {
+	var db models.ClusterDatabase
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, cluster_id, db_name, db_user, password, allowed_cidrs, status, error_message, created_at, updated_at
+		 FROM cluster_databases WHERE cluster_id = $1 AND db_name = $2`,
+		clusterID, dbName,
+	).Scan(&db.ID, &db.ClusterID, &db.DBName, &db.DBUser, &db.Password, &db.AllowedCIDRs, &db.Status, &db.ErrorMessage, &db.CreatedAt, &db.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get cluster database %q: %w", dbName, err)
+	}
+	return &db, nil
+}
+
+func (s *PostgresStore) CreateClusterDatabase(ctx context.Context, db *models.ClusterDatabase) error {
+	if db.ID == uuid.Nil {
+		db.ID = uuid.New()
+	}
+	now := time.Now()
+	db.CreatedAt = now
+	db.UpdatedAt = now
+	if db.AllowedCIDRs == nil {
+		db.AllowedCIDRs = []string{}
+	}
+
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO cluster_databases (id, cluster_id, db_name, db_user, password, allowed_cidrs, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		db.ID, db.ClusterID, db.DBName, db.DBUser, db.Password, db.AllowedCIDRs, db.CreatedAt, db.UpdatedAt,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "23505") {
+			return fmt.Errorf("database %q already exists on this cluster", db.DBName)
+		}
+		return fmt.Errorf("create cluster database: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateClusterDatabase(ctx context.Context, db *models.ClusterDatabase) error {
+	db.UpdatedAt = time.Now()
+	if db.AllowedCIDRs == nil {
+		db.AllowedCIDRs = []string{}
+	}
+
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE cluster_databases SET db_user = $1, password = $2, allowed_cidrs = $3, updated_at = $4
+		 WHERE id = $5`,
+		db.DBUser, db.Password, db.AllowedCIDRs, db.UpdatedAt, db.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update cluster database: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("cluster database %s not found", db.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateClusterDatabaseStatus(ctx context.Context, id uuid.UUID, status, errorMsg string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE cluster_databases SET status = $1, error_message = $2, updated_at = NOW() WHERE id = $3`,
+		status, errorMsg, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update cluster database status: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteClusterDatabase(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM cluster_databases WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete cluster database: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("cluster database %s not found", id)
+	}
+	return nil
+}
+
+// ---------- PG Parameter Classifications ----------
+
+// ListPgParamClassifications returns all parameter classifications.
+func (s *PostgresStore) ListPgParamClassifications(ctx context.Context) ([]*models.PgParamClassification, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT name, restart_mode, description, pg_context, created_at, updated_at
+		 FROM pg_param_classifications ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list pg param classifications: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.PgParamClassification
+	for rows.Next() {
+		var p models.PgParamClassification
+		if err := rows.Scan(&p.Name, &p.RestartMode, &p.Description, &p.PgContext, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan pg param classification: %w", err)
+		}
+		result = append(result, &p)
+	}
+	return result, rows.Err()
+}
+
+// UpsertPgParamClassification creates or updates a parameter classification.
+func (s *PostgresStore) UpsertPgParamClassification(ctx context.Context, p *models.PgParamClassification) error {
+	if p.Name == "" {
+		return fmt.Errorf("parameter name is required")
+	}
+	if p.RestartMode == "" {
+		p.RestartMode = "sequential"
+	}
+	now := time.Now()
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO pg_param_classifications (name, restart_mode, description, pg_context, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $5)
+		 ON CONFLICT (name) DO UPDATE SET restart_mode = $2, description = $3, pg_context = $4, updated_at = $5`,
+		p.Name, p.RestartMode, p.Description, p.PgContext, now,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert pg param classification: %w", err)
+	}
+	p.UpdatedAt = now
+	return nil
+}
+
+// DeletePgParamClassification removes a parameter classification (reverts to default sequential).
+func (s *PostgresStore) DeletePgParamClassification(ctx context.Context, name string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM pg_param_classifications WHERE name = $1`, name)
+	if err != nil {
+		return fmt.Errorf("delete pg param classification: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("parameter %q not found", name)
 	}
 	return nil
 }

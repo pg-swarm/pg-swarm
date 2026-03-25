@@ -23,7 +23,19 @@ message SatelliteMessage {
     // field 8 reserved (was backup_status)
     // field 9 reserved (was restore_status)
     SwitchoverProgress switchover_progress = 10;
+    // field 11 reserved
+    DatabaseStatusReport database_status = 12;
   }
+}
+
+// DatabaseStatusReport is sent satellite → central after a cluster database
+// creation attempt via sidecar.
+message DatabaseStatusReport {
+  string cluster_name  = 1;
+  string namespace     = 2;
+  string db_name       = 3;
+  string status        = 4;  // "created" or "failed"
+  string error_message = 5;
 }
 
 message LogEntry {
@@ -119,7 +131,7 @@ message ClusterConfig {
   repeated string hba_rules = 8;
   int64 config_version = 9;
   ArchiveSpec archive = 10;           // optional WAL archiving config
-  repeated DatabaseSpec databases = 11; // databases to create with their owner users
+  // field 11 reserved (was databases)
   FailoverSpec failover = 12;            // optional automatic failover sidecar
   StorageSpec wal_storage = 13;          // optional separate WAL volume
   string profile_name = 14;                      // name of the source profile (for K8s labels)
@@ -128,6 +140,8 @@ message ClusterConfig {
   bool deletion_protection = 17;                  // when true, PVCs get a finalizer to prevent accidental deletion
   // field 18 reserved (was backups)
   repeated RecoveryRule recovery_rules = 19;       // log-based recovery rules for failover sidecar
+  // field 20 reserved for future use
+  repeated ClusterDatabase cluster_databases = 21; // dynamically managed databases at cluster level
 }
 
 message PostgresSpec {
@@ -147,10 +161,13 @@ message ResourceSpec {
   string memory_limit = 4;
 }
 
-message DatabaseSpec {
-  string name = 1;       // database name
-  string user = 2;       // owner username
-  string password = 3;   // user password
+// ClusterDatabase is a database dynamically managed at the cluster level
+// (not part of the profile). Includes connection access control via CIDRs.
+message ClusterDatabase {
+  string db_name = 1;
+  string db_user = 2;
+  string password = 3;               // decrypted, for K8s secret creation
+  repeated string allowed_cidrs = 4; // e.g. ["10.0.0.0/8"]; empty = 0.0.0.0/0
 }
 
 message ArchiveSpec {
@@ -238,6 +255,8 @@ message SidecarCommand {
     UnfenceCmd unfence = 5;
     StatusCmd status = 6;
     SidecarHeartbeatAck heartbeat_ack = 7;
+    CreateDatabaseCmd create_database = 8;
+    ReloadConfCmd reload_conf = 9;
   }
 }
 
@@ -247,3 +266,9 @@ message PromoteCmd { int32 wait_timeout_seconds = 1; }
 message UnfenceCmd {}
 message StatusCmd {}
 message SidecarHeartbeatAck {}
+message CreateDatabaseCmd {
+  string db_name = 1;
+  string db_user = 2;
+  string password = 3;
+}
+message ReloadConfCmd {}

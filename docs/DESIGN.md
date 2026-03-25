@@ -4,7 +4,7 @@
 
 pg-swarm is a centralized management system for PostgreSQL High Availability (HA) clusters deployed across up to 500 edge Kubernetes clusters. A cloud-hosted **Central** control plane handles registration, configuration distribution, and health monitoring. A **Satellite** agent runs on each edge cluster as a lightweight Kubernetes operator — constructing PG cluster manifests from JSON configs, performing health checks, and orchestrating failover. A **Failover Sidecar** runs alongside each PG pod, managing leader election via Kubernetes Leases and performing automatic promotion and demotion.
 
-**No dependency on CloudNativePG (CNPG).** pg-swarm builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC resources from scratch.
+**No CRDs, no external operator frameworks.** pg-swarm builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC resources from scratch.
 
 ### Design Goals
 

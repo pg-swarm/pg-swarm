@@ -230,8 +230,21 @@ export default function Clusters() {
   const { clusters, satellites, health, deploymentRules, profiles, refresh } = useData();
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState('');
+  const [profileLatestVersions, setProfileLatestVersions] = useState({});
 
   useEffect(() => { document.title = 'Clusters - PG-Swarm'; }, []);
+
+  // Load latest profile version for each profile used by clusters
+  useEffect(() => {
+    const profileIds = [...new Set(clusters.filter(c => c.profile_id).map(c => c.profile_id))];
+    Promise.all(profileIds.map(pid =>
+      api.profileVersions(pid).then(vs => [pid, vs.length > 0 ? vs[0].version : 0]).catch(() => [pid, 0])
+    )).then(results => {
+      const map = {};
+      results.forEach(([pid, v]) => { map[pid] = v; });
+      setProfileLatestVersions(map);
+    });
+  }, [clusters]);
 
   if (clusters.length === 0) {
     return (
@@ -331,6 +344,11 @@ export default function Clusters() {
                     </span>
                   ))}
                   <span style={{ marginLeft: 'auto' }} />
+                  {c.profile_id && profileLatestVersions[c.profile_id] > (c.applied_profile_version || 0) && (
+                    <span className="badge badge-amber" title="Profile has been updated. Click to view and apply changes.">
+                      <span className="dot" />Update Available
+                    </span>
+                  )}
                   {h && <ClusterBadge state={h.state} />}
                   {(!h || h.state !== c.state) && <ClusterBadge state={c.state} />}
                 </div>

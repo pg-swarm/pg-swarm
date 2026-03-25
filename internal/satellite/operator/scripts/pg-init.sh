@@ -12,7 +12,7 @@ PRIMARY_HOST="{{RW_SVC}}.{{NAMESPACE}}.svc.cluster.local"
 if [ -f "$PGDATA/PG_VERSION" ]; then
     echo "PGDATA already initialized, copying config only"
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"{{WAL_SYMLINK_IDEMPOTENT}}{{REINIT_DATABASE}}
+    cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"{{WAL_SYMLINK_IDEMPOTENT}}
     exit 0
 fi
 
@@ -43,7 +43,7 @@ if [ "$NEEDS_BASEBACKUP" = "false" ] && [ "$ORDINAL" = "0" ]; then
     psql -U postgres -c "CREATE ROLE repl_user WITH REPLICATION LOGIN PASSWORD '$REPLICATION_PASSWORD';"
     psql -U postgres -c "CREATE ROLE backup_user WITH REPLICATION LOGIN PASSWORD '$BACKUP_PASSWORD' IN ROLE pg_read_all_data;"
     psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
-{{DATABASE_SQL}}
+    # Databases are managed at cluster level via sidecar
     pg_ctl -D "$PGDATA" stop -w
 
     # Copy config

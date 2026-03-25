@@ -113,8 +113,17 @@ func (a *Agent) Run(ctx context.Context) error {
 	}()
 	log.Trace().Str("addr", a.config.SidecarListenAddr).Msg("sidecar gRPC server started")
 
-	// 3. Connect persistent stream
+	// Wire sidecar commander to operator for database creation commands
+	if a.operator != nil {
+		a.operator.SetSidecarCommander(a.streamManager)
+	}
+
+	// 3. Connect persistent stream — also give operator access to the stream
+	//    for reporting database creation status back to central
 	a.connector = stream.NewConnector(a.config.CentralAddr, a.identity.AuthToken)
+	if a.operator != nil {
+		a.operator.SetStreamSender(a.connector)
+	}
 	log.Trace().Str("central_addr", a.config.CentralAddr).Msg("connector created")
 
 	// 3b. Attach log capture hook → streams log entries to central

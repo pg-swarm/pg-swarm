@@ -123,6 +123,10 @@ func (c *SidecarConnector) handleCommand(ctx context.Context, cmd *pgswarmv1.Sid
 		result = c.handleStatus(ctx, cmd)
 	case *pgswarmv1.SidecarCommand_HeartbeatAck:
 		return // no response needed
+	case *pgswarmv1.SidecarCommand_CreateDatabase:
+		result = c.handleCreateDatabase(ctx, cmd)
+	case *pgswarmv1.SidecarCommand_ReloadConf:
+		result = c.handleReloadConf(ctx, cmd)
 	default:
 		result = &pgswarmv1.CommandResult{
 			RequestId: cmd.RequestId,
@@ -317,4 +321,69 @@ func (c *SidecarConnector) writeLoop(ctx context.Context, stream pgswarmv1.Sidec
 			}
 		}
 	}
+}
+
+func (c *SidecarConnector) handleCreateDatabase(ctx context.Context, cmd *pgswarmv1.SidecarCommand) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: cmd.RequestId, Success: true}
+
+	createCmd := cmd.GetCreateDatabase()
+	if createCmd == nil {
+		result.Success = false
+		result.Error = "missing create_database payload"
+		return result
+	}
+
+	conn, err := pgx.Connect(ctx, c.connString)
+	if err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("connect: %v", err)
+		return result
+	}
+	defer conn.Close(ctx)
+
+	// Create role if not exists (idempotent)
+	_, err = conn.Exec(ctx, fmt.Sprintf(
+		`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='%s') THEN CREATE ROLE %s WITH LOGIN PASSWORD '%s'; END IF; END $$;`,
+		createCmd.DbUser, createCmd.DbUser, createCmd.Password,
+	))
+	if err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("create role %s: %v", createCmd.DbUser, err)
+		return result
+	}
+
+	// Create database if not exists (idempotent)
+	var exists bool
+	conn.QueryRow(ctx, `SELECT EXISTS(SELECT FROM pg_database WHERE datname = $1)`, createCmd.DbName).Scan(&exists)
+	if !exists {
+		// CREATE DATABASE cannot run inside a transaction, use a separate connection
+		_, err = conn.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %s OWNER %s`, createCmd.DbName, createCmd.DbUser))
+		if err != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("create database %s: %v", createCmd.DbName, err)
+			return result
+		}
+	}
+
+	log.Info().Str("db", createCmd.DbName).Str("user", createCmd.DbUser).Msg("sidecar: database created")
+	return result
+}
+
+func (c *SidecarConnector) handleReloadConf(ctx context.Context, cmd *pgswarmv1.SidecarCommand) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: cmd.RequestId, Success: true}
+
+	conn, err := pgx.Connect(ctx, c.connString)
+	if err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("connect: %v", err)
+		return result
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, "SELECT pg_reload_conf()"); err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("pg_reload_conf: %v", err)
+	}
+	log.Info().Msg("sidecar: pg_reload_conf() executed")
+	return result
 }

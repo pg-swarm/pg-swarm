@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import MiniHeader from '../components/MiniHeader';
 import SwitchoverProgressModal from '../components/SwitchoverProgressModal';
 import { useData } from '../context/DataContext';
+import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
 import {
   RoleBadge, PgStatusDot, LagDot, ConnBar, InstanceSummary, KV,
@@ -15,19 +16,21 @@ import {
   ArrowUpRight, Pause, Play, HardDrive, BarChart3,
   Table2, SearchCode, ArrowLeft, X, Info, AlertTriangle,
   AlertCircle, Flame, Database, Activity, ChevronDown, ChevronRight,
-  Loader, Trash2,
+  Loader, Trash2, Plus, Save, Pencil, Globe,
 } from 'lucide-react';
 
 const SEV_ICONS = { info: Info, warning: AlertTriangle, error: AlertCircle, critical: Flame };
 
 const TABS = [
   { id: 'instances', label: 'Instances' },
+  { id: 'databases', label: 'Databases' },
   { id: 'events', label: 'Events' },
 ];
 
 export default function ClusterDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const toast = useToast();
   const [clusters, setClusters] = useState([]);
   const [satellites, setSatellites] = useState([]);
   const [health, setHealth] = useState([]);
@@ -479,6 +482,11 @@ export default function ClusterDetail() {
             </>
           )}
 
+          {/* ── Databases Tab ── */}
+          {activeTab === 'databases' && (
+            <ClusterDatabasesTab clusterId={id} toast={toast} />
+          )}
+
           {/* ── Events Tab ── */}
           {activeTab === 'events' && (
             <div className="cd-card">
@@ -818,6 +826,165 @@ function DiskBarDark({ label, bytes, total, color }) {
       </span>
       <span style={{ width: 70, textAlign: 'right', fontFamily: 'monospace', fontSize: 12, color: 'var(--text)' }}>{formatDisk(bytes)}</span>
       <span style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', fontSize: 11, color: 'var(--text-secondary)' }}>{pct.toFixed(1)}%</span>
+    </div>
+  );
+}
+
+// --- Cluster Databases Tab ---
+
+function ClusterDatabasesTab({ clusterId, toast }) {
+  const [dbs, setDbs] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ db_name: '', db_user: '', password: '', allowed_cidrs: '' });
+
+  async function load() {
+    try {
+      const data = await api.clusterDatabases(clusterId);
+      setDbs(data || []);
+    } catch (e) {
+      toast('Failed to load databases: ' + e.message, true);
+    }
+  }
+
+  useEffect(() => { load(); }, [clusterId]);
+
+  // Auto-refresh while any database is pending
+  useEffect(() => {
+    const hasPending = dbs.some(db => !db.status || db.status === 'pending');
+    if (!hasPending) return;
+    const iv = setInterval(load, 5000);
+    return () => clearInterval(iv);
+  }, [dbs]);
+
+  function startCreate() {
+    setForm({ db_name: '', db_user: '', password: '', allowed_cidrs: '' });
+    setEditing('new');
+  }
+
+  function startEdit(db) {
+    setForm({
+      db_name: db.db_name,
+      db_user: db.db_user,
+      password: '',
+      allowed_cidrs: (db.allowed_cidrs || []).join(', '),
+    });
+    setEditing(db.id);
+  }
+
+  async function save() {
+    const cidrs = form.allowed_cidrs.split(',').map(s => s.trim()).filter(Boolean);
+    setSaving(true);
+    try {
+      if (editing === 'new') {
+        await api.createClusterDatabase(clusterId, {
+          db_name: form.db_name,
+          db_user: form.db_user,
+          password: form.password,
+          allowed_cidrs: cidrs,
+        });
+        toast('Database creation requested — provisioning in progress');
+      } else {
+        await api.updateClusterDatabase(clusterId, editing, {
+          db_user: form.db_user,
+          password: form.password || undefined,
+          allowed_cidrs: cidrs,
+        });
+        toast('Database updated successfully');
+      }
+      setEditing(null);
+      await load();
+    } catch (e) {
+      toast('Failed: ' + e.message, true);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove(db) {
+    if (!confirm(`Delete database "${db.db_name}" and user "${db.db_user}"? This does not drop the actual PostgreSQL database — it removes the management record and HBA access rules.`)) return;
+    try {
+      await api.deleteClusterDatabase(clusterId, db.id);
+      toast('Database record removed');
+      load();
+    } catch (e) {
+      toast('Delete failed: ' + e.message, true);
+    }
+  }
+
+  return (
+    <div className="cd-card">
+      <div className="cd-card-header" style={{ justifyContent: 'space-between' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Database size={14} /> Databases</span>
+        <button className="btn btn-sm btn-approve" onClick={startCreate}><Plus size={12} /> Add Database</button>
+      </div>
+      <div className="cd-card-body" style={{ padding: 0 }}>
+        {editing && (
+          <div className="admin-form-bar">
+            <input className="input" placeholder="Database name" value={form.db_name}
+              onChange={e => setForm(f => ({ ...f, db_name: e.target.value }))}
+              disabled={editing !== 'new'} style={{ width: 160 }} />
+            <input className="input" placeholder="Username" value={form.db_user}
+              onChange={e => setForm(f => ({ ...f, db_user: e.target.value }))} style={{ width: 140 }} />
+            <input className="input" type="password" placeholder={editing === 'new' ? 'Password' : 'New password (leave blank to keep)'}
+              value={form.password}
+              onChange={e => setForm(f => ({ ...f, password: e.target.value }))} style={{ width: 180 }} />
+            <input className="input" placeholder="Allowed CIDRs (e.g. 10.0.0.0/8, 192.168.0.0/16)" value={form.allowed_cidrs}
+              onChange={e => setForm(f => ({ ...f, allowed_cidrs: e.target.value }))} style={{ flex: 1 }} />
+            <button className="btn btn-approve" onClick={save} disabled={saving}>
+              {saving ? <><Loader size={13} className="spin" /> Saving...</> : <><Save size={13} /> Save</>}
+            </button>
+            <button className="btn btn-reject" onClick={() => setEditing(null)} disabled={saving}><X size={13} /></button>
+          </div>
+        )}
+
+        {dbs.length === 0 && !editing ? (
+          <div className="cd-empty">No databases managed at the cluster level. Click "Add Database" to create one.</div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Database</th>
+                <th>User</th>
+                <th>Status</th>
+                <th>Allowed CIDRs</th>
+                <th>Created</th>
+                <th style={{ width: 150 }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dbs.map(db => (
+                <tr key={db.id}>
+                  <td className="mono">{db.db_name}</td>
+                  <td className="mono">{db.db_user}</td>
+                  <td>
+                    {db.status === 'created' && <span className="badge badge-green"><span className="dot" />Created</span>}
+                    {db.status === 'failed' && <span className="badge badge-red" title={db.error_message || ''}><span className="dot" />Failed</span>}
+                    {(!db.status || db.status === 'pending') && <span className="badge badge-amber"><span className="dot" />Pending</span>}
+                  </td>
+                  <td>
+                    {(db.allowed_cidrs || []).length === 0
+                      ? <span className="sm muted">All (0.0.0.0/0)</span>
+                      : (db.allowed_cidrs || []).map((cidr, i) => (
+                          <span key={i} className="badge badge-blue" style={{ marginRight: 4 }}>
+                            <Globe size={10} /> {cidr}
+                          </span>
+                        ))
+                    }
+                  </td>
+                  <td className="sm muted">{timeAgo(db.created_at)}</td>
+                  <td>
+                    <div className="actions">
+                      <button className="btn btn-sm" onClick={() => startEdit(db)}><Pencil size={12} /> Edit</button>
+                      <button className="btn btn-sm btn-reject" onClick={() => remove(db)}><Trash2 size={12} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

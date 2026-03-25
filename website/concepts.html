@@ -46,8 +46,9 @@
       <a href="#satellite" class="docs-link">Satellite Agent</a>
       <a href="#operator" class="docs-link">Kubernetes Operator</a>
       <a href="#cluster-profiles" class="docs-link">Cluster Profiles</a>
+      <a href="#config-management" class="docs-link">Configuration Management</a>
+      <a href="#cluster-databases" class="docs-link">Cluster Databases</a>
       <a href="#deployment-rules" class="docs-link">Deployment Rules</a>
-      <a href="#backup-profiles" class="docs-link">Backup Profiles</a>
       <a href="#failover-sidecar" class="docs-link">Failover Sidecar</a>
       <a href="#sidecar-streaming" class="docs-link">Sidecar Streaming</a>
       <a href="#log-watcher" class="docs-link">Log Watcher</a>
@@ -81,7 +82,7 @@
 
     <article class="concept" id="central">
       <h3>Central Control Plane</h3>
-      <p>The central server is the brain of PG-Swarm. It runs as a single binary (<code>cmd/central</code>) and exposes three interfaces:</p>
+      <p>PG-Swarm consists of three binaries: <strong>central</strong> (<code>cmd/central</code>), <strong>satellite</strong> (<code>cmd/satellite</code>), and <strong>failover sidecar</strong> (<code>cmd/failover-sidecar</code>). The central server is the brain of the system, exposing three interfaces:</p>
       <ul>
         <li><strong>gRPC server (:9090)</strong> — accepts persistent bidirectional streams from satellites. Pushes cluster configurations, receives health reports, backup statuses, and event notifications.</li>
         <li><strong>REST API (:8080)</strong> — 60+ endpoints for managing satellites, cluster profiles, deployment rules, backup profiles, recovery rule sets, storage tiers, image variants, and restore operations. WebSocket endpoint for real-time state push. Used by the dashboard and any external tooling.</li>
@@ -104,7 +105,7 @@
     <article class="concept" id="operator">
       <h3>Kubernetes Operator</h3>
       <p>The operator is embedded in the satellite binary — it's not a separate CRD-based controller. Instead, it receives JSON cluster configurations over the gRPC stream and materializes them as Kubernetes resources.</p>
-      <p>The reconcile loop has 10 steps:</p>
+      <p>The reconcile loop has 9 steps:</p>
       <ol>
         <li>Ensure namespace exists</li>
         <li>Store received config as a ConfigMap (for inspection)</li>
@@ -115,16 +116,42 @@
         <li>Create or update StatefulSet</li>
         <li>Reconcile PVC finalizers (for deletion protection)</li>
         <li>Label pods with roles (best-effort)</li>
-        <li>Add backup sidecar container to StatefulSet when backup profiles are attached</li>
       </ol>
       <p>Each config has a <code>config_version</code> number. The operator tracks the last applied version per cluster and skips duplicate pushes — this makes reconciliation idempotent.</p>
     </article>
 
     <article class="concept" id="cluster-profiles">
       <h3>Cluster Profiles</h3>
-      <p>A cluster profile is a reusable template that defines everything about a PostgreSQL cluster: replicas, PostgreSQL version, storage, resources, pg_params, HBA rules, databases, archive settings, failover configuration, and attached backup profiles.</p>
-      <p>Profiles can be <strong>locked</strong> — once a cluster is deployed from a profile, the profile becomes read-only to prevent accidental changes that would affect running clusters. You can still clone a locked profile to create an editable copy.</p>
+      <p>A cluster profile is a reusable template that defines everything about a PostgreSQL cluster: replicas, PostgreSQL version, storage, resources, pg_params, HBA rules, failover configuration, and recovery rules.</p>
+      <p>Profiles can now be <strong>edited even with active clusters</strong>. Every edit creates a new <strong>version</strong>, and you can revert to any previous version. Changes to a profile do not automatically apply to running clusters — each cluster requires <strong>per-cluster approval</strong> before the new configuration is pushed. This gives operators full control over when and how changes roll out across edge sites.</p>
       <p>The profile editor in the dashboard has 7 tabs: General, Volumes, Resources, PostgreSQL, HBA Rules, Databases, and Backups.</p>
+    </article>
+
+    <article class="concept" id="config-management">
+      <h3>Configuration Management</h3>
+      <p>PG-Swarm provides a structured system for managing PostgreSQL configuration changes across clusters, with safety mechanisms to prevent downtime from misconfigured parameters.</p>
+      <p><strong>Three-mode config updates:</strong></p>
+      <ul>
+        <li><strong>Reload</strong> — for parameters that take effect via <code>pg_reload_conf()</code> (sighup parameters like <code>work_mem</code>, <code>log_min_duration_statement</code>). Applied live with zero downtime.</li>
+        <li><strong>Sequential restart</strong> — for postmaster parameters that require a PostgreSQL restart (like <code>shared_buffers</code>, <code>max_connections</code>). Pods are restarted one at a time in a rolling update to maintain availability.</li>
+        <li><strong>Full restart</strong> — for parameters like <code>wal_level</code> that require all pods to restart simultaneously. The StatefulSet is scaled to 0 and back up.</li>
+      </ul>
+      <p><strong>Config versioning:</strong> Every profile change creates a new version. The version history is preserved, and operators can revert to any previous version through the dashboard or API.</p>
+      <p><strong>Per-cluster approval:</strong> When a profile is updated, the new configuration does not automatically apply to running clusters. Each cluster must be individually approved before the change is pushed, giving operators control over staged rollouts.</p>
+      <p><strong>Database-driven parameter classification:</strong> PG-Swarm maintains a database of PostgreSQL parameters and their restart requirements. An admin panel allows managing which parameters need which restart mode, so the system automatically determines the correct update strategy for any configuration change.</p>
+    </article>
+
+    <article class="concept" id="cluster-databases">
+      <h3>Cluster Databases</h3>
+      <p>Databases and users are managed at the <strong>cluster level</strong>, not in profiles. This allows individual clusters deployed from the same profile to have different application databases and access rules.</p>
+      <p><strong>How it works:</strong></p>
+      <ol>
+        <li>An operator creates a database entry for a cluster via the dashboard or API, specifying the database name, owner role, and optional IP subnet access restrictions.</li>
+        <li>PG-Swarm sends a command to the failover sidecar on the primary pod.</li>
+        <li>The sidecar executes <code>CREATE ROLE</code> and <code>CREATE DATABASE</code> directly against the local PostgreSQL instance.</li>
+        <li>If per-database IP subnet access control is specified, the sidecar generates HBA rules for that database and runs <code>pg_reload_conf()</code> to apply them.</li>
+      </ol>
+      <p><strong>Zero pod restart:</strong> The entire process — role creation, database creation, and HBA rule application — happens live without any pod restarts. The failover sidecar handles the SQL commands, and <code>pg_reload_conf()</code> applies HBA changes immediately.</p>
     </article>
 
     <article class="concept" id="deployment-rules">
@@ -136,13 +163,6 @@ Name:    "prod-pg"
 Namespace: "databases"</code></pre>
       <p>PG-Swarm finds all approved satellites whose labels contain <code>region=us-east</code> AND <code>tier=edge</code>, and creates a <code>ClusterConfig</code> for each one. If a new satellite is approved later with matching labels, it automatically gets the cluster.</p>
       <p>This is how PG-Swarm scales to hundreds of edge sites — you define the intent once, and the system fans it out.</p>
-    </article>
-
-    <article class="concept" id="backup-profiles">
-      <h3>Backup Profiles</h3>
-      <p>A backup profile defines <strong>what</strong> to back up, <strong>where</strong> to store it, <strong>when</strong> to run, and <strong>how long</strong> to retain. Each profile is either physical or logical — not both.</p>
-      <p>A cluster profile can have at most <strong>one physical backup profile</strong> (base backup + optional WAL archiving + optional incrementals) and <strong>one logical backup profile</strong> (pg_dump) attached. This ensures there's no conflict over PostgreSQL's single <code>archive_command</code>.</p>
-      <p>When a backup profile is attached or detached, all clusters using that cluster profile are automatically re-pushed to their satellites, adding or removing the backup sidecar container in the StatefulSet as needed.</p>
     </article>
 
     <article class="concept" id="failover-sidecar">
@@ -190,15 +210,15 @@ Namespace: "databases"</code></pre>
 
     <article class="concept" id="recovery-rules">
       <h3>Recovery Rules</h3>
-      <p>Recovery rules are centrally managed sets of log patterns and their associated actions. Instead of hardcoding patterns in the sidecar, administrators can create, edit, and attach <strong>recovery rule sets</strong> to clusters via the dashboard.</p>
+      <p>Recovery rules are centrally managed sets of log patterns and their associated actions. PG-Swarm ships with <strong>40+ built-in patterns</strong> covering data corruption, OOM, WAL issues, replication failures, and more. Administrators can create, edit, and attach <strong>recovery rule sets</strong> to cluster profiles via the dashboard.</p>
       <p>Each rule set contains rules with:</p>
       <ul>
         <li><strong>Pattern</strong> — a regex to match against PostgreSQL log lines</li>
         <li><strong>Action</strong> — what to do when the pattern matches (restart, rewind, rebasebackup, event, exec)</li>
         <li><strong>Cooldown</strong> — minimum time between action triggers for this pattern</li>
       </ul>
-      <p>The dashboard's Recovery Rules editor (in the Admin page) provides inline rule editing and a <strong>pattern sandbox</strong> for testing regex patterns against sample log lines before deploying them to clusters.</p>
-      <p>Rule sets are managed via REST API (<code>/api/v1/recovery-rule-sets</code>) and attached to clusters via the <code>recovery_rule_set</code> field in <code>ClusterConfig</code>.</p>
+      <p><strong>Admin panel with regex sandbox:</strong> The dashboard's Recovery Rules editor (in the Admin page) provides inline rule editing and a <strong>regex sandbox</strong> for testing patterns against sample log lines before deploying them. You can paste real PostgreSQL log output and verify that your patterns match the expected lines and only those lines.</p>
+      <p><strong>Per-profile attachment:</strong> Rule sets are attached to cluster profiles, so all clusters deployed from the same profile share the same recovery behavior. Rule sets are managed via REST API (<code>/api/v1/recovery-rule-sets</code>) and pushed to satellites as part of the <code>ClusterConfig</code>.</p>
     </article>
 
     <article class="concept" id="storage-tiers">
@@ -311,7 +331,7 @@ but the new primary is on timeline 2. This is a "timeline divergence".</code></p
 
     <article class="concept" id="wal-archiving">
       <h3>WAL Archiving</h3>
-      <p>WAL archiving is the process of copying completed WAL segments to an external location (S3, GCS, SFTP, etc.) for disaster recovery and point-in-time recovery. It's separate from streaming replication:</p>
+      <p>WAL archiving is the process of copying completed WAL segments to an external location (GCS, SFTP, etc.) for disaster recovery and point-in-time recovery. It's separate from streaming replication:</p>
       <table class="concept-table">
         <thead><tr><th></th><th>Streaming Replication</th><th>WAL Archiving</th></tr></thead>
         <tbody>
@@ -365,16 +385,20 @@ recovery_target_action = 'promote'</code></pre>
 
     <h2 class="docs-group-title" id="backups-group">Backups</h2>
 
+    <div class="concept" style="background: var(--bg-card); border-left: 4px solid var(--accent); padding: 1rem 1.5rem; margin-bottom: 2rem; border-radius: 8px;">
+      <p><strong>Note:</strong> The backup sidecar (<code>cmd/backup-sidecar</code>) is currently being rebuilt from scratch. The design and concepts described below reflect the target architecture. This section will be updated as the reimplementation progresses.</p>
+    </div>
+
     <article class="concept" id="base-backup">
       <h3>Base Backup (Full Physical)</h3>
       <p>A base backup is a complete binary copy of the PostgreSQL data directory, taken using <code>pg_basebackup</code>. It captures everything: tables, indexes, configuration, transaction logs.</p>
-      <p><strong>PG-Swarm runs this via the backup sidecar</strong> on the schedule defined in the backup profile (e.g., daily at 4 AM). The sidecar (running on the replica pod):</p>
+      <p><strong>PG-Swarm will run this via the backup sidecar</strong> on a configured schedule (e.g., daily at 4 AM). The sidecar (running on the replica pod) will:</p>
       <ol>
-        <li>Records the backup start in the SQLite metadata DB (<code>backups.db</code>).</li>
-        <li>Runs <code>pg_basebackup -Ft -z -Xs -P</code> against localhost — tar format, gzip compressed, streaming WAL, with progress.</li>
-        <li>Uploads the compressed backup to the configured destination (S3, GCS, SFTP, or local PVC).</li>
-        <li>Stores the <code>backup_manifest</code> (PG 13+) in the metadata DB for future incremental references.</li>
-        <li>Records completion (size, status) and notifies the primary sidecar for metadata sync.</li>
+        <li>Record the backup start in the SQLite metadata DB (<code>backups.db</code>).</li>
+        <li>Run <code>pg_basebackup -Ft -z -Xs -P</code> against localhost — tar format, gzip compressed, streaming WAL, with progress.</li>
+        <li>Upload the compressed backup to the configured destination (GCS or SFTP).</li>
+        <li>Store the <code>backup_manifest</code> (PG 13+) in the metadata DB for future incremental references.</li>
+        <li>Record completion (size, status) and notify the primary sidecar for metadata sync.</li>
       </ol>
       <p>A full base backup on its own lets you restore to <strong>the exact point the backup was taken</strong>. To restore to any arbitrary point in time, you also need WAL archives.</p>
     </article>
@@ -383,7 +407,7 @@ recovery_target_action = 'promote'</code></pre>
       <h3>Incremental Backup (PG 17+)</h3>
       <p>Incremental backups, introduced in PostgreSQL 17, use <code>pg_basebackup --incremental</code> to capture only the data blocks that changed since a previous backup. This requires:</p>
       <ul>
-        <li><code>summarize_wal = on</code> — PG-Swarm auto-sets this when an incremental schedule is configured.</li>
+        <li><code>summarize_wal = on</code> — PG-Swarm will auto-set this when an incremental schedule is configured.</li>
         <li>A <code>backup_manifest</code> from a prior backup — used as the reference point.</li>
       </ul>
       <p><strong>How the chain works:</strong></p>
@@ -394,7 +418,7 @@ Day 1, 6:00 AM  &rarr;  Incremental (only blocks changed since 5 AM)
 Day 2, 4:00 AM  &rarr;  New full base backup (resets the chain)
 Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
       <p>To restore from an incremental, you use <code>pg_combinebackup</code> to merge the full base with all incrementals in the chain.</p>
-      <p><strong>First-run behavior:</strong> If no previous manifest exists in the metadata DB (first run), the backup sidecar automatically takes a full base backup instead.</p>
+      <p><strong>First-run behavior:</strong> If no previous manifest exists in the metadata DB (first run), the backup sidecar will automatically take a full base backup instead.</p>
     </article>
 
     <article class="concept" id="logical-backup">
@@ -416,14 +440,14 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
         <li>A <strong>base backup</strong> taken before the target time.</li>
         <li>All <strong>WAL segments</strong> from the base backup's start LSN through the target time.</li>
       </ol>
-      <p><strong>The restore process (automated by PG-Swarm):</strong></p>
+      <p><strong>The restore process (to be automated by PG-Swarm):</strong></p>
       <ol>
         <li>User selects a base backup and target time in the dashboard.</li>
         <li>Central sends a <code>RestoreCommand</code> to the satellite.</li>
         <li>The satellite creates a Kubernetes Job that scales the StatefulSet to 0, downloads and extracts the backup, writes <code>recovery.signal</code> with <code>recovery_target_time</code>, and scales back up.</li>
         <li>PostgreSQL replays WAL to the target time, then promotes.</li>
       </ol>
-      <p><strong>Retention matters:</strong> WAL retention days must cover the span between your oldest base backup and any potential recovery target. PG-Swarm validates this and warns if WAL retention is too short.</p>
+      <p><strong>Retention matters:</strong> WAL retention days must cover the span between your oldest base backup and any potential recovery target.</p>
     </article>
 
     <article class="concept" id="metadata-store">
@@ -438,13 +462,13 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
           <tr><td><code>wal_segments</code></td><td>Archived WAL segment inventory</td></tr>
         </tbody>
       </table>
-      <p><strong>Workflow:</strong> The backup sidecar maintains <code>backups.db</code> locally at each destination, updating it after each backup operation. The metadata is co-located with the data — no external database dependency.</p>
+      <p><strong>Workflow:</strong> The backup sidecar will maintain <code>backups.db</code> locally at each destination, updating it after each backup operation. The metadata is co-located with the data — no external database dependency.</p>
       <p>The <code>parent_id</code> column tracks the incremental chain: <code>full-1 &larr; incr-2 &larr; incr-3</code>. For restore, walk the chain back to the base.</p>
     </article>
 
     <article class="concept" id="retention">
       <h3>Retention</h3>
-      <p>Retention policies control how many backups are kept before old ones are deleted. Enforced after each successful backup.</p>
+      <p>Retention policies will control how many backups are kept before old ones are deleted, enforced after each successful backup.</p>
       <table class="concept-table">
         <thead><tr><th>Setting</th><th>Default</th><th>Applies to</th></tr></thead>
         <tbody>
@@ -454,7 +478,7 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
           <tr><td>Logical Backup Count</td><td>7</td><td>Logical dumps</td></tr>
         </tbody>
       </table>
-      <p><strong>WAL retention validation:</strong> PG-Swarm calculates the minimum WAL retention needed based on the base backup schedule and count. The dashboard warns and offers a quick-fix button if WAL retention is too short.</p>
+      <p><strong>Storage backends:</strong> The backup sidecar supports <strong>GCS</strong> (Google Cloud Storage) and <strong>SFTP</strong> as storage destinations.</p>
     </article>
 
   </main>
