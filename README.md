@@ -1,3 +1,5 @@
+[![Docker Image Build](https://github.com/pg-swarm/pg-swarm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/pg-swarm/pg-swarm/actions/workflows/docker-publish.yml)
+
 # pg-swarm
 
 Centralized management system for PostgreSQL High Availability clusters deployed across up to 500 edge Kubernetes clusters.
