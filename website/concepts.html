@@ -78,9 +78,9 @@
   <!-- Content -->
   <main class="docs-content">
 
-    <h2 class="docs-group-title" id="pg-swarm-group">PG-Swarm</h2>
+    <h2 class="docs-group-title" data-reveal id="pg-swarm-group">PG-Swarm</h2>
 
-    <article class="concept" id="central">
+    <article class="concept" data-reveal id="central">
       <h3>Central Control Plane</h3>
       <p>PG-Swarm consists of three binaries: <strong>central</strong> (<code>cmd/central</code>), <strong>satellite</strong> (<code>cmd/satellite</code>), and <strong>failover sidecar</strong> (<code>cmd/failover-sidecar</code>). The central server is the brain of the system, exposing three interfaces:</p>
       <ul>
@@ -91,7 +91,7 @@
       <p>Central stores all metadata in a PostgreSQL database with auto-migrations. When it starts, it runs any pending migration files in order, so schema updates are automatic.</p>
     </article>
 
-    <article class="concept" id="satellite">
+    <article class="concept" data-reveal id="satellite">
       <h3>Satellite Agent</h3>
       <p>A satellite (<code>cmd/satellite</code>) is a lightweight Go binary that runs on each edge Kubernetes cluster. It does three things:</p>
       <ol>
@@ -102,7 +102,7 @@
       <p>The satellite's identity (ID + auth token) is stored in a Kubernetes Secret (<code>pg-swarm-satellite-identity</code>) so it survives pod restarts.</p>
     </article>
 
-    <article class="concept" id="operator">
+    <article class="concept" data-reveal id="operator">
       <h3>Kubernetes Operator</h3>
       <p>The operator is embedded in the satellite binary — it's not a separate CRD-based controller. Instead, it receives JSON cluster configurations over the gRPC stream and materializes them as Kubernetes resources.</p>
       <p>The reconcile loop has 9 steps:</p>
@@ -120,14 +120,14 @@
       <p>Each config has a <code>config_version</code> number. The operator tracks the last applied version per cluster and skips duplicate pushes — this makes reconciliation idempotent.</p>
     </article>
 
-    <article class="concept" id="cluster-profiles">
+    <article class="concept" data-reveal id="cluster-profiles">
       <h3>Cluster Profiles</h3>
       <p>A cluster profile is a reusable template that defines everything about a PostgreSQL cluster: replicas, PostgreSQL version, storage, resources, pg_params, HBA rules, failover configuration, and recovery rules.</p>
       <p>Profiles can now be <strong>edited even with active clusters</strong>. Every edit creates a new <strong>version</strong>, and you can revert to any previous version. Changes to a profile do not automatically apply to running clusters — each cluster requires <strong>per-cluster approval</strong> before the new configuration is pushed. This gives operators full control over when and how changes roll out across edge sites.</p>
       <p>The profile editor in the dashboard has 7 tabs: General, Volumes, Resources, PostgreSQL, HBA Rules, Databases, and Backups.</p>
     </article>
 
-    <article class="concept" id="config-management">
+    <article class="concept" data-reveal id="config-management">
       <h3>Configuration Management</h3>
       <p>PG-Swarm provides a structured system for managing PostgreSQL configuration changes across clusters, with safety mechanisms to prevent downtime from misconfigured parameters.</p>
       <p><strong>Three-mode config updates:</strong></p>
@@ -141,7 +141,7 @@
       <p><strong>Database-driven parameter classification:</strong> PG-Swarm maintains a database of PostgreSQL parameters and their restart requirements. An admin panel allows managing which parameters need which restart mode, so the system automatically determines the correct update strategy for any configuration change.</p>
     </article>
 
-    <article class="concept" id="cluster-databases">
+    <article class="concept" data-reveal id="cluster-databases">
       <h3>Cluster Databases</h3>
       <p>Databases and users are managed at the <strong>cluster level</strong>, not in profiles. This allows individual clusters deployed from the same profile to have different application databases and access rules.</p>
       <p><strong>How it works:</strong></p>
@@ -154,7 +154,7 @@
       <p><strong>Zero pod restart:</strong> The entire process — role creation, database creation, and HBA rule application — happens live without any pod restarts. The failover sidecar handles the SQL commands, and <code>pg_reload_conf()</code> applies HBA changes immediately.</p>
     </article>
 
-    <article class="concept" id="deployment-rules">
+    <article class="concept" data-reveal id="deployment-rules">
       <h3>Deployment Rules</h3>
       <p>A deployment rule connects a cluster profile to satellites via <strong>label selectors</strong>. When you create a rule like:</p>
       <pre><code>Profile: "production-standard"
@@ -165,7 +165,7 @@ Namespace: "databases"</code></pre>
       <p>This is how PG-Swarm scales to hundreds of edge sites — you define the intent once, and the system fans it out.</p>
     </article>
 
-    <article class="concept" id="failover-sidecar">
+    <article class="concept" data-reveal id="failover-sidecar">
       <h3>Failover Sidecar</h3>
       <p>The failover sidecar (<code>cmd/failover-sidecar</code>) runs as a container alongside PostgreSQL in every pod of the StatefulSet. It handles:</p>
       <ul>
@@ -179,7 +179,7 @@ Namespace: "databases"</code></pre>
       <p>The entire failover process — detection, promotion, service rerouting — takes under 5 seconds after the lease expires.</p>
     </article>
 
-    <article class="concept" id="sidecar-streaming">
+    <article class="concept" data-reveal id="sidecar-streaming">
       <h3>Sidecar Streaming</h3>
       <p>Each failover sidecar maintains a <strong>bidirectional gRPC stream</strong> to the satellite agent running on the same edge cluster. This enables the satellite to dispatch commands directly to specific pods during switchover and other operations.</p>
       <p><strong>How it works:</strong></p>
@@ -193,7 +193,7 @@ Namespace: "databases"</code></pre>
       <p>If the connection drops, the sidecar reconnects with exponential backoff (1s to 30s). This replaces the previous approach of K8s exec for switchover commands, providing lower latency and a typed command/result protocol.</p>
     </article>
 
-    <article class="concept" id="log-watcher">
+    <article class="concept" data-reveal id="log-watcher">
       <h3>Log Watcher</h3>
       <p>The log watcher (<code>internal/failover/logwatcher.go</code>) monitors PostgreSQL's log output in real-time via the Kubernetes log API. It matches log lines against <strong>40+ recovery patterns</strong> across 9 categories and triggers automated recovery actions.</p>
       <p><strong>Pattern categories:</strong></p>
@@ -208,7 +208,7 @@ Namespace: "databases"</code></pre>
       <p><strong>Safety:</strong> Cooldown periods prevent action storms, pattern deduplication prevents the same log line from triggering twice, and an action mutex ensures only one recovery action runs at a time.</p>
     </article>
 
-    <article class="concept" id="recovery-rules">
+    <article class="concept" data-reveal id="recovery-rules">
       <h3>Recovery Rules</h3>
       <p>Recovery rules are centrally managed sets of log patterns and their associated actions. PG-Swarm ships with <strong>40+ built-in patterns</strong> covering data corruption, OOM, WAL issues, replication failures, and more. Administrators can create, edit, and attach <strong>recovery rule sets</strong> to cluster profiles via the dashboard.</p>
       <p>Each rule set contains rules with:</p>
@@ -221,14 +221,14 @@ Namespace: "databases"</code></pre>
       <p><strong>Per-profile attachment:</strong> Rule sets are attached to cluster profiles, so all clusters deployed from the same profile share the same recovery behavior. Rule sets are managed via REST API (<code>/api/v1/recovery-rule-sets</code>) and pushed to satellites as part of the <code>ClusterConfig</code>.</p>
     </article>
 
-    <article class="concept" id="storage-tiers">
+    <article class="concept" data-reveal id="storage-tiers">
       <h3>Storage Tiers</h3>
       <p>Storage tiers provide an abstraction layer between cluster profiles and Kubernetes StorageClasses. Instead of hardcoding a StorageClass name in a profile (which varies across edge clusters), you reference a <strong>storage tier</strong> like "fast-ssd" or "standard".</p>
       <p>Each satellite has <strong>tier mappings</strong> that map abstract tier names to actual StorageClasses available on that cluster. When the satellite receives a ClusterConfig referencing a storage tier, the operator resolves it to the mapped StorageClass.</p>
       <p>This enables a single profile to work across hundreds of edge clusters, each with different storage providers and class names.</p>
     </article>
 
-    <article class="concept" id="grpc-streaming">
+    <article class="concept" data-reveal id="grpc-streaming">
       <h3>gRPC Streaming</h3>
       <p>PG-Swarm uses <strong>bidirectional gRPC streaming</strong> between central and each satellite. A single persistent stream carries all communication in both directions:</p>
       <p><strong>Central &rarr; Satellite:</strong></p>
@@ -251,9 +251,9 @@ Namespace: "databases"</code></pre>
       <p>Satellites initiate the connection outward, making PG-Swarm work behind NAT, firewalls, and VPNs without any inbound port requirements.</p>
     </article>
 
-    <h2 class="docs-group-title" id="pg-internals-group">PostgreSQL Internals</h2>
+    <h2 class="docs-group-title" data-reveal id="pg-internals-group">PostgreSQL Internals</h2>
 
-    <article class="concept" id="wal">
+    <article class="concept" data-reveal id="wal">
       <h3>Write-Ahead Log (WAL)</h3>
       <p>The Write-Ahead Log is the foundation of PostgreSQL's durability and replication. Before any change is written to the actual data files (tables, indexes), it is first recorded in the WAL. This guarantees that:</p>
       <ul>
@@ -276,7 +276,7 @@ Namespace: "databases"</code></pre>
       </ul>
     </article>
 
-    <article class="concept" id="lsn">
+    <article class="concept" data-reveal id="lsn">
       <h3>Log Sequence Number (LSN)</h3>
       <p>An LSN is a pointer to a position in the WAL stream. It's represented as two 32-bit hex numbers separated by a slash, like <code>0/16B3F80</code>. Every WAL record has an LSN, and they increase monotonically.</p>
       <p><strong>Why LSNs matter:</strong></p>
@@ -288,7 +288,7 @@ Namespace: "databases"</code></pre>
       <p>PG-Swarm's health monitor reports replication lag in both bytes (LSN difference) and seconds (time since last replayed transaction).</p>
     </article>
 
-    <article class="concept" id="timelines">
+    <article class="concept" data-reveal id="timelines">
       <h3>Timelines</h3>
       <p>A timeline is a sequence of WAL records that forms a linear history. Every PostgreSQL cluster starts on timeline 1. When a promotion happens (a replica becomes the new primary), PostgreSQL increments the timeline to prevent WAL conflicts.</p>
       <p><strong>Example:</strong></p>
@@ -309,7 +309,7 @@ but the new primary is on timeline 2. This is a "timeline divergence".</code></p
       <p>WAL file names encode the timeline: <code>00000002000000000000000A</code> — the leading <code>00000002</code> means timeline 2.</p>
     </article>
 
-    <article class="concept" id="streaming-replication">
+    <article class="concept" data-reveal id="streaming-replication">
       <h3>Streaming Replication</h3>
       <p>Streaming replication is how replicas stay in sync with the primary in real time. A replica connects to the primary using a special replication connection and receives WAL records as they are generated — no polling, no delay.</p>
       <p><strong>The flow:</strong></p>
@@ -329,7 +329,7 @@ but the new primary is on timeline 2. This is a "timeline divergence".</code></p
       </ul>
     </article>
 
-    <article class="concept" id="wal-archiving">
+    <article class="concept" data-reveal id="wal-archiving">
       <h3>WAL Archiving</h3>
       <p>WAL archiving is the process of copying completed WAL segments to an external location (GCS, SFTP, etc.) for disaster recovery and point-in-time recovery. It's separate from streaming replication:</p>
       <table class="concept-table">
@@ -351,7 +351,7 @@ archive_timeout = 60</code></pre>
       <p>PostgreSQL calls <code>archive_command</code> once for each completed WAL segment. If the command fails (exit code != 0), PostgreSQL retries indefinitely — it never deletes an unarchived segment.</p>
     </article>
 
-    <article class="concept" id="pg-rewind">
+    <article class="concept" data-reveal id="pg-rewind">
       <h3>pg_rewind</h3>
       <p><code>pg_rewind</code> is a tool that synchronizes a PostgreSQL data directory with another copy that has diverged. It's used after a failover to bring the old primary back in sync with the new primary without a full re-basebackup.</p>
       <p><strong>How it works:</strong></p>
@@ -369,7 +369,7 @@ archive_timeout = 60</code></pre>
       <p>PG-Swarm's container wrapper script automatically runs pg_rewind when it detects timeline divergence. If pg_rewind fails (e.g., too much divergence), it falls back to a full re-basebackup.</p>
     </article>
 
-    <article class="concept" id="recovery-signal">
+    <article class="concept" data-reveal id="recovery-signal">
       <h3>recovery.signal and standby.signal</h3>
       <p>These are empty files placed in PGDATA that control how PostgreSQL starts up:</p>
       <ul>
@@ -383,13 +383,13 @@ recovery_target_action = 'promote'</code></pre>
       <p>After replaying WAL to the target time, PostgreSQL removes <code>recovery.signal</code> and starts accepting writes.</p>
     </article>
 
-    <h2 class="docs-group-title" id="backups-group">Backups</h2>
+    <h2 class="docs-group-title" data-reveal id="backups-group">Backups</h2>
 
-    <div class="concept" style="background: var(--bg-card); border-left: 4px solid var(--accent); padding: 1rem 1.5rem; margin-bottom: 2rem; border-radius: 8px;">
+    <div class="concept" data-reveal style="background: var(--bg-card); border-left: 4px solid var(--accent); padding: 1rem 1.5rem; margin-bottom: 2rem; border-radius: 8px;">
       <p><strong>Note:</strong> The backup sidecar (<code>cmd/backup-sidecar</code>) is currently being rebuilt from scratch. The design and concepts described below reflect the target architecture. This section will be updated as the reimplementation progresses.</p>
     </div>
 
-    <article class="concept" id="base-backup">
+    <article class="concept" data-reveal id="base-backup">
       <h3>Base Backup (Full Physical)</h3>
       <p>A base backup is a complete binary copy of the PostgreSQL data directory, taken using <code>pg_basebackup</code>. It captures everything: tables, indexes, configuration, transaction logs.</p>
       <p><strong>PG-Swarm will run this via the backup sidecar</strong> on a configured schedule (e.g., daily at 4 AM). The sidecar (running on the replica pod) will:</p>
@@ -403,7 +403,7 @@ recovery_target_action = 'promote'</code></pre>
       <p>A full base backup on its own lets you restore to <strong>the exact point the backup was taken</strong>. To restore to any arbitrary point in time, you also need WAL archives.</p>
     </article>
 
-    <article class="concept" id="incremental-backup">
+    <article class="concept" data-reveal id="incremental-backup">
       <h3>Incremental Backup (PG 17+)</h3>
       <p>Incremental backups, introduced in PostgreSQL 17, use <code>pg_basebackup --incremental</code> to capture only the data blocks that changed since a previous backup. This requires:</p>
       <ul>
@@ -421,7 +421,7 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
       <p><strong>First-run behavior:</strong> If no previous manifest exists in the metadata DB (first run), the backup sidecar will automatically take a full base backup instead.</p>
     </article>
 
-    <article class="concept" id="logical-backup">
+    <article class="concept" data-reveal id="logical-backup">
       <h3>Logical Backup</h3>
       <p>Logical backups use <code>pg_dump</code> (per-database) or <code>pg_dumpall</code> (all databases) to export data as SQL or custom binary format. Unlike physical backups, logical backups are:</p>
       <ul>
@@ -433,7 +433,7 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
       <p><strong>Compression:</strong> Custom format (<code>-Fc</code>) uses built-in zlib. Plain SQL and pg_dumpall are piped through <code>gzip</code> before upload.</p>
     </article>
 
-    <article class="concept" id="pitr">
+    <article class="concept" data-reveal id="pitr">
       <h3>Point-in-Time Recovery (PITR)</h3>
       <p>PITR lets you restore a database to any specific moment — for example, "right before the accidental DROP TABLE at 2:47 PM." It requires:</p>
       <ol>
@@ -450,7 +450,7 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
       <p><strong>Retention matters:</strong> WAL retention days must cover the span between your oldest base backup and any potential recovery target.</p>
     </article>
 
-    <article class="concept" id="metadata-store">
+    <article class="concept" data-reveal id="metadata-store">
       <h3>Metadata Store (backups.db)</h3>
       <p>PG-Swarm stores backup metadata in a SQLite database alongside the backup files at the destination. Each cluster gets its own <code>&lt;cluster&gt;/metadata/backups.db</code>.</p>
       <p><strong>Tables:</strong></p>
@@ -466,7 +466,7 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
       <p>The <code>parent_id</code> column tracks the incremental chain: <code>full-1 &larr; incr-2 &larr; incr-3</code>. For restore, walk the chain back to the base.</p>
     </article>
 
-    <article class="concept" id="retention">
+    <article class="concept" data-reveal id="retention">
       <h3>Retention</h3>
       <p>Retention policies will control how many backups are kept before old ones are deleted, enforced after each successful backup.</p>
       <table class="concept-table">
@@ -520,6 +520,17 @@ Day 2, 5:00 AM  &rarr;  Incremental (relative to Day 2 full)</code></pre>
 </footer>
 
 <script>
+// Scroll-reveal with IntersectionObserver
+const revealObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('revealed');
+      revealObserver.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+document.querySelectorAll('[data-reveal]').forEach(el => revealObserver.observe(el));
+
 // Mobile nav toggle
 document.querySelector('.nav-toggle').addEventListener('click', function() {
   document.querySelector('.nav-links').classList.toggle('open');
