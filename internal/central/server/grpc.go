@@ -77,6 +77,13 @@ func NewStreamManager() *StreamManager {
 	}
 }
 
+// Count returns the number of currently connected satellite streams.
+func (sm *StreamManager) Count() int {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return len(sm.streams)
+}
+
 // Start listens on the given address and serves gRPC requests. It blocks
 // until the server is stopped or an error occurs.
 func (s *GRPCServer) Start(addr string) error {

@@ -100,6 +100,9 @@ func (s *RESTServer) setupRoutes() {
 		return c.Send(data)
 	})
 
+	// Service healthcheck (outside /api/v1 — for K8s probes and load balancers)
+	s.app.Get("/healthz", s.healthCheck)
+
 	api := s.app.Group("/api/v1")
 
 	// WebSocket — real-time state push (dashboard connects here first, falls back to REST polling)
@@ -788,11 +791,12 @@ func (s *RESTServer) deleteRecoveryRuleSet(c *fiber.Ctx) error {
 }
 
 // resolveStorageTiers replaces "tier:X" storage class values in a config with
-// concrete class names from the satellite's tier mappings. Returns an error
-// listing any unmapped tiers.
+// concrete class names from the satellite's tier mappings. It works on the raw
+// JSON directly to preserve all fields (including pg_params, hba_rules, etc.)
+// without round-tripping through a Go struct.
 func resolveStorageTiers(rawConfig json.RawMessage, tierMappings map[string]string) (json.RawMessage, error) {
-	var spec models.ClusterSpec
-	if err := json.Unmarshal(rawConfig, &spec); err != nil {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rawConfig, &doc); err != nil {
 		return rawConfig, fmt.Errorf("unmarshal config for tier resolution: %w", err)
 	}
 
@@ -808,34 +812,135 @@ func resolveStorageTiers(rawConfig json.RawMessage, tierMappings map[string]stri
 		return sc, nil
 	}
 
-	var missing []string
-
-	if resolved, err := resolve(spec.Storage.StorageClass); err != nil {
-		missing = append(missing, err.Error())
-	} else {
-		spec.Storage.StorageClass = resolved
+	resolveStorage := func(key string) error {
+		raw, ok := doc[key]
+		if !ok || raw == nil {
+			return nil
+		}
+		var storage map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &storage); err != nil {
+			return nil // not a storage object, skip
+		}
+		scRaw, ok := storage["storage_class"]
+		if !ok {
+			return nil
+		}
+		var sc string
+		if err := json.Unmarshal(scRaw, &sc); err != nil {
+			return nil
+		}
+		resolved, err := resolve(sc)
+		if err != nil {
+			return err
+		}
+		if resolved != sc {
+			storage["storage_class"], _ = json.Marshal(resolved)
+			doc[key], _ = json.Marshal(storage)
+		}
+		return nil
 	}
 
-	if spec.WalStorage != nil {
-		if resolved, err := resolve(spec.WalStorage.StorageClass); err != nil {
-			missing = append(missing, err.Error())
-		} else {
-			spec.WalStorage.StorageClass = resolved
-		}
+	var missing []string
+	if err := resolveStorage("storage"); err != nil {
+		missing = append(missing, err.Error())
+	}
+	if err := resolveStorage("wal_storage"); err != nil {
+		missing = append(missing, err.Error())
 	}
 
 	if len(missing) > 0 {
 		return rawConfig, fmt.Errorf("missing tier mappings: %s", strings.Join(missing, ", "))
 	}
 
-	resolved, err := json.Marshal(spec)
+	resolved, err := json.Marshal(doc)
 	if err != nil {
 		return rawConfig, fmt.Errorf("marshal resolved config: %w", err)
 	}
 	return resolved, nil
 }
 
-// --- Health ---
+// --- Service Healthcheck ---
+
+// healthCheck reports the overall health of the central service, including
+// database connectivity and connected satellite count. Designed for K8s
+// liveness/readiness probes and load balancer health checks.
+func (s *RESTServer) healthCheck(c *fiber.Ctx) error {
+	dbOK := true
+	dbErr := ""
+	if err := s.store.Ping(c.Context()); err != nil {
+		dbOK = false
+		dbErr = err.Error()
+	}
+
+	connectedSatellites := 0
+	if s.streams != nil {
+		connectedSatellites = s.streams.Count()
+	}
+
+	status := "ok"
+	httpCode := fiber.StatusOK
+	if !dbOK {
+		status = "degraded"
+		httpCode = fiber.StatusServiceUnavailable
+	}
+
+	return c.Status(httpCode).JSON(fiber.Map{
+		"status": status,
+		"checks": fiber.Map{
+			"database": fiber.Map{
+				"status": boolToStatus(dbOK),
+				"error":  dbErr,
+			},
+		},
+		"connected_satellites": connectedSatellites,
+	})
+}
+
+// serverDefaultPgParams mirrors the satellite-side defaultPgParams so that diff
+// computation can account for values the satellite applies automatically.
+var serverDefaultPgParams = map[string]string{
+	"max_connections": "100",
+	"shared_buffers": "256MB", "effective_cache_size": "4GB", "work_mem": "4MB",
+	"maintenance_work_mem": "128MB", "huge_pages": "try",
+	"wal_buffers": "16MB", "min_wal_size": "1GB", "max_wal_size": "4GB",
+	"checkpoint_timeout": "15min", "checkpoint_completion_target": "0.9",
+	"random_page_cost": "1.1", "seq_page_cost": "1.0",
+	"effective_io_concurrency": "200", "default_statistics_target": "100", "jit": "on",
+	"track_commit_timestamp": "on", "synchronous_commit": "on",
+	"wal_receiver_timeout": "60s", "wal_sender_timeout": "60s",
+	"log_min_duration_statement": "200", "log_statement": "none",
+	"log_line_prefix": "'%m [%p] %q[user=%u,db=%d] '",
+	"log_checkpoints": "on", "log_connections": "off", "log_disconnections": "off",
+	"log_lock_waits": "off", "log_temp_files": "-1", "log_autovacuum_min_duration": "-1",
+	"autovacuum": "on", "autovacuum_max_workers": "3", "autovacuum_naptime": "1min",
+	"autovacuum_vacuum_threshold": "50", "autovacuum_vacuum_scale_factor": "0.2",
+	"autovacuum_analyze_threshold": "50", "autovacuum_analyze_scale_factor": "0.1",
+	"timezone": "'UTC'", "statement_timeout": "0",
+	"idle_in_transaction_session_timeout": "0", "lock_timeout": "0",
+	"default_text_search_config": "'pg_catalog.english'",
+}
+
+// fillDefaultPgParams backfills server-side default values into a spec's PgParams
+// so that diff comparisons don't flag defaults as changes.
+func fillDefaultPgParams(spec *models.ClusterSpec) {
+	if spec.PgParams == nil {
+		spec.PgParams = make(map[string]string, len(serverDefaultPgParams))
+	}
+	for k, v := range serverDefaultPgParams {
+		if _, exists := spec.PgParams[k]; !exists {
+			spec.PgParams[k] = v
+		}
+	}
+}
+
+func boolToStatus(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "fail"
+}
+
+// --- Cluster Health ---
 
 func (s *RESTServer) listClusterHealth(c *fiber.Ctx) error {
 	health, err := s.store.ListClusterHealth(c.Context())
@@ -1439,6 +1544,11 @@ func (s *RESTServer) clusterProfileDiff(c *fiber.Ctx) error {
 	if err := json.Unmarshal(profile.Config, &newSpec); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to parse profile config"})
 	}
+
+	// Fill in server-side defaults so params already applied by the satellite
+	// don't appear as spurious changes in the diff.
+	fillDefaultPgParams(oldSpec)
+	fillDefaultPgParams(&newSpec)
 
 	paramModes := s.loadParamClassifications(c.Context())
 	diff := classifyChanges(oldSpec, &newSpec, paramModes)

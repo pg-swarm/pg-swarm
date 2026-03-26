@@ -579,6 +579,18 @@ tbody tr:hover { background: var(--green-light); }
   justify-content: flex-end;
 }
 
+/* ── Version History ──────────────────────────────── */
+.vh-list { max-height: 520px; overflow-y: auto; }
+.vh-entry { padding: 14px 20px; border-bottom: 1px solid var(--border); }
+.vh-entry:last-child { border-bottom: none; }
+.vh-header { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.vh-table-wrap { overflow-x: auto; }
+.vh-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.vh-table th { text-align: left; padding: 4px 10px; font-weight: 600; font-size: 11px; color: var(--text-secondary); border-bottom: 1px solid var(--border); white-space: nowrap; }
+.vh-table td { padding: 5px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+.vh-table tr:last-child td { border-bottom: none; }
+.vh-table tr:hover td { background: var(--green-light); }
+
 /* Switchover confirmation modal */
 .switchover-modal { width: 520px; }
 .switchover-header h3 { color: var(--amber); }

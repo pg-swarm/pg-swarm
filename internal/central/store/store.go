@@ -11,6 +11,9 @@ import (
 // managing satellites, cluster configurations, profiles, deployment rules,
 // health reports, and events.
 type Store interface {
+	// Health
+	Ping(ctx context.Context) error
+
 	// Satellites
 	CreateSatellite(ctx context.Context, sat *models.Satellite) error
 	GetSatellite(ctx context.Context, id uuid.UUID) (*models.Satellite, error)

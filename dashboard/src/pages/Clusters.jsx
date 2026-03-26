@@ -5,7 +5,7 @@ import { api, parseSpec, timeAgo } from '../api';
 import {
   Server, Crown, Copy, Shield,
   Pause, Play, Database, AlertCircle,
-  ExternalLink, Search, RefreshCw, X, ArrowRight
+  ExternalLink, Search, RefreshCw, X, ArrowRight, Tag
 } from 'lucide-react';
 
 /* ── Format helpers (shared with ClusterDetail) ──────── */
@@ -235,8 +235,27 @@ export default function Clusters() {
   const [diffData, setDiffData] = useState(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [applyingIds, setApplyingIds] = useState(new Set()); // clusters with in-flight applies
 
   useEffect(() => { document.title = 'Clusters - PG-Swarm'; }, []);
+
+  // Clear applying state when cluster returns to running
+  useEffect(() => {
+    if (applyingIds.size === 0) return;
+    const stillApplying = new Set();
+    applyingIds.forEach(id => {
+      const h = health.find(x => {
+        const c = clusters.find(cl => cl.id === id);
+        return c && x.cluster_name === c.name && x.satellite_id === c.satellite_id;
+      });
+      if (!h || h.state !== 'running') {
+        stillApplying.add(id);
+      }
+    });
+    if (stillApplying.size !== applyingIds.size) {
+      setApplyingIds(stillApplying);
+    }
+  }, [health, clusters]);
 
   // Load latest profile version for each profile used by clusters
   useEffect(() => {
@@ -301,6 +320,7 @@ export default function Clusters() {
     setApplying(true);
     try {
       await api.applyCluster(reviewTarget.id);
+      setApplyingIds(prev => new Set([...prev, reviewTarget.id]));
       refresh();
       closeReview();
     } catch (e) {
@@ -359,6 +379,15 @@ export default function Clusters() {
           const labelEntries = Object.entries(labels);
 
           const errorInstances = instances.filter(i => i.error_message);
+          const isApplying = applyingIds.has(c.id);
+          const hasUpdate = c.profile_id && profileLatestVersions[c.profile_id] > (c.applied_profile_version || 0);
+          // During a config apply, pods restart and health may briefly report failed/degraded.
+          // Show "restarting" instead during the grace period.
+          const recentlyUpdated = c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 5 * 60 * 1000;
+          const displayState = (st) => {
+            if ((isApplying || recentlyUpdated) && (st === 'failed' || st === 'degraded')) return 'restarting';
+            return st;
+          };
 
           return (
             <div className={`cl-card${c.paused ? ' cl-paused' : ''}`} key={c.id}>
@@ -371,6 +400,14 @@ export default function Clusters() {
                   <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>@ {sat ? sat.hostname : (c.satellite_id ? c.satellite_id.substring(0, 8) : 'unassigned')}</span>
                 </div>
                 <div style={{ width: '100%', display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center', marginTop: 2 }}>
+                  {c.profile_id && (() => {
+                    const prof = profiles.find(p => p.id === c.profile_id);
+                    return prof ? (
+                      <span className="badge badge-blue" style={{ fontSize: 10.5, gap: 3 }} title={`Profile: ${prof.name} (applied v${c.applied_profile_version || 0})`}>
+                        <Tag size={9} />{prof.name} v{c.applied_profile_version || 0}
+                      </span>
+                    ) : null;
+                  })()}
                   {labelEntries.map(([k, v]) => (
                     <span key={k} style={{
                       background: 'var(--blue-bg)', color: 'var(--blue)',
@@ -381,13 +418,13 @@ export default function Clusters() {
                     </span>
                   ))}
                   <span style={{ marginLeft: 'auto' }} />
-                  {c.profile_id && profileLatestVersions[c.profile_id] > (c.applied_profile_version || 0) && (
-                    <span className="badge badge-amber" title="Profile has been updated. Click to view and apply changes.">
+                  {hasUpdate && !isApplying && (
+                    <span className="badge badge-amber" title="Profile has been updated. Review and apply changes.">
                       <span className="dot" />Update Available
                     </span>
                   )}
-                  {h && <ClusterBadge state={h.state} />}
-                  {(!h || h.state !== c.state) && <ClusterBadge state={c.state} />}
+                  {h && <ClusterBadge state={displayState(h.state)} />}
+                  {(!h || h.state !== c.state) && <ClusterBadge state={displayState(c.state)} />}
                 </div>
               </div>
 
@@ -412,13 +449,14 @@ export default function Clusters() {
 
               {/* Footer */}
               <div className="cl-foot">
-                {c.profile_id && profileLatestVersions[c.profile_id] > (c.applied_profile_version || 0) && (
+                {hasUpdate && (
                   <button
                     className="btn-sm btn-icon-text btn-red"
                     onClick={() => openReview(c)}
+                    disabled={isApplying}
                   >
                     <RefreshCw size={12} />
-                    Apply Update
+                    {isApplying ? 'Applying...' : 'Apply Update'}
                   </button>
                 )}
                 <span style={{ marginRight: 'auto' }} />
