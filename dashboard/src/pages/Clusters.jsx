@@ -5,7 +5,7 @@ import { api, parseSpec, timeAgo } from '../api';
 import {
   Server, Crown, Copy, Shield,
   Pause, Play, Database, AlertCircle,
-  ExternalLink, Search
+  ExternalLink, Search, RefreshCw, X, ArrowRight
 } from 'lucide-react';
 
 /* ── Format helpers (shared with ClusterDetail) ──────── */
@@ -231,6 +231,10 @@ export default function Clusters() {
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState('');
   const [profileLatestVersions, setProfileLatestVersions] = useState({});
+  const [reviewTarget, setReviewTarget] = useState(null); // cluster being reviewed
+  const [diffData, setDiffData] = useState(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
 
   useEffect(() => { document.title = 'Clusters - PG-Swarm'; }, []);
 
@@ -269,6 +273,39 @@ export default function Clusters() {
       alert(e.message);
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function openReview(cluster) {
+    setReviewTarget(cluster);
+    setDiffData(null);
+    setDiffLoading(true);
+    try {
+      const data = await api.clusterProfileDiff(cluster.id);
+      setDiffData(data);
+    } catch (e) {
+      setDiffData({ error: e.message });
+    } finally {
+      setDiffLoading(false);
+    }
+  }
+
+  function closeReview() {
+    setReviewTarget(null);
+    setDiffData(null);
+    setApplying(false);
+  }
+
+  async function applyUpdate() {
+    if (!reviewTarget) return;
+    setApplying(true);
+    try {
+      await api.applyCluster(reviewTarget.id);
+      refresh();
+      closeReview();
+    } catch (e) {
+      alert(e.message);
+      setApplying(false);
     }
   }
 
@@ -375,9 +412,18 @@ export default function Clusters() {
 
               {/* Footer */}
               <div className="cl-foot">
+                {c.profile_id && profileLatestVersions[c.profile_id] > (c.applied_profile_version || 0) && (
+                  <button
+                    className="btn-sm btn-icon-text btn-red"
+                    onClick={() => openReview(c)}
+                  >
+                    <RefreshCw size={12} />
+                    Apply Update
+                  </button>
+                )}
                 <span style={{ marginRight: 'auto' }} />
                 <button
-                  className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-pause'}`}
+                  className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-amber'}`}
                   onClick={() => togglePause(c)}
                   disabled={busy === c.id}
                 >
@@ -385,9 +431,8 @@ export default function Clusters() {
                   {busy === c.id ? '...' : (c.paused ? 'Resume' : 'Pause')}
                 </button>
                 <button
-                  className="btn-sm"
+                  className="btn-sm btn-blue"
                   onClick={() => window.open('/clusters/' + c.id, '_blank')}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
                 >
                   <ExternalLink size={11} />
                   Details
@@ -404,6 +449,118 @@ export default function Clusters() {
         </div>
       )}
 
+      {/* Profile update review modal */}
+      {reviewTarget && (
+        <div className="confirm-overlay" onClick={closeReview}>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()} style={{ width: 600 }}>
+            <div className="confirm-header">
+              <h3><RefreshCw size={18} style={{ color: 'var(--amber)' }} /> Review Profile Update</h3>
+              <button className="modal-close" onClick={closeReview}><X size={18} /></button>
+            </div>
+            <div className="confirm-body">
+              {diffLoading && <p className="muted">Loading changes...</p>}
+              {diffData?.error && <p style={{ color: 'var(--red)' }}>{diffData.error}</p>}
+              {diffData && !diffData.error && !diffLoading && (
+                <>
+                  <p style={{ marginBottom: 12 }}>
+                    Cluster <strong>{diffData.cluster_name}</strong> is on profile version <strong>{diffData.applied_profile_version || 0}</strong>.
+                    Profile <strong>{diffData.profile_name}</strong> is now at version <strong>{diffData.latest_profile_version}</strong>.
+                  </p>
+
+                  {diffData.apply_strategy === 'no_change' && (
+                    <p className="muted">No configuration changes detected.</p>
+                  )}
+
+                  {diffData.immutable_errors?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ color: 'var(--red)', fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Blocked - Immutable Fields Changed</p>
+                      <DiffTable changes={diffData.immutable_errors} color="var(--red)" />
+                    </div>
+                  )}
+
+                  {diffData.full_restart_changes?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--red)' }}>Full Restart Required</p>
+                      <DiffTable changes={diffData.full_restart_changes} color="var(--red)" />
+                    </div>
+                  )}
+
+                  {diffData.sequential_changes?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--amber)' }}>Sequential Restart</p>
+                      <DiffTable changes={diffData.sequential_changes} color="var(--amber)" />
+                    </div>
+                  )}
+
+                  {diffData.reload_changes?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--green)' }}>Reload (no downtime)</p>
+                      <DiffTable changes={diffData.reload_changes} color="var(--green)" />
+                    </div>
+                  )}
+
+                  {diffData.scale_up && (
+                    <p style={{ marginTop: 8 }}>Scale up to <strong>{diffData.scale_up}</strong> replicas</p>
+                  )}
+                  {diffData.scale_down && (
+                    <p style={{ marginTop: 8 }}>Scale down to <strong>{diffData.scale_down}</strong> replicas</p>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-sm" onClick={closeReview}>Cancel</button>
+              <button
+                className="btn-sm btn-approve"
+                onClick={applyUpdate}
+                disabled={applying || diffLoading || diffData?.apply_strategy === 'no_change' || diffData?.apply_strategy === 'rejected' || diffData?.error}
+              >
+                {applying ? 'Applying...' : 'Apply Update'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </>
+  );
+}
+
+function DiffValue({ value, bg, color }) {
+  const display = value || '(unset)';
+  return (
+    <span style={{
+      background: bg, color, fontWeight: 600,
+      padding: '1px 6px', borderRadius: 4, display: 'inline-block',
+    }}>{display}</span>
+  );
+}
+
+function DiffTable({ changes, color }) {
+  return (
+    <table className="node-table" style={{ fontSize: 12 }}>
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Current</th>
+          <th></th>
+          <th>New</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changes.map((ch, i) => (
+          <tr key={i}>
+            <td className="mono" style={{ color }}>{ch.path}</td>
+            <td className="mono">
+              <DiffValue value={ch.old_value} bg="var(--red-bg)" color="var(--red)" />
+            </td>
+            <td style={{ textAlign: 'center', color: 'var(--text-secondary)' }}><ArrowRight size={12} /></td>
+            <td className="mono">
+              <DiffValue value={ch.new_value} bg="var(--green-light)" color="var(--green-dark, var(--green))" />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

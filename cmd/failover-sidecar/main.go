@@ -11,6 +11,7 @@ import (
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/failover"
+	"github.com/pg-swarm/pg-swarm/internal/shared/loglevel"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"k8s.io/client-go/kubernetes"
@@ -20,6 +21,15 @@ import (
 func main() {
 	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).
 		With().Timestamp().Str("component", "failover-sidecar").Logger()
+
+	// Set log level from env (default: info)
+	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
+		if _, err := loglevel.SetGlobalLevel(lvl); err != nil {
+			log.Warn().Str("level", lvl).Msg("invalid LOG_LEVEL, defaulting to info")
+		} else {
+			log.Info().Str("level", lvl).Msg("log level set from LOG_LEVEL env var")
+		}
+	}
 
 	podName := os.Getenv("POD_NAME")
 	namespace := os.Getenv("POD_NAMESPACE")
