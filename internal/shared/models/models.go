@@ -95,6 +95,7 @@ type ClusterSpec struct {
 	HbaRules           []string          `json:"hba_rules,omitempty"`
 	Archive            *ArchiveSpec      `json:"archive,omitempty"`             // nil = archiving disabled
 	Failover           *FailoverSpec     `json:"failover,omitempty"`            // nil = failover disabled
+	Backup             *BackupSpec       `json:"backup,omitempty"`              // nil = backups disabled
 	DeletionProtection bool              `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
 }
 
@@ -295,4 +296,162 @@ type PgParamClassification struct {
 	PgContext   string    `json:"pg_context" db:"pg_context"` // "postmaster", "sighup", etc.
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// ---------- Backup ----------
+
+// BackupSpec is the per-cluster backup configuration stored in a profile's config JSON.
+type BackupSpec struct {
+	StoreID   *uuid.UUID            `json:"store_id,omitempty"`
+	Physical  *PhysicalBackupConfig `json:"physical,omitempty"`
+	Logical   *LogicalBackupConfig  `json:"logical,omitempty"`
+	Retention *BackupRetention      `json:"retention,omitempty"`
+}
+
+// PhysicalBackupConfig defines base/incremental backup schedules and WAL archiving.
+type PhysicalBackupConfig struct {
+	Enabled               bool   `json:"enabled"`
+	BaseSchedule          string `json:"base_schedule"`          // 5-field cron
+	IncrementalSchedule   string `json:"incremental_schedule"`   // 5-field cron (optional)
+	WalArchiveEnabled     bool   `json:"wal_archive_enabled"`
+	ArchiveTimeoutSeconds int32  `json:"archive_timeout_seconds"` // default 60
+}
+
+// LogicalBackupConfig defines pg_dump backup schedules.
+type LogicalBackupConfig struct {
+	Enabled   bool     `json:"enabled"`
+	Schedule  string   `json:"schedule"`  // 5-field cron
+	Databases []string `json:"databases"` // empty = all databases
+	Format    string   `json:"format"`    // "custom", "plain", "directory"
+}
+
+// BackupRetention defines how many backups and how long WAL segments are kept.
+type BackupRetention struct {
+	BaseBackupCount        int `json:"base_backup_count"`
+	IncrementalBackupCount int `json:"incremental_backup_count"`
+	WalRetentionDays       int `json:"wal_retention_days"`
+	LogicalBackupCount     int `json:"logical_backup_count"`
+}
+
+// BackupStore represents an admin-managed backup storage destination.
+type BackupStore struct {
+	ID             uuid.UUID       `json:"id" db:"id"`
+	Name           string          `json:"name" db:"name"`
+	Description    string          `json:"description" db:"description"`
+	StoreType      string          `json:"store_type" db:"store_type"` // "gcs" or "sftp"
+	Config         json.RawMessage `json:"config" db:"config"`
+	Credentials    []byte          `json:"-" db:"credentials"`                              // encrypted, never serialized
+	CredentialsSet map[string]bool `json:"credentials_set,omitempty" db:"-"`                // computed field
+	CreatedAt      time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// GCSStoreConfig holds non-secret GCS configuration.
+type GCSStoreConfig struct {
+	Bucket     string `json:"bucket"`
+	PathPrefix string `json:"path_prefix"`
+}
+
+// SFTPStoreConfig holds non-secret SFTP configuration.
+type SFTPStoreConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	BasePath string `json:"base_path"`
+}
+
+// GCSCredentials holds the secret fields for GCS access.
+type GCSCredentials struct {
+	ServiceAccountJSON string `json:"service_account_json"`
+}
+
+// SFTPCredentials holds the secret fields for SFTP access.
+type SFTPCredentials struct {
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"private_key,omitempty"`
+}
+
+// ValidateBackupStore validates a backup store for creation/update.
+func ValidateBackupStore(s *BackupStore) error {
+	if s.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if s.StoreType != "gcs" && s.StoreType != "sftp" {
+		return fmt.Errorf("store_type must be 'gcs' or 'sftp'")
+	}
+	return nil
+}
+
+// ValidateBackupSpec validates the backup section of a profile config.
+func ValidateBackupSpec(b *BackupSpec) error {
+	if b == nil {
+		return nil
+	}
+	if b.Physical != nil && b.Physical.Enabled {
+		if b.StoreID == nil {
+			return fmt.Errorf("backup store_id is required when physical backups are enabled")
+		}
+		if b.Physical.BaseSchedule == "" {
+			return fmt.Errorf("base_schedule is required for physical backups")
+		}
+	}
+	if b.Logical != nil && b.Logical.Enabled {
+		if b.StoreID == nil {
+			return fmt.Errorf("backup store_id is required when logical backups are enabled")
+		}
+		if b.Logical.Schedule == "" {
+			return fmt.Errorf("schedule is required for logical backups")
+		}
+		if b.Logical.Format == "" {
+			b.Logical.Format = "custom"
+		}
+		if b.Logical.Format != "custom" && b.Logical.Format != "plain" && b.Logical.Format != "directory" {
+			return fmt.Errorf("logical backup format must be 'custom', 'plain', or 'directory'")
+		}
+	}
+	if b.Retention != nil {
+		if b.Retention.BaseBackupCount < 0 {
+			return fmt.Errorf("base_backup_count must be >= 0")
+		}
+		if b.Retention.WalRetentionDays < 0 {
+			return fmt.Errorf("wal_retention_days must be >= 0")
+		}
+	}
+	return nil
+}
+
+// BackupInventory represents a single backup record.
+type BackupInventory struct {
+	ID           uuid.UUID  `json:"id" db:"id"`
+	SatelliteID  uuid.UUID  `json:"satellite_id" db:"satellite_id"`
+	ClusterName  string     `json:"cluster_name" db:"cluster_name"`
+	BackupType   string     `json:"backup_type" db:"backup_type"` // "base", "incremental", "logical"
+	Status       string     `json:"status" db:"status"`           // "pending", "running", "completed", "failed", "skipped"
+	StartedAt    time.Time  `json:"started_at" db:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	SizeBytes    int64      `json:"size_bytes" db:"size_bytes"`
+	BackupPath   string     `json:"backup_path" db:"backup_path"`
+	PgVersion    string     `json:"pg_version" db:"pg_version"`
+	WalStartLSN  string     `json:"wal_start_lsn" db:"wal_start_lsn"`
+	WalEndLSN    string     `json:"wal_end_lsn" db:"wal_end_lsn"`
+	Databases    []string   `json:"databases" db:"databases"`
+	ErrorMessage string     `json:"error_message" db:"error_message"`
+	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+}
+
+// RestoreOperation represents a restore request and its progress.
+type RestoreOperation struct {
+	ID             uuid.UUID  `json:"id" db:"id"`
+	SatelliteID    uuid.UUID  `json:"satellite_id" db:"satellite_id"`
+	ClusterName    string     `json:"cluster_name" db:"cluster_name"`
+	BackupID       *uuid.UUID `json:"backup_id,omitempty" db:"backup_id"`
+	RestoreType    string     `json:"restore_type" db:"restore_type"` // "logical", "pitr"
+	RestoreMode    string     `json:"restore_mode" db:"restore_mode"` // "in_place", "new_cluster"
+	TargetTime     *time.Time `json:"target_time,omitempty" db:"target_time"`
+	TargetDatabase string     `json:"target_database" db:"target_database"`
+	Status         string     `json:"status" db:"status"` // "pending", "running", "completed", "failed"
+	ErrorMessage   string     `json:"error_message" db:"error_message"`
+	StartedAt      *time.Time `json:"started_at,omitempty" db:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
 }
