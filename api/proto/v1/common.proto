@@ -22,6 +22,7 @@ enum ClusterState {
   CLUSTER_STATE_FAILED = 4;
   CLUSTER_STATE_DELETING = 5;
   CLUSTER_STATE_PAUSED = 6;
+  CLUSTER_STATE_UPDATING = 7;
 }
 
 enum InstanceRole {

@@ -97,6 +97,12 @@ type Monitor struct {
 	// wasConnected is set true after the first successful postgres connection.
 	// Used to distinguish "PGDATA deleted at runtime" from "postgres hasn't started yet".
 	wasConnected bool
+
+	// wasPrimary tracks whether the last successful PG connection was to a
+	// primary (not in recovery). When PG goes down and wasPrimary is true,
+	// we immediately clear the role=primary label so the RW service stops
+	// routing to this pod — even before the replica detects the failure.
+	wasPrimary bool
 }
 
 // NewMonitor creates a new failover monitor.
@@ -157,7 +163,11 @@ func (m *Monitor) tick(ctx context.Context) {
 		if _, err := os.Stat(pgVersionFile); os.IsNotExist(err) {
 			log.Error().Msg("PGDATA is gone while postgres was running — yielding lease for failover; pod will re-basebackup from new primary")
 			_ = os.WriteFile(pgSwarmNeedsBasebackup, nil, 0644)
-			m.wasConnected = false // prevent repeated log spam
+			if m.wasPrimary {
+				m.labelPod(ctx, roleReplica)
+			}
+			m.wasConnected = false
+			m.wasPrimary = false
 			return
 		}
 	}
@@ -174,6 +184,16 @@ func (m *Monitor) tick(ctx context.Context) {
 		m.localPGDownCount++
 		m.consecutiveHealthyTicks = 0
 		log.Warn().Err(err).Int("down_count", m.localPGDownCount).Msg("cannot connect to local PostgreSQL")
+
+		// If we were the primary, immediately clear the primary label so the
+		// RW service stops routing traffic to this pod. This is critical:
+		// without it, the pod keeps role=primary for 15-20s until a replica
+		// promotes and relabels us — during which a restarted PG could accept
+		// divergent writes.
+		if m.wasPrimary {
+			log.Warn().Msg("primary PG is down — clearing primary label to prevent split-brain")
+			m.labelPod(ctx, roleReplica)
+		}
 		return
 	}
 	defer conn.Close(ctx)
@@ -187,6 +207,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	}
 
 	m.wasConnected = true
+	m.wasPrimary = !isInRecovery
 	if !isInRecovery {
 		m.handlePrimary(ctx, conn)
 	} else {
@@ -417,6 +438,7 @@ func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	}
 
 	log.Info().Msg("leader lease expired and primary unreachable — attempting failover")
+
 	acquired, err := m.acquireOrRenew(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to acquire lease for failover")
@@ -428,12 +450,21 @@ func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	}
 
 	log.Info().Msg("lease acquired — promoting to primary")
+
+	// CRITICAL: clear the primary label from ALL other pods BEFORE promoting.
+	// This creates a brief "no primary" window (service has no endpoints,
+	// clients get connection refused) rather than a "two primaries" window
+	// (writes go to divergent databases). No-primary is safe; two-primaries
+	// is catastrophic.
+	m.clearPrimaryLabels(ctx)
+
 	if err := m.promote(ctx); err != nil {
 		log.Error().Err(err).Msg("pg_promote() failed")
 		return
 	}
 
 	m.labelPod(ctx, rolePrimary)
+
 	m.primaryUnreachableCount = 0
 	m.walReceiverDownSince = time.Time{} // reset on promotion
 	log.Info().Msg("promotion successful — now primary")
@@ -726,6 +757,53 @@ func (m *Monitor) labelPod(ctx context.Context, role string) {
 	)
 	if err != nil {
 		log.Warn().Err(err).Str("role", role).Msg("failed to patch pod label")
+	}
+}
+
+// clearPrimaryLabels removes the primary role label from ALL pods in this
+// cluster except this pod. Called before promotion to guarantee there is never
+// more than one pod with role=primary. Creates a brief "no primary" window
+// (service returns no endpoints) which is safe — clients retry connections.
+func (m *Monitor) clearPrimaryLabels(ctx context.Context) {
+	labelSelector := fmt.Sprintf("pg-swarm.io/cluster=%s,pg-swarm.io/role=%s", m.cfg.ClusterName, rolePrimary)
+	pods, err := m.client.CoreV1().Pods(m.cfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to list primary pods for label cleanup")
+		return
+	}
+	for _, pod := range pods.Items {
+		if pod.Name == m.cfg.PodName {
+			continue // don't relabel ourselves
+		}
+		log.Info().Str("pod", pod.Name).Msg("clearing primary label from old primary")
+		m.labelRemotePod(ctx, pod.Name, roleReplica)
+	}
+}
+
+// labelRemotePod patches the role label on another pod in the same namespace.
+// Used during promotion to immediately relabel the old primary as replica,
+// eliminating the split-brain window where both pods carry the primary label.
+func (m *Monitor) labelRemotePod(ctx context.Context, podName, role string) {
+	patch := map[string]any{
+		"metadata": map[string]any{
+			"labels": map[string]string{
+				labelRole: role,
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to marshal remote label patch")
+		return
+	}
+
+	_, err = m.client.CoreV1().Pods(m.cfg.Namespace).Patch(
+		ctx, podName, types.MergePatchType, patchBytes, metav1.PatchOptions{},
+	)
+	if err != nil {
+		log.Warn().Err(err).Str("pod", podName).Str("role", role).Msg("failed to relabel remote pod")
 	}
 }
 

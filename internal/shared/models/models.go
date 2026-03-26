@@ -27,6 +27,7 @@ const (
 	ClusterStateFailed   ClusterState = "failed"
 	ClusterStatePaused   ClusterState = "paused"
 	ClusterStateDeleting ClusterState = "deleting"
+	ClusterStateUpdating ClusterState = "updating"
 )
 
 type StorageClassInfo struct {

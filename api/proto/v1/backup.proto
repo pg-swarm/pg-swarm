@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package pgswarm.v1;
+
+option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
+
+import "google/protobuf/timestamp.proto";
+
+// BackupConfig is pushed from central to satellite as part of ClusterConfig.
+// It contains everything the backup sidecar needs: schedules, retention,
+// and fully resolved storage credentials.
+message BackupConfig {
+  string               store_id    = 1;  // references BackupStore in central DB
+  string               base_path   = 2;  // "<satellite>-<namespace>-<cluster>"
+  PhysicalBackupConfig physical    = 3;
+  LogicalBackupConfig  logical     = 4;
+  BackupRetention      retention   = 5;
+  BackupDestination    destination = 6;  // resolved credentials from store
+}
+
+message PhysicalBackupConfig {
+  string base_schedule           = 1;  // 5-field cron
+  string incremental_schedule    = 2;  // 5-field cron (optional)
+  bool   wal_archive_enabled     = 3;
+  int32  archive_timeout_seconds = 4;  // PG archive_timeout
+}
+
+message LogicalBackupConfig {
+  string          schedule  = 1;  // 5-field cron
+  repeated string databases = 2;  // empty = all
+  string          format    = 3;  // "custom", "plain", "directory"
+}
+
+message BackupRetention {
+  int32 base_backup_count        = 1;
+  int32 incremental_backup_count = 2;
+  int32 wal_retention_days       = 3;
+  int32 logical_backup_count     = 4;
+}
+
+message BackupDestination {
+  string          type = 1;  // "gcs" or "sftp"
+  GCSDestination  gcs  = 2;
+  SFTPDestination sftp = 3;
+}
+
+message GCSDestination {
+  string bucket               = 1;
+  string path_prefix          = 2;
+  string service_account_json = 3;  // decrypted credential
+}
+
+message SFTPDestination {
+  string host        = 1;
+  int32  port        = 2;
+  string user        = 3;
+  string base_path   = 4;
+  string password    = 5;  // decrypted credential
+  string private_key = 6;  // decrypted credential
+}
+
+// BackupStatusReport is sent satellite -> central after each backup attempt.
+message BackupStatusReport {
+  string cluster_name                    = 1;
+  string namespace                       = 2;
+  string backup_type                     = 3;  // "base", "incremental", "logical"
+  string status                          = 4;  // "running", "completed", "failed", "skipped"
+  int64  size_bytes                      = 5;
+  string backup_path                     = 6;
+  string pg_version                      = 7;
+  string wal_start_lsn                   = 8;
+  string wal_end_lsn                     = 9;
+  string error_message                   = 10;
+  google.protobuf.Timestamp started_at   = 11;
+  google.protobuf.Timestamp completed_at = 12;
+}
+
+// RestoreCommand is sent central -> satellite to initiate a restore.
+message RestoreCommand {
+  string cluster_name                    = 1;
+  string namespace                       = 2;
+  string restore_id                      = 3;  // UUID of restore_operations row
+  string restore_type                    = 4;  // "logical", "pitr"
+  string restore_mode                    = 5;  // "in_place", "new_cluster" (PITR only)
+  string backup_id                       = 6;  // source backup UUID (logical only)
+  string backup_path                     = 7;  // storage path to backup
+  string target_database                 = 8;  // logical restore target
+  google.protobuf.Timestamp target_time  = 9;  // PITR target
+}
+
+// RestoreStatusReport is sent satellite -> central after a restore attempt.
+message RestoreStatusReport {
+  string restore_id    = 1;
+  string cluster_name  = 2;
+  string namespace     = 3;
+  string status        = 4;  // "running", "completed", "failed"
+  string error_message = 5;
+}
+
+// BackupTrigger is sent central -> satellite to trigger an ad-hoc backup.
+message BackupTrigger {
+  string cluster_name = 1;
+  string namespace    = 2;
+  string backup_type  = 3;  // "base", "incremental", "logical"
+}

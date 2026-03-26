@@ -766,6 +766,8 @@ func protoStateToModel(s pgswarmv1.ClusterState) models.ClusterState {
 		return models.ClusterStatePaused
 	case pgswarmv1.ClusterState_CLUSTER_STATE_DELETING:
 		return models.ClusterStateDeleting
+	case pgswarmv1.ClusterState_CLUSTER_STATE_UPDATING:
+		return models.ClusterStateUpdating
 	default:
 		return models.ClusterStateCreating
 	}

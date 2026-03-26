@@ -33,6 +33,8 @@ type SatelliteMessage struct {
 	//	*SatelliteMessage_StorageClassReport
 	//	*SatelliteMessage_SwitchoverResult
 	//	*SatelliteMessage_LogEntry
+	//	*SatelliteMessage_BackupStatus
+	//	*SatelliteMessage_RestoreStatus
 	//	*SatelliteMessage_SwitchoverProgress
 	//	*SatelliteMessage_DatabaseStatus
 	Payload       isSatelliteMessage_Payload `protobuf_oneof:"payload"`
@@ -140,6 +142,24 @@ func (x *SatelliteMessage) GetLogEntry() *LogEntry {
 	return nil
 }
 
+func (x *SatelliteMessage) GetBackupStatus() *BackupStatusReport {
+	if x != nil {
+		if x, ok := x.Payload.(*SatelliteMessage_BackupStatus); ok {
+			return x.BackupStatus
+		}
+	}
+	return nil
+}
+
+func (x *SatelliteMessage) GetRestoreStatus() *RestoreStatusReport {
+	if x != nil {
+		if x, ok := x.Payload.(*SatelliteMessage_RestoreStatus); ok {
+			return x.RestoreStatus
+		}
+	}
+	return nil
+}
+
 func (x *SatelliteMessage) GetSwitchoverProgress() *SwitchoverProgress {
 	if x != nil {
 		if x, ok := x.Payload.(*SatelliteMessage_SwitchoverProgress); ok {
@@ -190,9 +210,15 @@ type SatelliteMessage_LogEntry struct {
 	LogEntry *LogEntry `protobuf:"bytes,7,opt,name=log_entry,json=logEntry,proto3,oneof"`
 }
 
+type SatelliteMessage_BackupStatus struct {
+	BackupStatus *BackupStatusReport `protobuf:"bytes,8,opt,name=backup_status,json=backupStatus,proto3,oneof"`
+}
+
+type SatelliteMessage_RestoreStatus struct {
+	RestoreStatus *RestoreStatusReport `protobuf:"bytes,9,opt,name=restore_status,json=restoreStatus,proto3,oneof"`
+}
+
 type SatelliteMessage_SwitchoverProgress struct {
-	// field 8 reserved (was backup_status)
-	// field 9 reserved (was restore_status)
 	SwitchoverProgress *SwitchoverProgress `protobuf:"bytes,10,opt,name=switchover_progress,json=switchoverProgress,proto3,oneof"`
 }
 
@@ -214,6 +240,10 @@ func (*SatelliteMessage_StorageClassReport) isSatelliteMessage_Payload() {}
 func (*SatelliteMessage_SwitchoverResult) isSatelliteMessage_Payload() {}
 
 func (*SatelliteMessage_LogEntry) isSatelliteMessage_Payload() {}
+
+func (*SatelliteMessage_BackupStatus) isSatelliteMessage_Payload() {}
+
+func (*SatelliteMessage_RestoreStatus) isSatelliteMessage_Payload() {}
 
 func (*SatelliteMessage_SwitchoverProgress) isSatelliteMessage_Payload() {}
 
@@ -427,6 +457,8 @@ type CentralMessage struct {
 	//	*CentralMessage_RequestStorageClasses
 	//	*CentralMessage_Switchover
 	//	*CentralMessage_SetLogLevel
+	//	*CentralMessage_RestoreCommand
+	//	*CentralMessage_BackupTrigger
 	Payload       isCentralMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -523,6 +555,24 @@ func (x *CentralMessage) GetSetLogLevel() *SetLogLevel {
 	return nil
 }
 
+func (x *CentralMessage) GetRestoreCommand() *RestoreCommand {
+	if x != nil {
+		if x, ok := x.Payload.(*CentralMessage_RestoreCommand); ok {
+			return x.RestoreCommand
+		}
+	}
+	return nil
+}
+
+func (x *CentralMessage) GetBackupTrigger() *BackupTrigger {
+	if x != nil {
+		if x, ok := x.Payload.(*CentralMessage_BackupTrigger); ok {
+			return x.BackupTrigger
+		}
+	}
+	return nil
+}
+
 type isCentralMessage_Payload interface {
 	isCentralMessage_Payload()
 }
@@ -548,7 +598,15 @@ type CentralMessage_Switchover struct {
 }
 
 type CentralMessage_SetLogLevel struct {
-	SetLogLevel *SetLogLevel `protobuf:"bytes,6,opt,name=set_log_level,json=setLogLevel,proto3,oneof"` // field 7 reserved (was restore_command)
+	SetLogLevel *SetLogLevel `protobuf:"bytes,6,opt,name=set_log_level,json=setLogLevel,proto3,oneof"`
+}
+
+type CentralMessage_RestoreCommand struct {
+	RestoreCommand *RestoreCommand `protobuf:"bytes,7,opt,name=restore_command,json=restoreCommand,proto3,oneof"`
+}
+
+type CentralMessage_BackupTrigger struct {
+	BackupTrigger *BackupTrigger `protobuf:"bytes,20,opt,name=backup_trigger,json=backupTrigger,proto3,oneof"`
 }
 
 func (*CentralMessage_ClusterConfig) isCentralMessage_Payload() {}
@@ -562,6 +620,10 @@ func (*CentralMessage_RequestStorageClasses) isCentralMessage_Payload() {}
 func (*CentralMessage_Switchover) isCentralMessage_Payload() {}
 
 func (*CentralMessage_SetLogLevel) isCentralMessage_Payload() {}
+
+func (*CentralMessage_RestoreCommand) isCentralMessage_Payload() {}
+
+func (*CentralMessage_BackupTrigger) isCentralMessage_Payload() {}
 
 // SwitchoverRequest tells the satellite to promote a specific replica to primary.
 type SwitchoverRequest struct {
@@ -1135,18 +1197,17 @@ type ClusterConfig struct {
 	ConfigVersion int64                  `protobuf:"varint,9,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`
 	Archive       *ArchiveSpec           `protobuf:"bytes,10,opt,name=archive,proto3" json:"archive,omitempty"` // optional WAL archiving config
 	// field 11 reserved (was databases)
-	Failover           *FailoverSpec     `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`                                                                                                          // optional automatic failover sidecar
-	WalStorage         *StorageSpec      `protobuf:"bytes,13,opt,name=wal_storage,json=walStorage,proto3" json:"wal_storage,omitempty"`                                                                                    // optional separate WAL volume
-	ProfileName        string            `protobuf:"bytes,14,opt,name=profile_name,json=profileName,proto3" json:"profile_name,omitempty"`                                                                                 // name of the source profile (for K8s labels)
-	LabelSelector      map[string]string `protobuf:"bytes,15,rep,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // deployment rule label selector (for K8s labels)
-	Paused             bool              `protobuf:"varint,16,opt,name=paused,proto3" json:"paused,omitempty"`                                                                                                             // when true, RW service is removed (read-only mode)
-	DeletionProtection bool              `protobuf:"varint,17,opt,name=deletion_protection,json=deletionProtection,proto3" json:"deletion_protection,omitempty"`                                                           // when true, PVCs get a finalizer to prevent accidental deletion
-	// field 18 reserved (was backups)
-	RecoveryRules []*RecoveryRule `protobuf:"bytes,19,rep,name=recovery_rules,json=recoveryRules,proto3" json:"recovery_rules,omitempty"` // log-based recovery rules for failover sidecar
-	// field 20 reserved for future use
-	ClusterDatabases []*ClusterDatabase `protobuf:"bytes,21,rep,name=cluster_databases,json=clusterDatabases,proto3" json:"cluster_databases,omitempty"` // dynamically managed databases at cluster level
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	Failover           *FailoverSpec      `protobuf:"bytes,12,opt,name=failover,proto3" json:"failover,omitempty"`                                                                                                          // optional automatic failover sidecar
+	WalStorage         *StorageSpec       `protobuf:"bytes,13,opt,name=wal_storage,json=walStorage,proto3" json:"wal_storage,omitempty"`                                                                                    // optional separate WAL volume
+	ProfileName        string             `protobuf:"bytes,14,opt,name=profile_name,json=profileName,proto3" json:"profile_name,omitempty"`                                                                                 // name of the source profile (for K8s labels)
+	LabelSelector      map[string]string  `protobuf:"bytes,15,rep,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // deployment rule label selector (for K8s labels)
+	Paused             bool               `protobuf:"varint,16,opt,name=paused,proto3" json:"paused,omitempty"`                                                                                                             // when true, RW service is removed (read-only mode)
+	DeletionProtection bool               `protobuf:"varint,17,opt,name=deletion_protection,json=deletionProtection,proto3" json:"deletion_protection,omitempty"`                                                           // when true, PVCs get a finalizer to prevent accidental deletion
+	Backups            *BackupConfig      `protobuf:"bytes,18,opt,name=backups,proto3" json:"backups,omitempty"`                                                                                                            // backup sidecar configuration (resolved from profile + store)
+	RecoveryRules      []*RecoveryRule    `protobuf:"bytes,19,rep,name=recovery_rules,json=recoveryRules,proto3" json:"recovery_rules,omitempty"`                                                                           // log-based recovery rules for failover sidecar
+	ClusterDatabases   []*ClusterDatabase `protobuf:"bytes,21,rep,name=cluster_databases,json=clusterDatabases,proto3" json:"cluster_databases,omitempty"`                                                                  // dynamically managed databases at cluster level
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ClusterConfig) Reset() {
@@ -1289,6 +1350,13 @@ func (x *ClusterConfig) GetDeletionProtection() bool {
 		return x.DeletionProtection
 	}
 	return false
+}
+
+func (x *ClusterConfig) GetBackups() *BackupConfig {
+	if x != nil {
+		return x.Backups
+	}
+	return nil
 }
 
 func (x *ClusterConfig) GetRecoveryRules() []*RecoveryRule {
@@ -2740,7 +2808,7 @@ var File_config_proto protoreflect.FileDescriptor
 const file_config_proto_rawDesc = "" +
 	"\n" +
 	"\fconfig.proto\x12\n" +
-	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\fhealth.proto\"\x88\x05\n" +
+	"pgswarm.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\fhealth.proto\x1a\fbackup.proto\"\x99\x06\n" +
 	"\x10SatelliteMessage\x125\n" +
 	"\theartbeat\x18\x01 \x01(\v2\x15.pgswarm.v1.HeartbeatH\x00R\theartbeat\x12F\n" +
 	"\rhealth_report\x18\x02 \x01(\v2\x1f.pgswarm.v1.ClusterHealthReportH\x00R\fhealthReport\x12<\n" +
@@ -2749,7 +2817,9 @@ const file_config_proto_rawDesc = "" +
 	"config_ack\x18\x04 \x01(\v2\x15.pgswarm.v1.ConfigAckH\x00R\tconfigAck\x12R\n" +
 	"\x14storage_class_report\x18\x05 \x01(\v2\x1e.pgswarm.v1.StorageClassReportH\x00R\x12storageClassReport\x12K\n" +
 	"\x11switchover_result\x18\x06 \x01(\v2\x1c.pgswarm.v1.SwitchoverResultH\x00R\x10switchoverResult\x123\n" +
-	"\tlog_entry\x18\a \x01(\v2\x14.pgswarm.v1.LogEntryH\x00R\blogEntry\x12Q\n" +
+	"\tlog_entry\x18\a \x01(\v2\x14.pgswarm.v1.LogEntryH\x00R\blogEntry\x12E\n" +
+	"\rbackup_status\x18\b \x01(\v2\x1e.pgswarm.v1.BackupStatusReportH\x00R\fbackupStatus\x12H\n" +
+	"\x0erestore_status\x18\t \x01(\v2\x1f.pgswarm.v1.RestoreStatusReportH\x00R\rrestoreStatus\x12Q\n" +
 	"\x13switchover_progress\x18\n" +
 	" \x01(\v2\x1e.pgswarm.v1.SwitchoverProgressH\x00R\x12switchoverProgress\x12K\n" +
 	"\x0fdatabase_status\x18\f \x01(\v2 .pgswarm.v1.DatabaseStatusReportH\x00R\x0edatabaseStatusB\t\n" +
@@ -2770,7 +2840,7 @@ const file_config_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"#\n" +
 	"\vSetLogLevel\x12\x14\n" +
-	"\x05level\x18\x01 \x01(\tR\x05level\"\xc1\x03\n" +
+	"\x05level\x18\x01 \x01(\tR\x05level\"\xcc\x04\n" +
 	"\x0eCentralMessage\x12B\n" +
 	"\x0ecluster_config\x18\x01 \x01(\v2\x19.pgswarm.v1.ClusterConfigH\x00R\rclusterConfig\x12B\n" +
 	"\x0edelete_cluster\x18\x02 \x01(\v2\x19.pgswarm.v1.DeleteClusterH\x00R\rdeleteCluster\x12?\n" +
@@ -2779,7 +2849,9 @@ const file_config_proto_rawDesc = "" +
 	"\n" +
 	"switchover\x18\x05 \x01(\v2\x1d.pgswarm.v1.SwitchoverRequestH\x00R\n" +
 	"switchover\x12=\n" +
-	"\rset_log_level\x18\x06 \x01(\v2\x17.pgswarm.v1.SetLogLevelH\x00R\vsetLogLevelB\t\n" +
+	"\rset_log_level\x18\x06 \x01(\v2\x17.pgswarm.v1.SetLogLevelH\x00R\vsetLogLevel\x12E\n" +
+	"\x0frestore_command\x18\a \x01(\v2\x1a.pgswarm.v1.RestoreCommandH\x00R\x0erestoreCommand\x12B\n" +
+	"\x0ebackup_trigger\x18\x14 \x01(\v2\x19.pgswarm.v1.BackupTriggerH\x00R\rbackupTriggerB\t\n" +
 	"\apayload\"\x96\x01\n" +
 	"\x11SwitchoverRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
@@ -2821,7 +2893,7 @@ const file_config_proto_rawDesc = "" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12%\n" +
 	"\x0econfig_version\x18\x02 \x01(\x03R\rconfigVersion\x12\x18\n" +
 	"\asuccess\x18\x03 \x01(\bR\asuccess\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\x85\b\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xb9\b\n" +
 	"\rClusterConfig\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x1a\n" +
@@ -2840,7 +2912,8 @@ const file_config_proto_rawDesc = "" +
 	"\fprofile_name\x18\x0e \x01(\tR\vprofileName\x12S\n" +
 	"\x0elabel_selector\x18\x0f \x03(\v2,.pgswarm.v1.ClusterConfig.LabelSelectorEntryR\rlabelSelector\x12\x16\n" +
 	"\x06paused\x18\x10 \x01(\bR\x06paused\x12/\n" +
-	"\x13deletion_protection\x18\x11 \x01(\bR\x12deletionProtection\x12?\n" +
+	"\x13deletion_protection\x18\x11 \x01(\bR\x12deletionProtection\x122\n" +
+	"\abackups\x18\x12 \x01(\v2\x18.pgswarm.v1.BackupConfigR\abackups\x12?\n" +
 	"\x0erecovery_rules\x18\x13 \x03(\v2\x18.pgswarm.v1.RecoveryRuleR\rrecoveryRules\x12H\n" +
 	"\x11cluster_databases\x18\x15 \x03(\v2\x1b.pgswarm.v1.ClusterDatabaseR\x10clusterDatabases\x1a;\n" +
 	"\rPgParamsEntry\x12\x10\n" +
@@ -3005,7 +3078,12 @@ var file_config_proto_goTypes = []any{
 	nil,                           // 40: pgswarm.v1.ClusterConfig.LabelSelectorEntry
 	(*ClusterHealthReport)(nil),   // 41: pgswarm.v1.ClusterHealthReport
 	(*EventReport)(nil),           // 42: pgswarm.v1.EventReport
-	(*timestamppb.Timestamp)(nil), // 43: google.protobuf.Timestamp
+	(*BackupStatusReport)(nil),    // 43: pgswarm.v1.BackupStatusReport
+	(*RestoreStatusReport)(nil),   // 44: pgswarm.v1.RestoreStatusReport
+	(*timestamppb.Timestamp)(nil), // 45: google.protobuf.Timestamp
+	(*RestoreCommand)(nil),        // 46: pgswarm.v1.RestoreCommand
+	(*BackupTrigger)(nil),         // 47: pgswarm.v1.BackupTrigger
+	(*BackupConfig)(nil),          // 48: pgswarm.v1.BackupConfig
 }
 var file_config_proto_depIdxs = []int32{
 	11, // 0: pgswarm.v1.SatelliteMessage.heartbeat:type_name -> pgswarm.v1.Heartbeat
@@ -3015,53 +3093,58 @@ var file_config_proto_depIdxs = []int32{
 	8,  // 4: pgswarm.v1.SatelliteMessage.storage_class_report:type_name -> pgswarm.v1.StorageClassReport
 	6,  // 5: pgswarm.v1.SatelliteMessage.switchover_result:type_name -> pgswarm.v1.SwitchoverResult
 	2,  // 6: pgswarm.v1.SatelliteMessage.log_entry:type_name -> pgswarm.v1.LogEntry
-	7,  // 7: pgswarm.v1.SatelliteMessage.switchover_progress:type_name -> pgswarm.v1.SwitchoverProgress
-	1,  // 8: pgswarm.v1.SatelliteMessage.database_status:type_name -> pgswarm.v1.DatabaseStatusReport
-	38, // 9: pgswarm.v1.LogEntry.fields:type_name -> pgswarm.v1.LogEntry.FieldsEntry
-	43, // 10: pgswarm.v1.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
-	14, // 11: pgswarm.v1.CentralMessage.cluster_config:type_name -> pgswarm.v1.ClusterConfig
-	24, // 12: pgswarm.v1.CentralMessage.delete_cluster:type_name -> pgswarm.v1.DeleteCluster
-	12, // 13: pgswarm.v1.CentralMessage.heartbeat_ack:type_name -> pgswarm.v1.HeartbeatAck
-	10, // 14: pgswarm.v1.CentralMessage.request_storage_classes:type_name -> pgswarm.v1.RequestStorageClasses
-	5,  // 15: pgswarm.v1.CentralMessage.switchover:type_name -> pgswarm.v1.SwitchoverRequest
-	3,  // 16: pgswarm.v1.CentralMessage.set_log_level:type_name -> pgswarm.v1.SetLogLevel
-	43, // 17: pgswarm.v1.SwitchoverProgress.timestamp:type_name -> google.protobuf.Timestamp
-	9,  // 18: pgswarm.v1.StorageClassReport.storage_classes:type_name -> pgswarm.v1.StorageClassInfo
-	43, // 19: pgswarm.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	43, // 20: pgswarm.v1.HeartbeatAck.timestamp:type_name -> google.protobuf.Timestamp
-	15, // 21: pgswarm.v1.ClusterConfig.postgres:type_name -> pgswarm.v1.PostgresSpec
-	16, // 22: pgswarm.v1.ClusterConfig.storage:type_name -> pgswarm.v1.StorageSpec
-	17, // 23: pgswarm.v1.ClusterConfig.resources:type_name -> pgswarm.v1.ResourceSpec
-	39, // 24: pgswarm.v1.ClusterConfig.pg_params:type_name -> pgswarm.v1.ClusterConfig.PgParamsEntry
-	19, // 25: pgswarm.v1.ClusterConfig.archive:type_name -> pgswarm.v1.ArchiveSpec
-	22, // 26: pgswarm.v1.ClusterConfig.failover:type_name -> pgswarm.v1.FailoverSpec
-	16, // 27: pgswarm.v1.ClusterConfig.wal_storage:type_name -> pgswarm.v1.StorageSpec
-	40, // 28: pgswarm.v1.ClusterConfig.label_selector:type_name -> pgswarm.v1.ClusterConfig.LabelSelectorEntry
-	23, // 29: pgswarm.v1.ClusterConfig.recovery_rules:type_name -> pgswarm.v1.RecoveryRule
-	18, // 30: pgswarm.v1.ClusterConfig.cluster_databases:type_name -> pgswarm.v1.ClusterDatabase
-	20, // 31: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
-	21, // 32: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
-	26, // 33: pgswarm.v1.SidecarMessage.identity:type_name -> pgswarm.v1.SidecarIdentity
-	27, // 34: pgswarm.v1.SidecarMessage.heartbeat:type_name -> pgswarm.v1.SidecarHeartbeat
-	28, // 35: pgswarm.v1.SidecarMessage.command_result:type_name -> pgswarm.v1.CommandResult
-	43, // 36: pgswarm.v1.SidecarHeartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	30, // 37: pgswarm.v1.SidecarCommand.fence:type_name -> pgswarm.v1.FenceCmd
-	31, // 38: pgswarm.v1.SidecarCommand.checkpoint:type_name -> pgswarm.v1.CheckpointCmd
-	32, // 39: pgswarm.v1.SidecarCommand.promote:type_name -> pgswarm.v1.PromoteCmd
-	33, // 40: pgswarm.v1.SidecarCommand.unfence:type_name -> pgswarm.v1.UnfenceCmd
-	34, // 41: pgswarm.v1.SidecarCommand.status:type_name -> pgswarm.v1.StatusCmd
-	35, // 42: pgswarm.v1.SidecarCommand.heartbeat_ack:type_name -> pgswarm.v1.SidecarHeartbeatAck
-	36, // 43: pgswarm.v1.SidecarCommand.create_database:type_name -> pgswarm.v1.CreateDatabaseCmd
-	37, // 44: pgswarm.v1.SidecarCommand.reload_conf:type_name -> pgswarm.v1.ReloadConfCmd
-	0,  // 45: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
-	25, // 46: pgswarm.v1.SidecarStreamService.Connect:input_type -> pgswarm.v1.SidecarMessage
-	4,  // 47: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
-	29, // 48: pgswarm.v1.SidecarStreamService.Connect:output_type -> pgswarm.v1.SidecarCommand
-	47, // [47:49] is the sub-list for method output_type
-	45, // [45:47] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	43, // 7: pgswarm.v1.SatelliteMessage.backup_status:type_name -> pgswarm.v1.BackupStatusReport
+	44, // 8: pgswarm.v1.SatelliteMessage.restore_status:type_name -> pgswarm.v1.RestoreStatusReport
+	7,  // 9: pgswarm.v1.SatelliteMessage.switchover_progress:type_name -> pgswarm.v1.SwitchoverProgress
+	1,  // 10: pgswarm.v1.SatelliteMessage.database_status:type_name -> pgswarm.v1.DatabaseStatusReport
+	38, // 11: pgswarm.v1.LogEntry.fields:type_name -> pgswarm.v1.LogEntry.FieldsEntry
+	45, // 12: pgswarm.v1.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
+	14, // 13: pgswarm.v1.CentralMessage.cluster_config:type_name -> pgswarm.v1.ClusterConfig
+	24, // 14: pgswarm.v1.CentralMessage.delete_cluster:type_name -> pgswarm.v1.DeleteCluster
+	12, // 15: pgswarm.v1.CentralMessage.heartbeat_ack:type_name -> pgswarm.v1.HeartbeatAck
+	10, // 16: pgswarm.v1.CentralMessage.request_storage_classes:type_name -> pgswarm.v1.RequestStorageClasses
+	5,  // 17: pgswarm.v1.CentralMessage.switchover:type_name -> pgswarm.v1.SwitchoverRequest
+	3,  // 18: pgswarm.v1.CentralMessage.set_log_level:type_name -> pgswarm.v1.SetLogLevel
+	46, // 19: pgswarm.v1.CentralMessage.restore_command:type_name -> pgswarm.v1.RestoreCommand
+	47, // 20: pgswarm.v1.CentralMessage.backup_trigger:type_name -> pgswarm.v1.BackupTrigger
+	45, // 21: pgswarm.v1.SwitchoverProgress.timestamp:type_name -> google.protobuf.Timestamp
+	9,  // 22: pgswarm.v1.StorageClassReport.storage_classes:type_name -> pgswarm.v1.StorageClassInfo
+	45, // 23: pgswarm.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	45, // 24: pgswarm.v1.HeartbeatAck.timestamp:type_name -> google.protobuf.Timestamp
+	15, // 25: pgswarm.v1.ClusterConfig.postgres:type_name -> pgswarm.v1.PostgresSpec
+	16, // 26: pgswarm.v1.ClusterConfig.storage:type_name -> pgswarm.v1.StorageSpec
+	17, // 27: pgswarm.v1.ClusterConfig.resources:type_name -> pgswarm.v1.ResourceSpec
+	39, // 28: pgswarm.v1.ClusterConfig.pg_params:type_name -> pgswarm.v1.ClusterConfig.PgParamsEntry
+	19, // 29: pgswarm.v1.ClusterConfig.archive:type_name -> pgswarm.v1.ArchiveSpec
+	22, // 30: pgswarm.v1.ClusterConfig.failover:type_name -> pgswarm.v1.FailoverSpec
+	16, // 31: pgswarm.v1.ClusterConfig.wal_storage:type_name -> pgswarm.v1.StorageSpec
+	40, // 32: pgswarm.v1.ClusterConfig.label_selector:type_name -> pgswarm.v1.ClusterConfig.LabelSelectorEntry
+	48, // 33: pgswarm.v1.ClusterConfig.backups:type_name -> pgswarm.v1.BackupConfig
+	23, // 34: pgswarm.v1.ClusterConfig.recovery_rules:type_name -> pgswarm.v1.RecoveryRule
+	18, // 35: pgswarm.v1.ClusterConfig.cluster_databases:type_name -> pgswarm.v1.ClusterDatabase
+	20, // 36: pgswarm.v1.ArchiveSpec.archive_storage:type_name -> pgswarm.v1.ArchiveStorageSpec
+	21, // 37: pgswarm.v1.ArchiveSpec.credentials_secret:type_name -> pgswarm.v1.SecretRef
+	26, // 38: pgswarm.v1.SidecarMessage.identity:type_name -> pgswarm.v1.SidecarIdentity
+	27, // 39: pgswarm.v1.SidecarMessage.heartbeat:type_name -> pgswarm.v1.SidecarHeartbeat
+	28, // 40: pgswarm.v1.SidecarMessage.command_result:type_name -> pgswarm.v1.CommandResult
+	45, // 41: pgswarm.v1.SidecarHeartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	30, // 42: pgswarm.v1.SidecarCommand.fence:type_name -> pgswarm.v1.FenceCmd
+	31, // 43: pgswarm.v1.SidecarCommand.checkpoint:type_name -> pgswarm.v1.CheckpointCmd
+	32, // 44: pgswarm.v1.SidecarCommand.promote:type_name -> pgswarm.v1.PromoteCmd
+	33, // 45: pgswarm.v1.SidecarCommand.unfence:type_name -> pgswarm.v1.UnfenceCmd
+	34, // 46: pgswarm.v1.SidecarCommand.status:type_name -> pgswarm.v1.StatusCmd
+	35, // 47: pgswarm.v1.SidecarCommand.heartbeat_ack:type_name -> pgswarm.v1.SidecarHeartbeatAck
+	36, // 48: pgswarm.v1.SidecarCommand.create_database:type_name -> pgswarm.v1.CreateDatabaseCmd
+	37, // 49: pgswarm.v1.SidecarCommand.reload_conf:type_name -> pgswarm.v1.ReloadConfCmd
+	0,  // 50: pgswarm.v1.SatelliteStreamService.Connect:input_type -> pgswarm.v1.SatelliteMessage
+	25, // 51: pgswarm.v1.SidecarStreamService.Connect:input_type -> pgswarm.v1.SidecarMessage
+	4,  // 52: pgswarm.v1.SatelliteStreamService.Connect:output_type -> pgswarm.v1.CentralMessage
+	29, // 53: pgswarm.v1.SidecarStreamService.Connect:output_type -> pgswarm.v1.SidecarCommand
+	52, // [52:54] is the sub-list for method output_type
+	50, // [50:52] is the sub-list for method input_type
+	50, // [50:50] is the sub-list for extension type_name
+	50, // [50:50] is the sub-list for extension extendee
+	0,  // [0:50] is the sub-list for field type_name
 }
 
 func init() { file_config_proto_init() }
@@ -3070,6 +3153,7 @@ func file_config_proto_init() {
 		return
 	}
 	file_health_proto_init()
+	file_backup_proto_init()
 	file_config_proto_msgTypes[0].OneofWrappers = []any{
 		(*SatelliteMessage_Heartbeat)(nil),
 		(*SatelliteMessage_HealthReport)(nil),
@@ -3078,6 +3162,8 @@ func file_config_proto_init() {
 		(*SatelliteMessage_StorageClassReport)(nil),
 		(*SatelliteMessage_SwitchoverResult)(nil),
 		(*SatelliteMessage_LogEntry)(nil),
+		(*SatelliteMessage_BackupStatus)(nil),
+		(*SatelliteMessage_RestoreStatus)(nil),
 		(*SatelliteMessage_SwitchoverProgress)(nil),
 		(*SatelliteMessage_DatabaseStatus)(nil),
 	}
@@ -3088,6 +3174,8 @@ func file_config_proto_init() {
 		(*CentralMessage_RequestStorageClasses)(nil),
 		(*CentralMessage_Switchover)(nil),
 		(*CentralMessage_SetLogLevel)(nil),
+		(*CentralMessage_RestoreCommand)(nil),
+		(*CentralMessage_BackupTrigger)(nil),
 	}
 	file_config_proto_msgTypes[25].OneofWrappers = []any{
 		(*SidecarMessage_Identity)(nil),

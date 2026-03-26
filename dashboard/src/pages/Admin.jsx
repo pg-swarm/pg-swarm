@@ -3,12 +3,12 @@ import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api } from '../api';
 import {
-  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database, Shield, SlidersHorizontal
+  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database, Shield, SlidersHorizontal, HardDrive
 } from 'lucide-react';
 import RecoveryRulesTab from '../components/RecoveryRulesTab';
 
 export default function Admin() {
-  const { postgresVersions, postgresVariants, storageTiers, refresh } = useData();
+  const { postgresVersions, postgresVariants, storageTiers, backupStores, refresh } = useData();
   const toast = useToast();
 
   useEffect(() => { document.title = 'Admin - PG-Swarm'; }, []);
@@ -20,6 +20,7 @@ export default function Admin() {
     { key: 'versions', label: 'PG Versions', icon: <Database size={14} /> },
     { key: 'recovery', label: 'Recovery Rules', icon: <Shield size={14} /> },
     { key: 'pgparams', label: 'Update Rules', icon: <SlidersHorizontal size={14} /> },
+    { key: 'backupstores', label: 'Backup Stores', icon: <HardDrive size={14} /> },
   ];
 
   return (
@@ -42,6 +43,7 @@ export default function Admin() {
       {activeTab === 'versions' && <VersionsTab postgresVersions={postgresVersions} postgresVariants={postgresVariants} refresh={refresh} toast={toast} />}
       {activeTab === 'recovery' && <RecoveryRulesTab toast={toast} />}
       {activeTab === 'pgparams' && <PgParamClassificationsTab toast={toast} />}
+      {activeTab === 'backupstores' && <BackupStoresTab backupStores={backupStores} refresh={refresh} toast={toast} />}
       </div>
     </>
   );
@@ -479,6 +481,213 @@ function PgParamClassificationsTab({ toast }) {
             {filtered.length === 0 && term && (
               <tr><td colSpan={5} className="sm muted" style={{ textAlign: 'center', padding: 20 }}>No parameters matching "{search}"</td></tr>
             )}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
+// --- Backup Stores Tab ---
+
+const emptyBackupStoreForm = () => ({
+  name: '', description: '', store_type: 'gcs',
+  config: { bucket: '', path_prefix: '' },
+  credentials: {},
+});
+
+function BackupStoresTab({ backupStores, refresh, toast }) {
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(emptyBackupStoreForm());
+
+  function startCreate() {
+    setForm(emptyBackupStoreForm());
+    setEditing('new');
+  }
+
+  function startEdit(bs) {
+    const cfg = typeof bs.config === 'string' ? JSON.parse(bs.config) : (bs.config || {});
+    setForm({
+      name: bs.name,
+      description: bs.description,
+      store_type: bs.store_type,
+      config: bs.store_type === 'gcs'
+        ? { bucket: cfg.bucket || '', path_prefix: cfg.path_prefix || '' }
+        : { host: cfg.host || '', port: cfg.port || 22, user: cfg.user || '', base_path: cfg.base_path || '' },
+      credentials: {},
+    });
+    setEditing(bs.id);
+  }
+
+  function changeType(type) {
+    setForm(f => ({
+      ...f,
+      store_type: type,
+      config: type === 'gcs'
+        ? { bucket: '', path_prefix: '' }
+        : { host: '', port: 22, user: '', base_path: '' },
+      credentials: {},
+    }));
+  }
+
+  async function save() {
+    try {
+      const payload = {
+        name: form.name,
+        description: form.description,
+        store_type: form.store_type,
+        config: form.config,
+      };
+      // Only include credentials if any field is non-empty
+      const creds = form.credentials || {};
+      const hasCredentials = Object.values(creds).some(v => v && v.length > 0);
+      if (hasCredentials) {
+        payload.credentials = creds;
+      }
+
+      if (editing === 'new') {
+        await api.createBackupStore(payload);
+        toast('Backup store created');
+      } else {
+        await api.updateBackupStore(editing, payload);
+        toast('Backup store updated');
+      }
+      setEditing(null);
+      refresh();
+    } catch (e) {
+      toast('Save failed: ' + e.message, true);
+    }
+  }
+
+  async function remove(id) {
+    try {
+      await api.deleteBackupStore(id);
+      toast('Backup store removed');
+      refresh();
+    } catch (e) {
+      toast('Delete failed: ' + e.message, true);
+    }
+  }
+
+  const typeBadge = (type) =>
+    type === 'gcs'
+      ? <span className="badge badge-blue"><span className="dot" />GCS</span>
+      : <span className="badge badge-amber"><span className="dot" />SFTP</span>;
+
+  const credBadges = (bs) => {
+    const cs = bs.credentials_set || {};
+    const entries = Object.entries(cs);
+    if (entries.length === 0) return <span className="sm muted">none</span>;
+    return entries.map(([key, set]) => (
+      <span key={key} className={'badge ' + (set ? 'badge-green' : 'badge-gray')} style={{ marginRight: 4 }}>
+        {key.replace(/_/g, ' ')}
+      </span>
+    ));
+  };
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px' }}>
+        <span className="sm muted">Configure GCS or SFTP destinations for PostgreSQL backups. Credentials are stored encrypted.</span>
+        <button className="btn btn-approve" onClick={startCreate}><Plus size={14} /> Add Store</button>
+      </div>
+
+      {editing && (
+        <div className="admin-form-bar" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <input className="input" placeholder="Name" value={form.name}
+            onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={{ width: 160 }} />
+          <input className="input" placeholder="Description" value={form.description}
+            onChange={e => setForm(f => ({ ...f, description: e.target.value }))} style={{ width: 200 }} />
+          <select className="input" value={form.store_type} onChange={e => changeType(e.target.value)}
+            disabled={editing !== 'new'} style={{ width: 100 }}>
+            <option value="gcs">GCS</option>
+            <option value="sftp">SFTP</option>
+          </select>
+
+          {form.store_type === 'gcs' ? (
+            <>
+              <input className="input" placeholder="Bucket" value={form.config.bucket || ''}
+                onChange={e => setForm(f => ({ ...f, config: { ...f.config, bucket: e.target.value } }))} style={{ width: 180 }} />
+              <input className="input" placeholder="Path prefix" value={form.config.path_prefix || ''}
+                onChange={e => setForm(f => ({ ...f, config: { ...f.config, path_prefix: e.target.value } }))} style={{ flex: 1 }} />
+              <div style={{ width: '100%', display: 'flex', gap: 8, alignItems: 'start' }}>
+                <textarea className="input" placeholder="Service account JSON (paste or upload)" rows={25}
+                  value={form.credentials.service_account_json || ''}
+                  onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, service_account_json: e.target.value } }))}
+                  style={{ flex: 1, minHeight: 375, fontFamily: 'monospace', fontSize: 12 }} />
+                <label className="btn btn-sm" style={{ cursor: 'pointer', whiteSpace: 'nowrap', marginTop: 2 }}>
+                  Upload JSON
+                  <input type="file" accept=".json,application/json" hidden
+                    onChange={e => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = () => setForm(f => ({ ...f, credentials: { ...f.credentials, service_account_json: reader.result } }));
+                      reader.readAsText(file);
+                      e.target.value = '';
+                    }} />
+                </label>
+              </div>
+            </>
+          ) : (
+            <>
+              <input className="input" placeholder="Host" value={form.config.host || ''}
+                onChange={e => setForm(f => ({ ...f, config: { ...f.config, host: e.target.value } }))} style={{ width: 160 }} />
+              <input className="input" placeholder="Port" type="number" value={form.config.port || 22}
+                onChange={e => setForm(f => ({ ...f, config: { ...f.config, port: parseInt(e.target.value) || 22 } }))} style={{ width: 80 }} />
+              <input className="input" placeholder="User" value={form.config.user || ''}
+                onChange={e => setForm(f => ({ ...f, config: { ...f.config, user: e.target.value } }))} style={{ width: 120 }} />
+              <input className="input" placeholder="Base path" value={form.config.base_path || ''}
+                onChange={e => setForm(f => ({ ...f, config: { ...f.config, base_path: e.target.value } }))} style={{ flex: 1 }} />
+              <input className="input" placeholder="Password (leave empty to keep)" type="password"
+                value={form.credentials.password || ''}
+                onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, password: e.target.value } }))} style={{ width: 180 }} />
+              <textarea className="input" placeholder="Private key (PEM)" rows={1}
+                value={form.credentials.private_key || ''}
+                onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, private_key: e.target.value } }))}
+                style={{ width: '100%', minHeight: 36, fontFamily: 'monospace', fontSize: 12 }} />
+            </>
+          )}
+
+          <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
+            <button className="btn btn-approve" onClick={save}><Save size={13} /> Save</button>
+            <button className="btn btn-reject" onClick={() => setEditing(null)}><X size={13} /> Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {backupStores.length === 0 && !editing ? (
+        <div className="empty-state" style={{ padding: '40px 20px' }}>
+          <HardDrive size={48} strokeWidth={1.2} />
+          <h3>No backup stores configured</h3>
+          <p>Add a GCS bucket or SFTP server to store PostgreSQL backups.</p>
+        </div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th>Credentials</th>
+              <th style={{ width: 180 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {backupStores.map(bs => (
+              <tr key={bs.id}>
+                <td className="mono">{bs.name}</td>
+                <td>{typeBadge(bs.store_type)}</td>
+                <td className="sm muted">{bs.description || '-'}</td>
+                <td>{credBadges(bs)}</td>
+                <td>
+                  <div className="actions">
+                    <button className="btn btn-sm" onClick={() => startEdit(bs)}><Pencil size={11} /> Edit</button>
+                    <button className="btn btn-sm btn-reject" onClick={() => remove(bs.id)}><Trash2 size={11} /> Delete</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}

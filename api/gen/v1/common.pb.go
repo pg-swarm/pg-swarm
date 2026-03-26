@@ -87,6 +87,7 @@ const (
 	ClusterState_CLUSTER_STATE_FAILED      ClusterState = 4
 	ClusterState_CLUSTER_STATE_DELETING    ClusterState = 5
 	ClusterState_CLUSTER_STATE_PAUSED      ClusterState = 6
+	ClusterState_CLUSTER_STATE_UPDATING    ClusterState = 7
 )
 
 // Enum value maps for ClusterState.
@@ -99,6 +100,7 @@ var (
 		4: "CLUSTER_STATE_FAILED",
 		5: "CLUSTER_STATE_DELETING",
 		6: "CLUSTER_STATE_PAUSED",
+		7: "CLUSTER_STATE_UPDATING",
 	}
 	ClusterState_value = map[string]int32{
 		"CLUSTER_STATE_UNSPECIFIED": 0,
@@ -108,6 +110,7 @@ var (
 		"CLUSTER_STATE_FAILED":      4,
 		"CLUSTER_STATE_DELETING":    5,
 		"CLUSTER_STATE_PAUSED":      6,
+		"CLUSTER_STATE_UPDATING":    7,
 	}
 )
 
@@ -201,7 +204,7 @@ const file_common_proto_rawDesc = "" +
 	"\x17SATELLITE_STATE_PENDING\x10\x01\x12\x1c\n" +
 	"\x18SATELLITE_STATE_APPROVED\x10\x02\x12\x1d\n" +
 	"\x19SATELLITE_STATE_CONNECTED\x10\x03\x12 \n" +
-	"\x1cSATELLITE_STATE_DISCONNECTED\x10\x04*\xd0\x01\n" +
+	"\x1cSATELLITE_STATE_DISCONNECTED\x10\x04*\xec\x01\n" +
 	"\fClusterState\x12\x1d\n" +
 	"\x19CLUSTER_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16CLUSTER_STATE_CREATING\x10\x01\x12\x19\n" +
@@ -209,7 +212,8 @@ const file_common_proto_rawDesc = "" +
 	"\x16CLUSTER_STATE_DEGRADED\x10\x03\x12\x18\n" +
 	"\x14CLUSTER_STATE_FAILED\x10\x04\x12\x1a\n" +
 	"\x16CLUSTER_STATE_DELETING\x10\x05\x12\x18\n" +
-	"\x14CLUSTER_STATE_PAUSED\x10\x06*\x85\x01\n" +
+	"\x14CLUSTER_STATE_PAUSED\x10\x06\x12\x1a\n" +
+	"\x16CLUSTER_STATE_UPDATING\x10\a*\x85\x01\n" +
 	"\fInstanceRole\x12\x1d\n" +
 	"\x19INSTANCE_ROLE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15INSTANCE_ROLE_PRIMARY\x10\x01\x12\x19\n" +

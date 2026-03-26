@@ -173,6 +173,12 @@ func (h *WSHub) fetchState() map[string]interface{} {
 	if v, err := s.ListRecoveryRuleSets(ctx); err == nil {
 		state["recoveryRuleSets"] = v
 	}
+	if v, err := s.ListBackupStores(ctx); err == nil {
+		for _, bs := range v {
+			h.server.computeCredentialsSet(bs)
+		}
+		state["backupStores"] = v
+	}
 
 	if h.server.opsTracker != nil {
 		if ops := h.server.opsTracker.GetActiveOps(); len(ops) > 0 {

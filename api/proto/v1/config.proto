@@ -6,6 +6,7 @@ option go_package = "github.com/pg-swarm/pg-swarm/api/gen/v1;pgswarmv1";
 
 import "google/protobuf/timestamp.proto";
 import "health.proto";
+import "backup.proto";
 
 service SatelliteStreamService {
   rpc Connect(stream SatelliteMessage) returns (stream CentralMessage);
@@ -20,8 +21,8 @@ message SatelliteMessage {
     StorageClassReport storage_class_report = 5;
     SwitchoverResult switchover_result = 6;
     LogEntry log_entry = 7;
-    // field 8 reserved (was backup_status)
-    // field 9 reserved (was restore_status)
+    BackupStatusReport backup_status = 8;
+    RestoreStatusReport restore_status = 9;
     SwitchoverProgress switchover_progress = 10;
     // field 11 reserved
     DatabaseStatusReport database_status = 12;
@@ -58,7 +59,8 @@ message CentralMessage {
     RequestStorageClasses request_storage_classes = 4;
     SwitchoverRequest switchover = 5;
     SetLogLevel set_log_level = 6;
-    // field 7 reserved (was restore_command)
+    RestoreCommand restore_command = 7;
+    BackupTrigger backup_trigger = 20;
   }
 }
 
@@ -138,9 +140,8 @@ message ClusterConfig {
   map<string, string> label_selector = 15;       // deployment rule label selector (for K8s labels)
   bool paused = 16;                              // when true, RW service is removed (read-only mode)
   bool deletion_protection = 17;                  // when true, PVCs get a finalizer to prevent accidental deletion
-  // field 18 reserved (was backups)
+  BackupConfig backups = 18;                        // backup sidecar configuration (resolved from profile + store)
   repeated RecoveryRule recovery_rules = 19;       // log-based recovery rules for failover sidecar
-  // field 20 reserved for future use
   repeated ClusterDatabase cluster_databases = 21; // dynamically managed databases at cluster level
 }
 
