@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Logger()
+	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Str("component", "satellite").Logger()
 
 	// Set initial log level from env (default: info)
 	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {

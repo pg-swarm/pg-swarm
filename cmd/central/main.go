@@ -15,11 +15,21 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/central/registry"
 	"github.com/pg-swarm/pg-swarm/internal/central/server"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
+	"github.com/pg-swarm/pg-swarm/internal/shared/loglevel"
 )
 
 func main() {
 	// Setup zerolog with console writer
-	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Logger()
+	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Str("component", "central").Logger()
+
+	// Set log level from env (default: info)
+	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
+		if _, err := loglevel.SetGlobalLevel(lvl); err != nil {
+			log.Warn().Str("level", lvl).Msg("invalid LOG_LEVEL, defaulting to info")
+		} else {
+			log.Info().Str("level", lvl).Msg("log level set from LOG_LEVEL env var")
+		}
+	}
 
 	// Read config from env
 	dbURL := buildDatabaseURL()

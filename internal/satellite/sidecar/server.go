@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,7 +37,7 @@ func NewServer(manager *SidecarStreamManager, validate TokenValidator) *Server {
 	}
 
 	s.server = grpc.NewServer(
-		grpc.StreamInterceptor(s.streamAuthInterceptor),
+		grpc.ChainStreamInterceptor(s.streamLoggingInterceptor, s.streamAuthInterceptor),
 	)
 
 	pgswarmv1.RegisterSidecarStreamServiceServer(s.server, s)
@@ -147,6 +149,29 @@ func (s *Server) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream, in
 	}
 
 	return handler(srv, ss)
+}
+
+// streamLoggingInterceptor logs sidecar stream lifecycle (open/close).
+func (s *Server) streamLoggingInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	log.Info().
+		Str("grpc_method", info.FullMethod).
+		Msg("sidecar stream opened")
+
+	start := time.Now()
+	err := handler(srv, ss)
+	duration := time.Since(start)
+
+	level := zerolog.InfoLevel
+	if err != nil {
+		level = zerolog.WarnLevel
+	}
+	log.WithLevel(level).
+		Str("grpc_method", info.FullMethod).
+		Dur("duration", duration).
+		Err(err).
+		Msg("sidecar stream closed")
+
+	return err
 }
 
 // Manager returns the stream manager (for wiring into other components).

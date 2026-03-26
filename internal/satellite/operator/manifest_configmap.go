@@ -15,18 +15,72 @@ import (
 // mandatoryPgParams are HA-required PostgreSQL parameters that are always set.
 // User pg_params can override these.
 var mandatoryPgParams = map[string]string{
-	"listen_addresses":          "'*'",
-	"wal_level":                 "replica",
-	"max_wal_senders":           "10",
-	"max_replication_slots":     "10",
-	"hot_standby":               "on",
-	"wal_log_hints":             "on",
-	"max_slot_wal_keep_size":    "-1",
-	"recovery_target_timeline":  "'latest'",
-	"wal_keep_size":             "'512MB'",
-	"shared_preload_libraries":  "'pg_stat_statements'",
-	"pg_stat_statements.track":  "all",
-	"password_encryption":       "'scram-sha-256'",
+	"listen_addresses":         "'*'",
+	"wal_level":                "replica",
+	"max_wal_senders":          "10",
+	"max_replication_slots":    "10",
+	"hot_standby":              "on",
+	"wal_log_hints":            "on",
+	"max_slot_wal_keep_size":   "-1",
+	"recovery_target_timeline": "'latest'",
+	"wal_keep_size":            "'512MB'",
+	"shared_preload_libraries": "'pg_stat_statements'",
+	"pg_stat_statements.track": "all",
+	"password_encryption":      "'scram-sha-256'",
+}
+
+// defaultPgParams are sensible production defaults applied to every cluster.
+// Profile pg_params override these. mandatoryPgParams override everything.
+var defaultPgParams = map[string]string{
+	// Connections
+	"max_connections": "100",
+	// Memory
+	"shared_buffers":       "256MB",
+	"effective_cache_size": "4GB",
+	"work_mem":             "4MB",
+	"maintenance_work_mem": "128MB",
+	"huge_pages":           "try",
+	// WAL
+	"wal_buffers":            "16MB",
+	"min_wal_size":           "1GB",
+	"max_wal_size":           "4GB",
+	"checkpoint_timeout":     "15min",
+	"checkpoint_completion_target": "0.9",
+	// Query Planner
+	"random_page_cost":          "1.1",
+	"seq_page_cost":             "1.0",
+	"effective_io_concurrency":  "200",
+	"default_statistics_target": "100",
+	"jit":                       "on",
+	// Replication
+	"track_commit_timestamp": "on",
+	"synchronous_commit":     "on",
+	"wal_receiver_timeout":   "60s",
+	"wal_sender_timeout":     "60s",
+	// Logging
+	"log_min_duration_statement": "200",
+	"log_statement":              "none",
+	"log_line_prefix":            "'%m [%p] %q[user=%u,db=%d] '",
+	"log_checkpoints":            "on",
+	"log_connections":             "off",
+	"log_disconnections":          "off",
+	"log_lock_waits":              "off",
+	"log_temp_files":              "-1",
+	"log_autovacuum_min_duration": "-1",
+	// Autovacuum
+	"autovacuum":                       "on",
+	"autovacuum_max_workers":           "3",
+	"autovacuum_naptime":               "1min",
+	"autovacuum_vacuum_threshold":      "50",
+	"autovacuum_vacuum_scale_factor":   "0.2",
+	"autovacuum_analyze_threshold":     "50",
+	"autovacuum_analyze_scale_factor":  "0.1",
+	// Client Defaults
+	"timezone":                              "'UTC'",
+	"statement_timeout":                     "0",
+	"idle_in_transaction_session_timeout":   "0",
+	"lock_timeout":                          "0",
+	"default_text_search_config":            "'pg_catalog.english'",
 }
 
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.
@@ -103,14 +157,20 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	}
 }
 
-// buildPostgresConf generates the postgresql.conf content by merging mandatory HA params with user overrides.
+// buildPostgresConf generates the postgresql.conf content by layering:
+// 1. Production defaults (lowest priority)
+// 2. Archive settings
+// 3. User/profile pg_params (override defaults)
+// 4. Mandatory HA params (highest priority, cannot be overridden)
 func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec) string {
-	merged := make(map[string]string, len(mandatoryPgParams)+len(userParams)+4)
-	for k, v := range mandatoryPgParams {
+	merged := make(map[string]string, len(defaultPgParams)+len(mandatoryPgParams)+len(userParams)+4)
+
+	// 1. Production defaults (lowest priority)
+	for k, v := range defaultPgParams {
 		merged[k] = v
 	}
 
-	// Archive settings (before user params so user can override)
+	// 2. Archive settings
 	if archive != nil && archive.Mode == "custom" {
 		merged["archive_mode"] = "on"
 		timeout := archive.ArchiveTimeoutSeconds
@@ -123,8 +183,13 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		merged["archive_mode"] = "off"
 	}
 
-	// User params override everything (escape hatch)
+	// 3. User/profile params override defaults
 	for k, v := range userParams {
+		merged[k] = v
+	}
+
+	// 4. Mandatory HA params (highest priority — cannot be overridden)
+	for k, v := range mandatoryPgParams {
 		merged[k] = v
 	}
 

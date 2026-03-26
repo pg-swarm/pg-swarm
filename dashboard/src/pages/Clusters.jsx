@@ -5,7 +5,7 @@ import { api, parseSpec, timeAgo } from '../api';
 import {
   Server, Crown, Copy, Shield,
   Pause, Play, Database, AlertCircle,
-  ExternalLink, Search
+  ExternalLink, Search, RefreshCw, X, ArrowRight, Tag
 } from 'lucide-react';
 
 /* ── Format helpers (shared with ClusterDetail) ──────── */
@@ -231,8 +231,31 @@ export default function Clusters() {
   const [busy, setBusy] = useState(null);
   const [search, setSearch] = useState('');
   const [profileLatestVersions, setProfileLatestVersions] = useState({});
+  const [reviewTarget, setReviewTarget] = useState(null); // cluster being reviewed
+  const [diffData, setDiffData] = useState(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyingIds, setApplyingIds] = useState(new Set()); // clusters with in-flight applies
 
   useEffect(() => { document.title = 'Clusters - PG-Swarm'; }, []);
+
+  // Clear applying state when cluster returns to running
+  useEffect(() => {
+    if (applyingIds.size === 0) return;
+    const stillApplying = new Set();
+    applyingIds.forEach(id => {
+      const h = health.find(x => {
+        const c = clusters.find(cl => cl.id === id);
+        return c && x.cluster_name === c.name && x.satellite_id === c.satellite_id;
+      });
+      if (!h || h.state !== 'running') {
+        stillApplying.add(id);
+      }
+    });
+    if (stillApplying.size !== applyingIds.size) {
+      setApplyingIds(stillApplying);
+    }
+  }, [health, clusters]);
 
   // Load latest profile version for each profile used by clusters
   useEffect(() => {
@@ -269,6 +292,40 @@ export default function Clusters() {
       alert(e.message);
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function openReview(cluster) {
+    setReviewTarget(cluster);
+    setDiffData(null);
+    setDiffLoading(true);
+    try {
+      const data = await api.clusterProfileDiff(cluster.id);
+      setDiffData(data);
+    } catch (e) {
+      setDiffData({ error: e.message });
+    } finally {
+      setDiffLoading(false);
+    }
+  }
+
+  function closeReview() {
+    setReviewTarget(null);
+    setDiffData(null);
+    setApplying(false);
+  }
+
+  async function applyUpdate() {
+    if (!reviewTarget) return;
+    setApplying(true);
+    try {
+      await api.applyCluster(reviewTarget.id);
+      setApplyingIds(prev => new Set([...prev, reviewTarget.id]));
+      refresh();
+      closeReview();
+    } catch (e) {
+      alert(e.message);
+      setApplying(false);
     }
   }
 
@@ -322,6 +379,15 @@ export default function Clusters() {
           const labelEntries = Object.entries(labels);
 
           const errorInstances = instances.filter(i => i.error_message);
+          const isApplying = applyingIds.has(c.id);
+          const hasUpdate = c.profile_id && profileLatestVersions[c.profile_id] > (c.applied_profile_version || 0);
+          // During a config apply, pods restart and health may briefly report failed/degraded.
+          // Show "restarting" instead during the grace period.
+          const recentlyUpdated = c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 5 * 60 * 1000;
+          const displayState = (st) => {
+            if ((isApplying || recentlyUpdated) && (st === 'failed' || st === 'degraded')) return 'restarting';
+            return st;
+          };
 
           return (
             <div className={`cl-card${c.paused ? ' cl-paused' : ''}`} key={c.id}>
@@ -334,6 +400,14 @@ export default function Clusters() {
                   <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}>@ {sat ? sat.hostname : (c.satellite_id ? c.satellite_id.substring(0, 8) : 'unassigned')}</span>
                 </div>
                 <div style={{ width: '100%', display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center', marginTop: 2 }}>
+                  {c.profile_id && (() => {
+                    const prof = profiles.find(p => p.id === c.profile_id);
+                    return prof ? (
+                      <span className="badge badge-blue" style={{ fontSize: 10.5, gap: 3 }} title={`Profile: ${prof.name} (applied v${c.applied_profile_version || 0})`}>
+                        <Tag size={9} />{prof.name} v{c.applied_profile_version || 0}
+                      </span>
+                    ) : null;
+                  })()}
                   {labelEntries.map(([k, v]) => (
                     <span key={k} style={{
                       background: 'var(--blue-bg)', color: 'var(--blue)',
@@ -344,13 +418,13 @@ export default function Clusters() {
                     </span>
                   ))}
                   <span style={{ marginLeft: 'auto' }} />
-                  {c.profile_id && profileLatestVersions[c.profile_id] > (c.applied_profile_version || 0) && (
-                    <span className="badge badge-amber" title="Profile has been updated. Click to view and apply changes.">
+                  {hasUpdate && !isApplying && (
+                    <span className="badge badge-amber" title="Profile has been updated. Review and apply changes.">
                       <span className="dot" />Update Available
                     </span>
                   )}
-                  {h && <ClusterBadge state={h.state} />}
-                  {(!h || h.state !== c.state) && <ClusterBadge state={c.state} />}
+                  {h && <ClusterBadge state={displayState(h.state)} />}
+                  {(!h || h.state !== c.state) && <ClusterBadge state={displayState(c.state)} />}
                 </div>
               </div>
 
@@ -375,9 +449,19 @@ export default function Clusters() {
 
               {/* Footer */}
               <div className="cl-foot">
+                {hasUpdate && (
+                  <button
+                    className="btn-sm btn-icon-text btn-red"
+                    onClick={() => openReview(c)}
+                    disabled={isApplying}
+                  >
+                    <RefreshCw size={12} />
+                    {isApplying ? 'Applying...' : 'Apply Update'}
+                  </button>
+                )}
                 <span style={{ marginRight: 'auto' }} />
                 <button
-                  className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-pause'}`}
+                  className={`btn-sm btn-icon-text ${c.paused ? 'btn-resume' : 'btn-amber'}`}
                   onClick={() => togglePause(c)}
                   disabled={busy === c.id}
                 >
@@ -385,9 +469,8 @@ export default function Clusters() {
                   {busy === c.id ? '...' : (c.paused ? 'Resume' : 'Pause')}
                 </button>
                 <button
-                  className="btn-sm"
+                  className="btn-sm btn-blue"
                   onClick={() => window.open('/clusters/' + c.id, '_blank')}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
                 >
                   <ExternalLink size={11} />
                   Details
@@ -404,6 +487,118 @@ export default function Clusters() {
         </div>
       )}
 
+      {/* Profile update review modal */}
+      {reviewTarget && (
+        <div className="confirm-overlay" onClick={closeReview}>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()} style={{ width: 600 }}>
+            <div className="confirm-header">
+              <h3><RefreshCw size={18} style={{ color: 'var(--amber)' }} /> Review Profile Update</h3>
+              <button className="modal-close" onClick={closeReview}><X size={18} /></button>
+            </div>
+            <div className="confirm-body">
+              {diffLoading && <p className="muted">Loading changes...</p>}
+              {diffData?.error && <p style={{ color: 'var(--red)' }}>{diffData.error}</p>}
+              {diffData && !diffData.error && !diffLoading && (
+                <>
+                  <p style={{ marginBottom: 12 }}>
+                    Cluster <strong>{diffData.cluster_name}</strong> is on profile version <strong>{diffData.applied_profile_version || 0}</strong>.
+                    Profile <strong>{diffData.profile_name}</strong> is now at version <strong>{diffData.latest_profile_version}</strong>.
+                  </p>
+
+                  {diffData.apply_strategy === 'no_change' && (
+                    <p className="muted">No configuration changes detected.</p>
+                  )}
+
+                  {diffData.immutable_errors?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ color: 'var(--red)', fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Blocked - Immutable Fields Changed</p>
+                      <DiffTable changes={diffData.immutable_errors} color="var(--red)" />
+                    </div>
+                  )}
+
+                  {diffData.full_restart_changes?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--red)' }}>Full Restart Required</p>
+                      <DiffTable changes={diffData.full_restart_changes} color="var(--red)" />
+                    </div>
+                  )}
+
+                  {diffData.sequential_changes?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--amber)' }}>Sequential Restart</p>
+                      <DiffTable changes={diffData.sequential_changes} color="var(--amber)" />
+                    </div>
+                  )}
+
+                  {diffData.reload_changes?.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--green)' }}>Reload (no downtime)</p>
+                      <DiffTable changes={diffData.reload_changes} color="var(--green)" />
+                    </div>
+                  )}
+
+                  {diffData.scale_up && (
+                    <p style={{ marginTop: 8 }}>Scale up to <strong>{diffData.scale_up}</strong> replicas</p>
+                  )}
+                  {diffData.scale_down && (
+                    <p style={{ marginTop: 8 }}>Scale down to <strong>{diffData.scale_down}</strong> replicas</p>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="confirm-footer">
+              <button className="btn-sm" onClick={closeReview}>Cancel</button>
+              <button
+                className="btn-sm btn-approve"
+                onClick={applyUpdate}
+                disabled={applying || diffLoading || diffData?.apply_strategy === 'no_change' || diffData?.apply_strategy === 'rejected' || diffData?.error}
+              >
+                {applying ? 'Applying...' : 'Apply Update'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </>
+  );
+}
+
+function DiffValue({ value, bg, color }) {
+  const display = value || '(unset)';
+  return (
+    <span style={{
+      background: bg, color, fontWeight: 600,
+      padding: '1px 6px', borderRadius: 4, display: 'inline-block',
+    }}>{display}</span>
+  );
+}
+
+function DiffTable({ changes, color }) {
+  return (
+    <table className="node-table" style={{ fontSize: 12 }}>
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Current</th>
+          <th></th>
+          <th>New</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changes.map((ch, i) => (
+          <tr key={i}>
+            <td className="mono" style={{ color }}>{ch.path}</td>
+            <td className="mono">
+              <DiffValue value={ch.old_value} bg="var(--red-bg)" color="var(--red)" />
+            </td>
+            <td style={{ textAlign: 'center', color: 'var(--text-secondary)' }}><ArrowRight size={12} /></td>
+            <td className="mono">
+              <DiffValue value={ch.new_value} bg="var(--green-light)" color="var(--green-dark, var(--green))" />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

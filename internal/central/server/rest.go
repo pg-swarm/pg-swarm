@@ -68,6 +68,9 @@ func (s *RESTServer) GetWSHub() *WSHub {
 }
 
 func (s *RESTServer) setupRoutes() {
+	// HTTP request logging middleware (must be first)
+	s.app.Use(s.requestLogMiddleware)
+
 	// Dashboard (embedded React SPA)
 	s.app.Use("/assets", filesystem.New(filesystem.Config{
 		Root:       http.FS(dashboard.StaticFS),
@@ -96,6 +99,9 @@ func (s *RESTServer) setupRoutes() {
 		c.Set("Content-Type", "text/html; charset=utf-8")
 		return c.Send(data)
 	})
+
+	// Service healthcheck (outside /api/v1 — for K8s probes and load balancers)
+	s.app.Get("/healthz", s.healthCheck)
 
 	api := s.app.Group("/api/v1")
 
@@ -143,6 +149,7 @@ func (s *RESTServer) setupRoutes() {
 	api.Post("/clusters/:id/pause", s.pauseCluster)
 	api.Post("/clusters/:id/resume", s.resumeCluster)
 	api.Post("/clusters/:id/switchover", s.switchoverCluster)
+	api.Get("/clusters/:id/profile-diff", s.clusterProfileDiff)
 	api.Post("/clusters/:id/apply", s.applyCluster)
 	api.Get("/clusters/:id/databases", s.listClusterDatabases)
 	api.Post("/clusters/:id/databases", s.createClusterDatabase)
@@ -249,6 +256,7 @@ func (s *RESTServer) approveSatellite(c *fiber.Ctx) error {
 		// Disconnect the old satellite's stream if it's still connected
 		s.streams.Remove(*replacedID)
 	}
+	auditLog(c, "satellite.approve", "satellite", id.String(), body.Name, "")
 	return c.JSON(result)
 }
 
@@ -263,6 +271,7 @@ func (s *RESTServer) rejectSatellite(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	auditLog(c, "satellite.reject", "satellite", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "rejected"})
 }
 
@@ -307,6 +316,7 @@ func (s *RESTServer) createClusterConfig(c *fiber.Ctx) error {
 
 	s.pushConfigToSatellite(&cfg)
 
+	auditLog(c, "cluster.create", "cluster", cfg.ID.String(), cfg.Name, "")
 	return c.Status(fiber.StatusCreated).JSON(cfg)
 }
 
@@ -370,6 +380,7 @@ func (s *RESTServer) updateClusterConfig(c *fiber.Ctx) error {
 
 	s.pushConfigToSatellite(&cfg)
 
+	auditLog(c, "cluster.update", "cluster", id.String(), cfg.Name, "")
 	return c.JSON(cfg)
 }
 
@@ -399,6 +410,7 @@ func (s *RESTServer) deleteClusterConfig(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("config_id", id.String()).Msg("cluster config deleted")
+	auditLog(c, "cluster.delete", "cluster", id.String(), cfg.Name, "")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
@@ -456,22 +468,16 @@ func (s *RESTServer) streamSatelliteLogs(c *fiber.Ctx) error {
 
 	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
 		defer unsub()
-		for {
-			select {
-			case entry, ok := <-ch:
-				if !ok {
-					return
-				}
-				data, err := json.Marshal(entry)
-				if err != nil {
-					continue
-				}
-				if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
-					return
-				}
-				if err := w.Flush(); err != nil {
-					return
-				}
+		for entry := range ch {
+			data, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
+			if err := w.Flush(); err != nil {
+				return
 			}
 		}
 	})
@@ -500,6 +506,7 @@ func (s *RESTServer) setSatelliteLogLevel(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("satellite_id", id.String()).Str("level", body.Level).Msg("log level change sent")
+	auditLog(c, "satellite.set_log_level", "satellite", id.String(), "", "level="+body.Level)
 	return c.JSON(fiber.Map{"status": "level change sent", "level": body.Level})
 }
 
@@ -527,8 +534,13 @@ func (s *RESTServer) setClusterPaused(c *fiber.Ctx, paused bool) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to " + action + " cluster"})
 	}
 
+	action := "cluster.pause"
+	if !paused {
+		action = "cluster.resume"
+	}
 	log.Info().Str("config_id", id.String()).Bool("paused", paused).Msg("cluster pause state changed")
 	s.pushConfigToSatellite(cfg)
+	auditLog(c, action, "cluster", id.String(), cfg.Name, "")
 	return c.JSON(cfg)
 }
 
@@ -571,6 +583,7 @@ func (s *RESTServer) switchoverCluster(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("cluster", cfg.Name).Str("target", body.TargetPod).Str("operation_id", operationID).Msg("switchover request sent")
+	auditLog(c, "cluster.switchover", "cluster", id.String(), cfg.Name, "target_pod="+body.TargetPod)
 	return c.JSON(fiber.Map{"status": "switchover initiated", "target_pod": body.TargetPod, "operation_id": operationID})
 }
 
@@ -603,6 +616,7 @@ func (s *RESTServer) updateSatelliteLabels(c *fiber.Ctx) error {
 	// Re-evaluate deployment rules for this satellite (creates new clusters for newly matching rules)
 	s.fanOutRulesForSatellite(c.Context(), id, body.Labels)
 
+	auditLog(c, "satellite.update_labels", "satellite", id.String(), "", "")
 	sat, err := s.store.GetSatellite(c.Context(), id)
 	if err != nil {
 		return c.JSON(fiber.Map{"status": "labels updated"})
@@ -661,6 +675,7 @@ func (s *RESTServer) createStorageTier(c *fiber.Ctx) error {
 		log.Error().Err(err).Msg("failed to create storage tier")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create storage tier"})
 	}
+	auditLog(c, "storage_tier.create", "storage_tier", tier.ID.String(), tier.Name, "")
 	return c.Status(fiber.StatusCreated).JSON(tier)
 }
 
@@ -681,6 +696,7 @@ func (s *RESTServer) updateStorageTier(c *fiber.Ctx) error {
 		log.Error().Err(err).Msg("failed to update storage tier")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update storage tier"})
 	}
+	auditLog(c, "storage_tier.update", "storage_tier", id.String(), tier.Name, "")
 	return c.JSON(tier)
 }
 
@@ -693,6 +709,7 @@ func (s *RESTServer) deleteStorageTier(c *fiber.Ctx) error {
 		log.Error().Err(err).Msg("failed to delete storage tier")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete storage tier"})
 	}
+	auditLog(c, "storage_tier.delete", "storage_tier", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
@@ -723,6 +740,7 @@ func (s *RESTServer) createRecoveryRuleSet(c *fiber.Ctx) error {
 		log.Error().Err(err).Msg("failed to create recovery rule set")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create recovery rule set"})
 	}
+	auditLog(c, "recovery_rule_set.create", "recovery_rule_set", rs.ID.String(), rs.Name, "")
 	return c.Status(fiber.StatusCreated).JSON(rs)
 }
 
@@ -755,6 +773,7 @@ func (s *RESTServer) updateRecoveryRuleSet(c *fiber.Ctx) error {
 		log.Error().Err(err).Msg("failed to update recovery rule set")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update recovery rule set"})
 	}
+	auditLog(c, "recovery_rule_set.update", "recovery_rule_set", id.String(), rs.Name, "")
 	return c.JSON(rs)
 }
 
@@ -767,15 +786,17 @@ func (s *RESTServer) deleteRecoveryRuleSet(c *fiber.Ctx) error {
 		log.Error().Err(err).Msg("failed to delete recovery rule set")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete recovery rule set"})
 	}
+	auditLog(c, "recovery_rule_set.delete", "recovery_rule_set", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
 // resolveStorageTiers replaces "tier:X" storage class values in a config with
-// concrete class names from the satellite's tier mappings. Returns an error
-// listing any unmapped tiers.
+// concrete class names from the satellite's tier mappings. It works on the raw
+// JSON directly to preserve all fields (including pg_params, hba_rules, etc.)
+// without round-tripping through a Go struct.
 func resolveStorageTiers(rawConfig json.RawMessage, tierMappings map[string]string) (json.RawMessage, error) {
-	var spec models.ClusterSpec
-	if err := json.Unmarshal(rawConfig, &spec); err != nil {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rawConfig, &doc); err != nil {
 		return rawConfig, fmt.Errorf("unmarshal config for tier resolution: %w", err)
 	}
 
@@ -791,34 +812,135 @@ func resolveStorageTiers(rawConfig json.RawMessage, tierMappings map[string]stri
 		return sc, nil
 	}
 
-	var missing []string
-
-	if resolved, err := resolve(spec.Storage.StorageClass); err != nil {
-		missing = append(missing, err.Error())
-	} else {
-		spec.Storage.StorageClass = resolved
+	resolveStorage := func(key string) error {
+		raw, ok := doc[key]
+		if !ok || raw == nil {
+			return nil
+		}
+		var storage map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &storage); err != nil {
+			return nil // not a storage object, skip
+		}
+		scRaw, ok := storage["storage_class"]
+		if !ok {
+			return nil
+		}
+		var sc string
+		if err := json.Unmarshal(scRaw, &sc); err != nil {
+			return nil
+		}
+		resolved, err := resolve(sc)
+		if err != nil {
+			return err
+		}
+		if resolved != sc {
+			storage["storage_class"], _ = json.Marshal(resolved)
+			doc[key], _ = json.Marshal(storage)
+		}
+		return nil
 	}
 
-	if spec.WalStorage != nil {
-		if resolved, err := resolve(spec.WalStorage.StorageClass); err != nil {
-			missing = append(missing, err.Error())
-		} else {
-			spec.WalStorage.StorageClass = resolved
-		}
+	var missing []string
+	if err := resolveStorage("storage"); err != nil {
+		missing = append(missing, err.Error())
+	}
+	if err := resolveStorage("wal_storage"); err != nil {
+		missing = append(missing, err.Error())
 	}
 
 	if len(missing) > 0 {
 		return rawConfig, fmt.Errorf("missing tier mappings: %s", strings.Join(missing, ", "))
 	}
 
-	resolved, err := json.Marshal(spec)
+	resolved, err := json.Marshal(doc)
 	if err != nil {
 		return rawConfig, fmt.Errorf("marshal resolved config: %w", err)
 	}
 	return resolved, nil
 }
 
-// --- Health ---
+// --- Service Healthcheck ---
+
+// healthCheck reports the overall health of the central service, including
+// database connectivity and connected satellite count. Designed for K8s
+// liveness/readiness probes and load balancer health checks.
+func (s *RESTServer) healthCheck(c *fiber.Ctx) error {
+	dbOK := true
+	dbErr := ""
+	if err := s.store.Ping(c.Context()); err != nil {
+		dbOK = false
+		dbErr = err.Error()
+	}
+
+	connectedSatellites := 0
+	if s.streams != nil {
+		connectedSatellites = s.streams.Count()
+	}
+
+	status := "ok"
+	httpCode := fiber.StatusOK
+	if !dbOK {
+		status = "degraded"
+		httpCode = fiber.StatusServiceUnavailable
+	}
+
+	return c.Status(httpCode).JSON(fiber.Map{
+		"status": status,
+		"checks": fiber.Map{
+			"database": fiber.Map{
+				"status": boolToStatus(dbOK),
+				"error":  dbErr,
+			},
+		},
+		"connected_satellites": connectedSatellites,
+	})
+}
+
+// serverDefaultPgParams mirrors the satellite-side defaultPgParams so that diff
+// computation can account for values the satellite applies automatically.
+var serverDefaultPgParams = map[string]string{
+	"max_connections": "100",
+	"shared_buffers": "256MB", "effective_cache_size": "4GB", "work_mem": "4MB",
+	"maintenance_work_mem": "128MB", "huge_pages": "try",
+	"wal_buffers": "16MB", "min_wal_size": "1GB", "max_wal_size": "4GB",
+	"checkpoint_timeout": "15min", "checkpoint_completion_target": "0.9",
+	"random_page_cost": "1.1", "seq_page_cost": "1.0",
+	"effective_io_concurrency": "200", "default_statistics_target": "100", "jit": "on",
+	"track_commit_timestamp": "on", "synchronous_commit": "on",
+	"wal_receiver_timeout": "60s", "wal_sender_timeout": "60s",
+	"log_min_duration_statement": "200", "log_statement": "none",
+	"log_line_prefix": "'%m [%p] %q[user=%u,db=%d] '",
+	"log_checkpoints": "on", "log_connections": "off", "log_disconnections": "off",
+	"log_lock_waits": "off", "log_temp_files": "-1", "log_autovacuum_min_duration": "-1",
+	"autovacuum": "on", "autovacuum_max_workers": "3", "autovacuum_naptime": "1min",
+	"autovacuum_vacuum_threshold": "50", "autovacuum_vacuum_scale_factor": "0.2",
+	"autovacuum_analyze_threshold": "50", "autovacuum_analyze_scale_factor": "0.1",
+	"timezone": "'UTC'", "statement_timeout": "0",
+	"idle_in_transaction_session_timeout": "0", "lock_timeout": "0",
+	"default_text_search_config": "'pg_catalog.english'",
+}
+
+// fillDefaultPgParams backfills server-side default values into a spec's PgParams
+// so that diff comparisons don't flag defaults as changes.
+func fillDefaultPgParams(spec *models.ClusterSpec) {
+	if spec.PgParams == nil {
+		spec.PgParams = make(map[string]string, len(serverDefaultPgParams))
+	}
+	for k, v := range serverDefaultPgParams {
+		if _, exists := spec.PgParams[k]; !exists {
+			spec.PgParams[k] = v
+		}
+	}
+}
+
+func boolToStatus(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "fail"
+}
+
+// --- Cluster Health ---
 
 func (s *RESTServer) listClusterHealth(c *fiber.Ctx) error {
 	health, err := s.store.ListClusterHealth(c.Context())
@@ -898,6 +1020,7 @@ func (s *RESTServer) createDeploymentRule(c *fiber.Ctx) error {
 	s.fanOutDeploymentRule(c.Context(), &rule, profile)
 
 	log.Info().Str("rule_id", rule.ID.String()).Str("name", rule.Name).Msg("deployment rule created")
+	auditLog(c, "deployment_rule.create", "deployment_rule", rule.ID.String(), rule.Name, "")
 	return c.Status(fiber.StatusCreated).JSON(rule)
 }
 
@@ -971,6 +1094,7 @@ func (s *RESTServer) updateDeploymentRule(c *fiber.Ctx) error {
 	s.fanOutDeploymentRule(c.Context(), &rule, profile)
 
 	log.Info().Str("rule_id", id.String()).Str("name", rule.Name).Msg("deployment rule updated")
+	auditLog(c, "deployment_rule.update", "deployment_rule", id.String(), rule.Name, "")
 	return c.JSON(rule)
 }
 
@@ -996,6 +1120,7 @@ func (s *RESTServer) deleteDeploymentRule(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("rule_id", id.String()).Msg("deployment rule deleted")
+	auditLog(c, "deployment_rule.delete", "deployment_rule", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
@@ -1246,6 +1371,7 @@ func (s *RESTServer) createProfile(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("profile_id", profile.ID.String()).Str("name", profile.Name).Msg("profile created")
+	auditLog(c, "profile.create", "profile", profile.ID.String(), profile.Name, "")
 	return c.Status(fiber.StatusCreated).JSON(profile)
 }
 
@@ -1310,6 +1436,7 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("profile_id", id.String()).Str("name", profile.Name).Msg("profile updated")
+	auditLog(c, "profile.update", "profile", id.String(), profile.Name, "")
 
 	// Create config version record
 	_ = s.store.CreateConfigVersion(c.Context(), &models.ConfigVersion{
@@ -1373,7 +1500,72 @@ func (s *RESTServer) applyProfile(c *fiber.Ctx) error {
 		pending = []fiber.Map{}
 	}
 
+	auditLog(c, "profile.apply", "profile", id.String(), "", fmt.Sprintf("pending_clusters=%d", len(pending)))
 	return c.JSON(fiber.Map{"pending_clusters": pending})
+}
+
+// clusterProfileDiff returns the diff between a cluster's current config and its
+// profile's latest config, so the user can review changes before applying.
+func (s *RESTServer) clusterProfileDiff(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	cfg, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "cluster not found"})
+	}
+	if cfg.ProfileID == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cluster has no profile"})
+	}
+
+	profile, err := s.store.GetProfile(c.Context(), *cfg.ProfileID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "profile not found"})
+	}
+
+	versions, err := s.store.ListConfigVersions(c.Context(), *cfg.ProfileID)
+	if err != nil || len(versions) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no profile versions found"})
+	}
+	latestVersion := versions[0].Version
+
+	if cfg.AppliedProfileVersion >= latestVersion {
+		return c.JSON(fiber.Map{"apply_strategy": "no_change"})
+	}
+
+	oldSpec, err := cfg.ParseSpec()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to parse cluster config"})
+	}
+
+	var newSpec models.ClusterSpec
+	if err := json.Unmarshal(profile.Config, &newSpec); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to parse profile config"})
+	}
+
+	// Fill in server-side defaults so params already applied by the satellite
+	// don't appear as spurious changes in the diff.
+	fillDefaultPgParams(oldSpec)
+	fillDefaultPgParams(&newSpec)
+
+	paramModes := s.loadParamClassifications(c.Context())
+	diff := classifyChanges(oldSpec, &newSpec, paramModes)
+
+	return c.JSON(fiber.Map{
+		"cluster_name":            cfg.Name,
+		"profile_name":           profile.Name,
+		"applied_profile_version": cfg.AppliedProfileVersion,
+		"latest_profile_version":  latestVersion,
+		"reload_changes":         diff.ReloadChanges,
+		"sequential_changes":     diff.SequentialChanges,
+		"full_restart_changes":   diff.FullRestartChanges,
+		"immutable_errors":       diff.ImmutableErrors,
+		"scale_up":               diff.ScaleUp,
+		"scale_down":             diff.ScaleDown,
+		"apply_strategy":         diff.ApplyStrategy(),
+	})
 }
 
 // applyCluster applies the latest profile config to a single cluster.
@@ -1428,6 +1620,7 @@ func (s *RESTServer) applyCluster(c *fiber.Ctx) error {
 		Msg("pushing cluster config to satellite")
 	s.pushConfigToSatellite(cfg)
 
+	auditLog(c, "cluster.apply", "cluster", id.String(), cfg.Name, fmt.Sprintf("profile_version=%d", latestVersion))
 	return c.JSON(fiber.Map{
 		"status":                  "in_progress",
 		"cluster":                 cfg.Name,
@@ -1521,6 +1714,8 @@ func (s *RESTServer) revertProfile(c *fiber.Ctx) error {
 		ApplyStatus:   "pending",
 	})
 
+	auditLog(c, "profile.revert", "profile", id.String(), existing.Name, fmt.Sprintf("target_version=%d", body.TargetVersion))
+
 	// Return change impact
 	if len(clusters) > 0 && diff.ApplyStrategy() != "no_change" {
 		clusterNames := make([]string, len(clusters))
@@ -1587,6 +1782,7 @@ func (s *RESTServer) deleteProfile(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 		}
 		log.Info().Str("profile_id", id.String()).Int("clusters_deleted", len(clusters)).Int("rules_deleted", len(rules)).Msg("profile cascade deleted")
+		auditLog(c, "profile.delete", "profile", id.String(), "", fmt.Sprintf("cascade=true clusters_deleted=%d rules_deleted=%d", len(clusters), len(rules)))
 		return c.JSON(fiber.Map{"status": "deleted", "clusters_deleted": len(clusters), "rules_deleted": len(rules)})
 	}
 
@@ -1595,6 +1791,7 @@ func (s *RESTServer) deleteProfile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 	log.Info().Str("profile_id", id.String()).Msg("profile deleted")
+	auditLog(c, "profile.delete", "profile", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
@@ -1665,6 +1862,7 @@ func (s *RESTServer) cloneProfile(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("source", id.String()).Str("clone", clone.ID.String()).Str("name", clone.Name).Msg("profile cloned")
+	auditLog(c, "profile.clone", "profile", clone.ID.String(), clone.Name, "source="+id.String())
 	return c.Status(fiber.StatusCreated).JSON(clone)
 }
 
@@ -1694,6 +1892,7 @@ func (s *RESTServer) createPostgresVariant(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("name", v.Name).Msg("postgres variant created")
+	auditLog(c, "pg_variant.create", "pg_variant", v.ID.String(), v.Name, "")
 	return c.Status(fiber.StatusCreated).JSON(v)
 }
 
@@ -1708,6 +1907,7 @@ func (s *RESTServer) deletePostgresVariant(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("id", id.String()).Msg("postgres variant deleted")
+	auditLog(c, "pg_variant.delete", "pg_variant", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
@@ -1737,6 +1937,7 @@ func (s *RESTServer) createPostgresVersion(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("version", pv.Version).Str("variant", pv.Variant).Msg("postgres version created")
+	auditLog(c, "pg_version.create", "pg_version", pv.ID.String(), pv.Version, "variant="+pv.Variant)
 	return c.Status(fiber.StatusCreated).JSON(pv)
 }
 
@@ -1760,6 +1961,7 @@ func (s *RESTServer) updatePostgresVersion(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("id", id.String()).Str("version", pv.Version).Msg("postgres version updated")
+	auditLog(c, "pg_version.update", "pg_version", id.String(), pv.Version, "variant="+pv.Variant)
 	return c.JSON(pv)
 }
 
@@ -1774,6 +1976,7 @@ func (s *RESTServer) deletePostgresVersion(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("id", id.String()).Msg("postgres version deleted")
+	auditLog(c, "pg_version.delete", "pg_version", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
@@ -1788,6 +1991,7 @@ func (s *RESTServer) setDefaultPostgresVersion(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("id", id.String()).Msg("default postgres version set")
+	auditLog(c, "pg_version.set_default", "pg_version", id.String(), "", "")
 	return c.JSON(fiber.Map{"status": "default set"})
 }
 
@@ -2081,6 +2285,7 @@ func (s *RESTServer) createClusterDatabase(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("cluster_id", clusterID.String()).Str("db", body.DBName).Msg("cluster database created")
+	auditLog(c, "cluster_database.create", "cluster_database", db.ID.String(), body.DBName, "cluster_id="+clusterID.String())
 	return c.Status(fiber.StatusCreated).JSON(db)
 }
 
@@ -2130,6 +2335,7 @@ func (s *RESTServer) updateClusterDatabase(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("db_id", dbID.String()).Msg("cluster database updated")
+	auditLog(c, "cluster_database.update", "cluster_database", dbID.String(), "", "cluster_id="+clusterID.String())
 	return c.JSON(db)
 }
 
@@ -2155,6 +2361,7 @@ func (s *RESTServer) deleteClusterDatabase(c *fiber.Ctx) error {
 	}
 
 	log.Info().Str("db_id", dbID.String()).Msg("cluster database deleted")
+	auditLog(c, "cluster_database.delete", "cluster_database", dbID.String(), "", "cluster_id="+clusterID.String())
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -2199,6 +2406,7 @@ func (s *RESTServer) upsertPgParamClassification(c *fiber.Ctx) error {
 	if err := s.store.UpsertPgParamClassification(c.Context(), &p); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	auditLog(c, "pg_param.upsert", "pg_param_classification", p.Name, p.Name, "restart_mode="+p.RestartMode)
 	return c.Status(fiber.StatusOK).JSON(p)
 }
 
@@ -2210,6 +2418,7 @@ func (s *RESTServer) deletePgParamClassification(c *fiber.Ctx) error {
 	if err := s.store.DeletePgParamClassification(c.Context(), name); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 	}
+	auditLog(c, "pg_param.delete", "pg_param_classification", name, name, "")
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -2220,5 +2429,9 @@ func fiberErrorHandler(c *fiber.Ctx, err error) error {
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 	}
-	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+	resp := fiber.Map{"error": err.Error()}
+	if rid := requestIDFromFiber(c); rid != "" {
+		resp["request_id"] = rid
+	}
+	return c.Status(code).JSON(resp)
 }

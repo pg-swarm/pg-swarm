@@ -14,11 +14,11 @@ const SAT_COLORS = {
 
 const CLUSTER_ICONS = {
   running: CheckCircle2, creating: Loader, degraded: AlertCircle,
-  paused: Pause, failed: XCircle, deleting: Trash2,
+  paused: Pause, failed: XCircle, deleting: Trash2, restarting: Loader,
 };
 const CLUSTER_COLORS = {
   running: 'green', creating: 'amber', degraded: 'amber',
-  paused: 'amber', failed: 'red', deleting: 'gray',
+  paused: 'amber', failed: 'red', deleting: 'gray', restarting: 'amber',
 };
 
 export function SatBadge({ state }) {

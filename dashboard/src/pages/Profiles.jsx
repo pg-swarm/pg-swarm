@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api, parseSpec, timeAgo } from '../api';
+import { History, X, Tag } from 'lucide-react';
 
 // ── PostgreSQL parameter catalog ────────────────────────────────────────────
 // Organised by category. Each entry: [key, defaultValue, description].
@@ -156,8 +157,20 @@ export default function Profiles() {
   const [cloneName, setCloneName] = useState('');
   const [cloneTarget, setCloneTarget] = useState(null);
   const [cascadeTarget, setCascadeTarget] = useState(null);
-  const [cascadeClusters, setCascadeClusters] = useState([]);
-  const [cascadeLoading, setCascadeLoading] = useState(false);
+  const [profileVersions, setProfileVersions] = useState({}); // { profileId: [versions] }
+  const [historyTarget, setHistoryTarget] = useState(null); // profile being viewed
+
+  // Fetch latest version number for each profile
+  useEffect(() => {
+    if (!profiles.length) return;
+    Promise.all(profiles.map(p =>
+      api.profileVersions(p.id).then(vs => [p.id, vs]).catch(() => [p.id, []])
+    )).then(results => {
+      const map = {};
+      results.forEach(([pid, vs]) => { map[pid] = vs; });
+      setProfileVersions(map);
+    });
+  }, [profiles]);
   function startCreate() {
     setEditing({ name: '', description: '', spec: emptySpec(), isNew: true });
   }
@@ -166,12 +179,14 @@ export default function Profiles() {
     const spec = parseSpec(profile.config);
     const pg_params = { ...DEFAULT_PG_PARAMS, ...spec.pg_params };
     const hba_rules = spec.hba_rules?.length ? spec.hba_rules : [...DEFAULT_HBA_RULES];
+    const merged = { ...emptySpec(), ...spec, pg_params, hba_rules };
     setEditing({
       id: profile.id,
       name: profile.name,
       description: profile.description,
       recovery_rule_set_id: profile.recovery_rule_set_id || null,
-      spec: { ...emptySpec(), ...spec, pg_params, hba_rules },
+      spec: merged,
+      originalSpec: JSON.parse(JSON.stringify(merged)),
       isNew: false,
     });
   }
@@ -193,59 +208,34 @@ export default function Profiles() {
         await api.createProfile(payload);
         toast('Profile created');
       } else {
-        await api.updateProfile(editing.id, payload);
-        toast('Profile updated');
+        const result = await api.updateProfile(editing.id, payload);
+        if (result.change_impact) {
+          toast('Profile updated — ' + result.change_impact.apply_strategy.replace(/_/g, ' ') + ' required on ' + result.change_impact.affected_clusters.length + ' cluster(s)');
+        } else {
+          toast('Profile updated');
+        }
       }
       setEditing(null);
       refresh();
     } catch (e) {
+      // Surface immutable field errors in the confirmation modal
+      if (e.body?.immutable_errors) {
+        return { immutableErrors: e.body.immutable_errors, error: e.body.error };
+      }
       toast('Save failed: ' + e.message, true);
     }
   }
 
-  async function remove(profile) {
-    if (profile.locked) {
-      // Locked profile — need cascade preview
-      setCascadeLoading(true);
-      setCascadeTarget(profile);
-      try {
-        const items = await api.cascadePreview(profile.id);
-        setCascadeClusters(items);
-      } catch (e) {
-        toast('Failed to preview cascade: ' + e.message, true);
-        setCascadeTarget(null);
-      } finally {
-        setCascadeLoading(false);
-      }
-      return;
-    }
-    // Unlocked profile — simple delete but still check for clusters
-    try {
-      const items = await api.cascadePreview(profile.id);
-      if (items.length > 0) {
-        setCascadeTarget(profile);
-        setCascadeClusters(items);
-        return;
-      }
-      await api.deleteProfile(profile.id);
-      toast('Profile deleted');
-      refresh();
-    } catch (e) {
-      toast('Delete failed: ' + e.message, true);
-    }
+  function remove(profile) {
+    setCascadeTarget(profile);
   }
 
-  async function confirmCascadeDelete() {
+  async function confirmDelete() {
     if (!cascadeTarget) return;
     try {
-      if (cascadeClusters.length > 0 || cascadeTarget.locked) {
-        await api.cascadeDeleteProfile(cascadeTarget.id);
-      } else {
-        await api.deleteProfile(cascadeTarget.id);
-      }
+      await api.deleteProfile(cascadeTarget.id);
       toast('Profile deleted');
       setCascadeTarget(null);
-      setCascadeClusters([]);
       refresh();
     } catch (e) {
       toast('Delete failed: ' + e.message, true);
@@ -294,11 +284,18 @@ export default function Profiles() {
         ) : profiles.map(p => {
           const spec = parseSpec(p.config);
           const clusterCount = clusterCountForProfile(p.id);
+          const versions = profileVersions[p.id] || [];
+          const latestVersion = versions.length > 0 ? versions[0].version : 0;
           return (
             <div className="cl-card" key={p.id}>
               <div className="cl-head">
                 <h3>{p.name}</h3>
                 <div className="badges">
+                  {latestVersion > 0 && (
+                    <span className="badge badge-blue" title={`Version ${latestVersion} — ${versions.length} revision${versions.length !== 1 ? 's' : ''}`}>
+                      <Tag size={10} />v{latestVersion}
+                    </span>
+                  )}
                   {p.locked
                     ? <span className="badge badge-amber" title="Profile is in use by active clusters or deployment rules"><span className="dot" />In Use</span>
                     : <span className="badge badge-green"><span className="dot" />Editable</span>}
@@ -333,6 +330,11 @@ export default function Profiles() {
               <div className="cl-foot">
                 <span>{timeAgo(p.created_at)}</span>
                 <span className="actions" style={{ marginLeft: 'auto' }}>
+                  {versions.length > 0 && (
+                    <button className="btn btn-sm btn-blue" onClick={() => setHistoryTarget(p)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <History size={11} />History
+                    </button>
+                  )}
                   <button className="btn btn-sm" onClick={() => startEdit(p)}>Edit</button>
                   <button className="btn btn-sm" onClick={() => { setCloneTarget(p.id); setCloneName(p.name + '-copy'); }}>Clone</button>
                   <button className="btn btn-sm btn-reject" onClick={() => remove(p)}>Delete</button>
@@ -343,54 +345,181 @@ export default function Profiles() {
         })}
       </div>
 
-      {cascadeTarget && (
-        <div className="modal-overlay" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-head">
-              <h3>Delete Profile: {cascadeTarget.name}</h3>
-              <button className="btn-icon" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>&times;</button>
+      {cascadeTarget && (() => {
+        const attachedCount = clusterCountForProfile(cascadeTarget.id);
+        return (
+          <div className="confirm-overlay" onClick={() => setCascadeTarget(null)}>
+            <div className="confirm-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+              <div className="confirm-header">
+                <h3>Delete Profile</h3>
+                <button className="modal-close" onClick={() => setCascadeTarget(null)}><X size={18} /></button>
+              </div>
+              <div className="confirm-body">
+                {attachedCount > 0 ? (
+                  <>
+                    <p>Cannot delete <strong>{cascadeTarget.name}</strong> because it is in use.</p>
+                    <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+                      {attachedCount} cluster{attachedCount !== 1 ? 's are' : ' is'} currently using this profile.
+                      Remove or reassign all clusters before deleting.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p>Are you sure you want to delete <strong>{cascadeTarget.name}</strong>?</p>
+                    {cascadeTarget.description && (
+                      <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>{cascadeTarget.description}</p>
+                    )}
+                    <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+                      This action cannot be undone. The profile and all its version history will be permanently removed.
+                    </p>
+                  </>
+                )}
+              </div>
+              <div className="confirm-footer">
+                <button className="btn btn-sm" onClick={() => setCascadeTarget(null)}>
+                  {attachedCount > 0 ? 'Close' : 'Cancel'}
+                </button>
+                {attachedCount === 0 && (
+                  <button className="btn btn-sm btn-danger" onClick={confirmDelete}>Delete Profile</button>
+                )}
+              </div>
             </div>
-            <div className="modal-body">
-              {cascadeLoading ? (
-                <p>Loading...</p>
-              ) : cascadeClusters.length > 0 ? (
-                <>
-                  <p style={{ marginBottom: 8 }}>
-                    This will <strong>cascade-delete</strong> the following {cascadeClusters.length} cluster{cascadeClusters.length !== 1 ? 's' : ''}, their deployment rules, and the profile:
-                  </p>
-                  <table style={{ width: '100%', fontSize: 12.5, borderCollapse: 'collapse' }}>
-                    <thead>
-                      <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Cluster</th>
-                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Namespace</th>
-                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>Satellite</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {cascadeClusters.map(cc => (
-                        <tr key={cc.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                          <td style={{ padding: '4px 8px' }}><code>{cc.name}</code></td>
-                          <td style={{ padding: '4px 8px' }}><code>{cc.namespace || 'default'}</code></td>
-                          <td style={{ padding: '4px 8px' }}>{cc.satellite || 'unknown'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </>
-              ) : (
-                <p>No clusters are linked to this profile. Delete it?</p>
-              )}
+          </div>
+        );
+      })()}
+
+      {/* Version history modal */}
+      {historyTarget && (
+        <div className="confirm-overlay" onClick={() => setHistoryTarget(null)}>
+          <div className="confirm-modal" onClick={e => e.stopPropagation()} style={{ width: 820, maxWidth: '95vw' }}>
+            <div className="confirm-header">
+              <h3><History size={18} /> Version History: {historyTarget.name}</h3>
+              <button className="modal-close" onClick={() => setHistoryTarget(null)}><X size={18} /></button>
             </div>
-            <div className="modal-foot">
-              <button className="btn" onClick={() => { setCascadeTarget(null); setCascadeClusters([]); }}>Cancel</button>
-              <button className="btn btn-reject" onClick={confirmCascadeDelete} disabled={cascadeLoading}>
-                {cascadeClusters.length > 0 ? 'Delete All' : 'Delete'}
-              </button>
+            <div className="confirm-body" style={{ padding: 0 }}>
+              <VersionHistoryList versions={profileVersions[historyTarget.id] || []} />
+            </div>
+            <div className="confirm-footer">
+              <button className="btn btn-sm" onClick={() => setHistoryTarget(null)}>Close</button>
             </div>
           </div>
         </div>
       )}
     </>
+  );
+}
+
+// Parse "param: old → new" or "param: old → new (restart)" from change_summary
+function parseSummaryChanges(summary) {
+  if (!summary || summary === 'no changes') return [];
+  return summary.split('; ').map(part => {
+    // "scale up to N replicas" / "scale down to N replicas"
+    const scaleMatch = part.match(/^scale (up|down) to (\d+) replicas$/);
+    if (scaleMatch) {
+      return { param: 'replicas', oldVal: '', newVal: scaleMatch[2], strategy: 'scale ' + scaleMatch[1] };
+    }
+    // "Reverted to version N"
+    if (part.startsWith('Reverted')) {
+      return { param: part, oldVal: '', newVal: '', strategy: 'revert' };
+    }
+    // "param: old → new (strategy)"
+    const m = part.match(/^(.+?):\s*(.+?)\s*→\s*(.+?)(?:\s*\((.+?)\))?$/);
+    if (!m) return { param: part, oldVal: '', newVal: '', strategy: '' };
+    return { param: m[1], oldVal: m[2], newVal: m[3], strategy: m[4] || 'sighup' };
+  });
+}
+
+const strategyLabels = {
+  sighup: { label: 'sighup', color: 'badge-green' },
+  reload: { label: 'sighup', color: 'badge-green' },
+  restart: { label: 'restart', color: 'badge-amber' },
+  'full restart': { label: 'full restart', color: 'badge-red' },
+  revert: { label: 'revert', color: 'badge-gray' },
+  'scale up': { label: 'scale up', color: 'badge-blue' },
+  'scale down': { label: 'scale down', color: 'badge-amber' },
+};
+
+const statusColors = {
+  pending: 'badge-amber',
+  applied: 'badge-green',
+  failed: 'badge-red',
+  reverted: 'badge-gray',
+};
+
+function VersionHistoryList({ versions }) {
+  if (versions.length === 0) {
+    return <p className="muted" style={{ padding: 16 }}>No version history available.</p>;
+  }
+
+  return (
+    <div className="vh-list">
+      {versions.map((v, i) => {
+        const changes = parseSummaryChanges(v.change_summary);
+        return (
+          <div key={v.id} className="vh-entry">
+            {/* Version header row */}
+            <div className="vh-header">
+              <span className="badge badge-blue" style={{ fontSize: 10.5 }}>
+                <Tag size={9} />v{v.version}
+              </span>
+              <span className={`badge ${statusColors[v.apply_status] || 'badge-gray'}`} style={{ fontSize: 10.5 }}>
+                {v.apply_status}
+              </span>
+              {i === 0 && <span className="badge badge-green" style={{ fontSize: 10.5, fontWeight: 600 }}>latest</span>}
+              <span className="muted" style={{ fontSize: 11, marginLeft: 'auto' }}>
+                {new Date(v.created_at).toLocaleString()}
+              </span>
+            </div>
+            {/* Changes table */}
+            {changes.length > 0 ? (
+              <div className="vh-table-wrap">
+                <table className="vh-table">
+                  <thead>
+                    <tr>
+                      <th>Parameter</th>
+                      <th>Before</th>
+                      <th>After</th>
+                      <th>Apply</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {changes.map((ch, j) => {
+                      const st = strategyLabels[ch.strategy] || { label: ch.strategy || '-', color: 'badge-gray' };
+                      return (
+                        <tr key={j}>
+                          <td className="mono">{ch.param}</td>
+                          <td className="mono">
+                            {ch.oldVal && (
+                              <span style={{ background: 'var(--red-bg)', color: 'var(--red)', fontWeight: 600, padding: '1px 6px', borderRadius: 4, display: 'inline-block' }}>
+                                {ch.oldVal}
+                              </span>
+                            )}
+                          </td>
+                          <td className="mono">
+                            {ch.newVal && (
+                              <span style={{ background: 'var(--green-light)', color: 'var(--green-dark)', fontWeight: 600, padding: '1px 6px', borderRadius: 4, display: 'inline-block' }}>
+                                {ch.newVal}
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            <span className={`badge ${st.color}`} style={{ fontSize: 10 }}>{st.label}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="muted" style={{ fontSize: 12, padding: '4px 0' }}>
+                {v.change_summary || 'Initial version'}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -472,6 +601,7 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null); // { error, immutableErrors }
   const [pgSearch, setPgSearch] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState({});
 
@@ -480,14 +610,20 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
     const opts = [];
     const seen = new Set();
     for (const pv of (postgresVersions || [])) {
-      const key = `${pv.version} ${pv.variant.charAt(0).toUpperCase() + pv.variant.slice(1)}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        opts.push({ version: pv.version, variant: pv.variant, label: key, image_tag: pv.image_tag });
+      const val = `${pv.version}|${pv.variant}`;
+      if (!seen.has(val)) {
+        seen.add(val);
+        opts.push({ version: pv.version, variant: pv.variant, label: `${pv.version} ${pv.variant.charAt(0).toUpperCase() + pv.variant.slice(1)}`, image_tag: pv.image_tag });
       }
     }
+    // Ensure the currently saved version is always in the list
+    const currentVariant = spec.postgres?.variant || 'alpine';
+    const currentVal = `${spec.postgres?.version}|${currentVariant}`;
+    if (spec.postgres?.version && !seen.has(currentVal)) {
+      opts.unshift({ version: spec.postgres.version, variant: currentVariant, label: `${spec.postgres.version} ${currentVariant.charAt(0).toUpperCase() + currentVariant.slice(1)}` });
+    }
     return opts;
-  }, [postgresVersions]);
+  }, [postgresVersions, spec.postgres?.version, spec.postgres?.variant]);
 
   function setSpec(fn) {
     setState(prev => ({ ...prev, spec: fn(prev.spec) }));
@@ -558,8 +694,12 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
 
   async function confirmSave() {
     setSaving(true);
+    setSaveError(null);
     try {
-      await onSave();
+      const result = await onSave();
+      if (result?.immutableErrors) {
+        setSaveError(result);
+      }
     } finally {
       setSaving(false);
     }
@@ -889,87 +1029,207 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
           spec={spec}
           changedParams={changedParams}
           onConfirm={confirmSave}
-          onCancel={() => setShowConfirm(false)}
+          onCancel={() => { setShowConfirm(false); setSaveError(null); }}
           saving={saving}
+          saveError={saveError}
         />
       )}
     </div>
   );
 }
 
+// ── Spec Diff Helper ────────────────────────────────────────────────────────
+
+function computeSpecChanges(oldSpec, newSpec) {
+  if (!oldSpec) return [];
+  const changes = [];
+
+  function add(path, oldVal, newVal) {
+    const o = String(oldVal ?? '');
+    const n = String(newVal ?? '');
+    if (o !== n) changes.push({ path, old_value: o, new_value: n });
+  }
+
+  // Top-level
+  add('replicas', oldSpec.replicas, newSpec.replicas);
+
+  // Postgres
+  add('postgres.version', oldSpec.postgres?.version, newSpec.postgres?.version);
+  add('postgres.variant', oldSpec.postgres?.variant, newSpec.postgres?.variant);
+  add('postgres.registry', oldSpec.postgres?.registry, newSpec.postgres?.registry);
+
+  // Storage
+  add('storage.size', oldSpec.storage?.size, newSpec.storage?.size);
+  add('storage.storage_class', oldSpec.storage?.storage_class, newSpec.storage?.storage_class);
+  add('wal_storage.size', oldSpec.wal_storage?.size, newSpec.wal_storage?.size);
+  add('wal_storage.storage_class', oldSpec.wal_storage?.storage_class, newSpec.wal_storage?.storage_class);
+
+  // Resources
+  add('resources.cpu_request', oldSpec.resources?.cpu_request, newSpec.resources?.cpu_request);
+  add('resources.cpu_limit', oldSpec.resources?.cpu_limit, newSpec.resources?.cpu_limit);
+  add('resources.memory_request', oldSpec.resources?.memory_request, newSpec.resources?.memory_request);
+  add('resources.memory_limit', oldSpec.resources?.memory_limit, newSpec.resources?.memory_limit);
+
+  // Failover
+  add('failover.enabled', oldSpec.failover?.enabled, newSpec.failover?.enabled);
+  add('failover.health_check_interval_seconds', oldSpec.failover?.health_check_interval_seconds, newSpec.failover?.health_check_interval_seconds);
+
+  // PG Params
+  const allKeys = new Set([...Object.keys(oldSpec.pg_params || {}), ...Object.keys(newSpec.pg_params || {})]);
+  for (const k of allKeys) {
+    add('pg_params.' + k, (oldSpec.pg_params || {})[k], (newSpec.pg_params || {})[k]);
+  }
+
+  // HBA rules
+  const oldHba = (oldSpec.hba_rules || []).join('\n');
+  const newHba = (newSpec.hba_rules || []).join('\n');
+  if (oldHba !== newHba) {
+    changes.push({ path: 'hba_rules', old_value: (oldSpec.hba_rules || []).length + ' rule(s)', new_value: (newSpec.hba_rules || []).length + ' rule(s)' });
+  }
+
+  return changes;
+}
+
 // ── Confirmation Report ─────────────────────────────────────────────────────
 
-function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, saving }) {
+function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, saving, saveError }) {
+  const isEdit = !state.isNew && state.originalSpec;
+  const specChanges = isEdit ? computeSpecChanges(state.originalSpec, spec) : [];
+
   const content = (
     <>
       <div className="confirm-header">
-        <h3>Configuration Report</h3>
+        <h3>{isEdit ? 'Review Changes' : 'Configuration Report'}</h3>
         <p className="muted sm">Review before saving profile <strong>{state.name || '(unnamed)'}</strong></p>
       </div>
 
         <div className="confirm-body">
-          {/* Cluster */}
-          <div className="report-section">
-            <h5>Cluster</h5>
-            <div className="report-grid">
-              <ReportRow label="Replicas" value={spec.replicas} />
-              <ReportRow label="PostgreSQL" value={`${spec.postgres.version} ${spec.postgres.variant || 'alpine'}${spec.postgres.registry ? ` (registry: ${spec.postgres.registry})` : ''}`} />
-              <ReportRow label="Failover" value={spec.failover?.enabled ? 'Enabled' : 'Disabled'} />
-            </div>
-          </div>
 
-          {/* Volumes */}
-          <div className="report-section">
-            <h5>Volumes</h5>
-            <div className="report-grid">
-              <ReportRow label="Data" value={`${spec.storage.size}${spec.storage.storage_class ? ` (${spec.storage.storage_class})` : ''}`} />
-              {spec.wal_storage && (
-                <ReportRow label="WAL" value={`${spec.wal_storage.size}${spec.wal_storage.storage_class ? ` (${spec.wal_storage.storage_class})` : ''}`} />
-              )}
-            </div>
-          </div>
-
-          {/* Resources */}
-          <div className="report-section">
-            <h5>Resources</h5>
-            <div className="report-grid">
-              <ReportRow label="CPU" value={`${spec.resources.cpu_request} / ${spec.resources.cpu_limit}`} />
-              <ReportRow label="Memory" value={`${spec.resources.memory_request} / ${spec.resources.memory_limit}`} />
-            </div>
-          </div>
-
-          {/* PG Params — only non-default */}
-          {changedParams.length > 0 && (
-            <div className="report-section">
-              <h5>Modified PostgreSQL Parameters <span className="tab-badge">{changedParams.length}</span></h5>
-              <div className="report-params">
-                {changedParams.map(([key, value]) => (
-                  <div className="report-param" key={key}>
-                    <span className="mono">{key}</span>
-                    <span className="mono report-param-val">{value}</span>
-                    {DEFAULT_PG_PARAMS[key] !== undefined && (
-                      <span className="muted sm">default: {DEFAULT_PG_PARAMS[key]}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
+          {/* Immutable field errors from server */}
+          {saveError && (
+            <div className="report-section" style={{ background: 'var(--red-bg)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+              <h5 style={{ color: 'var(--red)', margin: 0 }}>Blocked - Immutable Fields</h5>
+              <p style={{ color: 'var(--red)', fontSize: 12.5, margin: '6px 0 8px' }}>{saveError.error}</p>
+              <table className="node-table" style={{ fontSize: 12 }}>
+                <thead><tr><th>Field</th><th>Current</th><th></th><th>Requested</th></tr></thead>
+                <tbody>
+                  {saveError.immutableErrors.map((ch, i) => (
+                    <tr key={i}>
+                      <td className="mono" style={{ color: 'var(--red)' }}>{ch.path}</td>
+                      <td className="mono">{ch.old_value}</td>
+                      <td style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>&rarr;</td>
+                      <td className="mono" style={{ fontWeight: 600 }}>{ch.new_value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>These fields cannot be changed while clusters are using this profile. Go back and revert these fields.</p>
             </div>
           )}
 
-          {/* HBA */}
-          <div className="report-section">
-            <h5>HBA Rules</h5>
-            <div className="report-hba">
-              {spec.hba_rules.map((rule, i) => (
-                <div className="mono sm" key={i}>{rule}</div>
-              ))}
+          {/* Changes diff (edit mode) */}
+          {isEdit && specChanges.length > 0 && !saveError && (
+            <div className="report-section" style={{ marginBottom: 12 }}>
+              <h5>What's Changing <span className="tab-badge">{specChanges.length}</span></h5>
+              <table className="node-table" style={{ fontSize: 12 }}>
+                <thead><tr><th>Field</th><th>Before</th><th></th><th>After</th></tr></thead>
+                <tbody>
+                  {specChanges.map((ch, i) => (
+                    <tr key={i}>
+                      <td className="mono">{ch.path}</td>
+                      <td className="mono">
+                        <span style={{ background: 'var(--red-bg)', color: 'var(--red)', fontWeight: 600, padding: '1px 6px', borderRadius: 4, display: 'inline-block' }}>
+                          {ch.old_value || '(unset)'}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>&rarr;</td>
+                      <td className="mono">
+                        <span style={{ background: 'var(--green-light)', color: 'var(--green-dark)', fontWeight: 600, padding: '1px 6px', borderRadius: 4, display: 'inline-block' }}>
+                          {ch.new_value || '(unset)'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          </div>
+          )}
+
+          {isEdit && specChanges.length === 0 && !saveError && (
+            <div className="report-section">
+              <p className="muted">No configuration changes detected.</p>
+            </div>
+          )}
+
+          {/* Full config summary (new profiles or as collapsed detail) */}
+          {(!isEdit || specChanges.length === 0) && !saveError && (
+            <>
+              {/* Cluster */}
+              <div className="report-section">
+                <h5>Cluster</h5>
+                <div className="report-grid">
+                  <ReportRow label="Replicas" value={spec.replicas} />
+                  <ReportRow label="PostgreSQL" value={`${spec.postgres.version} ${spec.postgres.variant || 'alpine'}${spec.postgres.registry ? ` (registry: ${spec.postgres.registry})` : ''}`} />
+                  <ReportRow label="Failover" value={spec.failover?.enabled ? 'Enabled' : 'Disabled'} />
+                </div>
+              </div>
+
+              {/* Volumes */}
+              <div className="report-section">
+                <h5>Volumes</h5>
+                <div className="report-grid">
+                  <ReportRow label="Data" value={`${spec.storage.size}${spec.storage.storage_class ? ` (${spec.storage.storage_class})` : ''}`} />
+                  {spec.wal_storage && (
+                    <ReportRow label="WAL" value={`${spec.wal_storage.size}${spec.wal_storage.storage_class ? ` (${spec.wal_storage.storage_class})` : ''}`} />
+                  )}
+                </div>
+              </div>
+
+              {/* Resources */}
+              <div className="report-section">
+                <h5>Resources</h5>
+                <div className="report-grid">
+                  <ReportRow label="CPU" value={`${spec.resources.cpu_request} / ${spec.resources.cpu_limit}`} />
+                  <ReportRow label="Memory" value={`${spec.resources.memory_request} / ${spec.resources.memory_limit}`} />
+                </div>
+              </div>
+
+              {/* PG Params — only non-default */}
+              {changedParams.length > 0 && (
+                <div className="report-section">
+                  <h5>Modified PostgreSQL Parameters <span className="tab-badge">{changedParams.length}</span></h5>
+                  <div className="report-params">
+                    {changedParams.map(([key, value]) => (
+                      <div className="report-param" key={key}>
+                        <span className="mono">{key}</span>
+                        <span className="mono report-param-val">{value}</span>
+                        {DEFAULT_PG_PARAMS[key] !== undefined && (
+                          <span className="muted sm">default: {DEFAULT_PG_PARAMS[key]}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* HBA */}
+              <div className="report-section">
+                <h5>HBA Rules</h5>
+                <div className="report-hba">
+                  {spec.hba_rules.map((rule, i) => (
+                    <div className="mono sm" key={i}>{rule}</div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
 
         </div>
 
         <div className="confirm-footer">
-          <button className="btn btn-approve" onClick={onConfirm} disabled={saving}>{saving ? 'Saving...' : 'Confirm & Save'}</button>
+          {!saveError && (
+            <button className="btn btn-approve" onClick={onConfirm} disabled={saving}>{saving ? 'Saving...' : 'Confirm & Save'}</button>
+          )}
           <button className="btn btn-reject" onClick={onCancel} disabled={saving}>Back to Editing</button>
         </div>
     </>

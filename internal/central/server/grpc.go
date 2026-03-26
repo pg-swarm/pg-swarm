@@ -21,6 +21,8 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/central/registry"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
+	"github.com/pg-swarm/pg-swarm/internal/shared/reqid"
+	"github.com/rs/zerolog"
 )
 
 type GRPCServer struct {
@@ -58,8 +60,8 @@ func NewGRPCServer(reg *registry.Registry, s store.Store) *GRPCServer {
 	}
 
 	srv.server = grpc.NewServer(
-		grpc.UnaryInterceptor(srv.unaryAuthInterceptor),
-		grpc.StreamInterceptor(srv.streamAuthInterceptor),
+		grpc.ChainUnaryInterceptor(srv.unaryLoggingInterceptor, srv.unaryAuthInterceptor),
+		grpc.ChainStreamInterceptor(srv.streamLoggingInterceptor, srv.streamAuthInterceptor),
 	)
 
 	pgswarmv1.RegisterRegistrationServiceServer(srv.server, srv)
@@ -73,6 +75,13 @@ func NewStreamManager() *StreamManager {
 	return &StreamManager{
 		streams: make(map[uuid.UUID]*SatelliteStream),
 	}
+}
+
+// Count returns the number of currently connected satellite streams.
+func (sm *StreamManager) Count() int {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return len(sm.streams)
 }
 
 // Start listens on the given address and serves gRPC requests. It blocks
@@ -631,6 +640,91 @@ func (s *GRPCServer) streamAuthInterceptor(srv interface{}, ss grpc.ServerStream
 	newCtx := contextWithSatelliteID(ctx, sat.ID)
 	wrapped := &wrappedServerStream{ServerStream: ss, ctx: newCtx}
 	return handler(srv, wrapped)
+}
+
+// Logging interceptors
+
+// unaryLoggingInterceptor logs every unary gRPC call with method, duration,
+// status code, and request ID.
+func (s *GRPCServer) unaryLoggingInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	// Extract or generate request ID from metadata.
+	md, _ := metadata.FromIncomingContext(ctx)
+	rid := ""
+	if vals := md.Get("x-request-id"); len(vals) > 0 {
+		rid = vals[0]
+	}
+	if rid == "" {
+		rid = reqid.NewID()
+	}
+	ctx = reqid.WithRequestID(ctx, rid)
+
+	start := time.Now()
+	resp, err := handler(ctx, req)
+	duration := time.Since(start)
+
+	code := status.Code(err)
+	level := grpcLogLevel(code)
+
+	log.WithLevel(level).
+		Str("request_id", rid).
+		Str("grpc_method", info.FullMethod).
+		Str("grpc_code", code.String()).
+		Dur("duration", duration).
+		Msg("grpc unary")
+
+	return resp, err
+}
+
+// streamLoggingInterceptor logs gRPC stream lifecycle (open/close) with
+// satellite ID, method, duration, and request ID.
+func (s *GRPCServer) streamLoggingInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	ctx := ss.Context()
+	md, _ := metadata.FromIncomingContext(ctx)
+	rid := ""
+	if vals := md.Get("x-request-id"); len(vals) > 0 {
+		rid = vals[0]
+	}
+	if rid == "" {
+		rid = reqid.NewID()
+	}
+	newCtx := reqid.WithRequestID(ctx, rid)
+	wrapped := &wrappedServerStream{ServerStream: ss, ctx: newCtx}
+
+	log.Info().
+		Str("request_id", rid).
+		Str("grpc_method", info.FullMethod).
+		Msg("grpc stream opened")
+
+	start := time.Now()
+	err := handler(srv, wrapped)
+	duration := time.Since(start)
+
+	level := zerolog.InfoLevel
+	if err != nil {
+		level = zerolog.WarnLevel
+	}
+	log.WithLevel(level).
+		Str("request_id", rid).
+		Str("grpc_method", info.FullMethod).
+		Dur("duration", duration).
+		Err(err).
+		Msg("grpc stream closed")
+
+	return err
+}
+
+// grpcLogLevel returns the appropriate log level for a gRPC status code.
+func grpcLogLevel(code codes.Code) zerolog.Level {
+	switch code {
+	case codes.OK:
+		return zerolog.DebugLevel
+	case codes.NotFound, codes.InvalidArgument, codes.AlreadyExists:
+		return zerolog.WarnLevel
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return zerolog.WarnLevel
+	default:
+		return zerolog.ErrorLevel
+	}
 }
 
 // Context helpers for satellite ID

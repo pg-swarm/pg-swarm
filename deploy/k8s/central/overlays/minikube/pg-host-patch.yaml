@@ -13,6 +13,8 @@ spec:
       containers:
         - name: central
           env:
+            - name: LOG_LEVEL
+              value: trace
             - name: PG_HOST
               value: postgres.pgswarm-system-central.svc.cluster.local
             - name: ENCRYPTION_KEY
