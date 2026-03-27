@@ -240,10 +240,17 @@ func (s *E2ESuite) assertNoPrimaryDuplicates() {
 	s.Assert().Equal(1, count, "expected exactly 1 primary, got %d: %v", count, primaries)
 }
 
-func (s *E2ESuite) monitorLabels(duration time.Duration) *PodLabelHistory {
+// monitorLabels polls pod labels at 1s intervals until stop is closed or
+// maxDuration elapses. Returns the history for split-brain assertions.
+func (s *E2ESuite) monitorLabels(stop <-chan struct{}, maxDuration time.Duration) *PodLabelHistory {
 	history := &PodLabelHistory{}
-	deadline := time.Now().Add(duration)
+	deadline := time.Now().Add(maxDuration)
 	for time.Now().Before(deadline) {
+		select {
+		case <-stop:
+			return history
+		default:
+		}
 		pods, err := s.k8s.GetClusterPods(clusterName)
 		if err == nil {
 			history.Observe(pods)
@@ -251,4 +258,18 @@ func (s *E2ESuite) monitorLabels(duration time.Duration) *PodLabelHistory {
 		time.Sleep(1 * time.Second)
 	}
 	return history
+}
+
+// startLabelMonitor starts monitoring in a goroutine and returns a function
+// to stop it and get the results.
+func (s *E2ESuite) startLabelMonitor(maxDuration time.Duration) (stop func() *PodLabelHistory) {
+	stopCh := make(chan struct{})
+	done := make(chan *PodLabelHistory, 1)
+	go func() {
+		done <- s.monitorLabels(stopCh, maxDuration)
+	}()
+	return func() *PodLabelHistory {
+		close(stopCh)
+		return <-done
+	}
 }

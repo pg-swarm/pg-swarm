@@ -103,6 +103,10 @@ type Monitor struct {
 	// we immediately clear the role=primary label so the RW service stops
 	// routing to this pod — even before the replica detects the failure.
 	wasPrimary bool
+
+	// zeroPrimaryCount tracks consecutive ticks where no pod in the cluster
+	// has role=primary. After 5 ticks (~25s), triggers emergency promotion.
+	zeroPrimaryCount int
 }
 
 // NewMonitor creates a new failover monitor.
@@ -147,7 +151,9 @@ func (m *Monitor) Run(ctx context.Context) error {
 }
 
 const (
-	pgVersionFile           = "/var/lib/postgresql/data/pgdata/PG_VERSION"
+	pgDataDir               = "/var/lib/postgresql/data/pgdata"
+	pgVersionFile           = pgDataDir + "/PG_VERSION"
+	pgStandbySignal         = pgDataDir + "/standby.signal"
 	pgSwarmNeedsBasebackup  = "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
 )
 
@@ -194,6 +200,29 @@ func (m *Monitor) tick(ctx context.Context) {
 			log.Warn().Msg("primary PG is down — clearing primary label to prevent split-brain")
 			m.labelPod(ctx, roleReplica)
 		}
+
+		// Zero-primary deadlock breaker: runs even when local PG is down.
+		// If ALL pods are stuck in basebackup loops with no primary, the
+		// sidecar that holds (or acquires) the lease removes the markers
+		// so the wrapper can start PG as primary instead of looping.
+		if count := m.countClusterPrimaries(ctx); count == 0 {
+			m.zeroPrimaryCount++
+			if m.zeroPrimaryCount >= 5 {
+				expired, _ := m.isLeaseExpired(ctx)
+				if expired || m.leaseHeldBySelf(ctx) {
+					if _, err := m.acquireOrRenew(ctx); err == nil {
+						log.Error().Int("ticks", m.zeroPrimaryCount).
+							Msg("EMERGENCY: zero primaries and PG down — removing markers to force primary startup")
+						os.Remove(pgSwarmNeedsBasebackup)
+						os.Remove(pgStandbySignal)
+						m.labelPod(ctx, rolePrimary)
+						m.zeroPrimaryCount = 0
+					}
+				}
+			}
+		} else {
+			m.zeroPrimaryCount = 0
+		}
 		return
 	}
 	defer conn.Close(ctx)
@@ -223,6 +252,7 @@ func (m *Monitor) tick(ctx context.Context) {
 // verified, PG is fenced to prevent writes.
 func (m *Monitor) handlePrimary(ctx context.Context, conn *pgx.Conn) {
 	m.consecutiveHealthyTicks++
+	m.zeroPrimaryCount = 0 // we are a primary, so at least one exists
 
 	// Crash-loop detection: if PG was recently down multiple times, don't
 	// renew the lease until it has been stable for stableUpThreshold ticks.
@@ -405,6 +435,28 @@ func (m *Monitor) isPrimaryReachable(ctx context.Context) bool {
 func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	m.labelPod(ctx, roleReplica)
 
+	// Zero-primary safety net: if no pod in the cluster has role=primary
+	// for 5+ consecutive ticks, force-promote to break the deadlock.
+	if count := m.countClusterPrimaries(ctx); count == 0 {
+		m.zeroPrimaryCount++
+		if m.zeroPrimaryCount >= 5 {
+			log.Error().Int("ticks", m.zeroPrimaryCount).
+				Msg("EMERGENCY: zero primaries for 5+ ticks — attempting force promotion")
+			if acquired, _ := m.acquireOrRenew(ctx); acquired {
+				if err := m.promote(ctx); err == nil {
+					m.labelPod(ctx, rolePrimary)
+					m.zeroPrimaryCount = 0
+					m.primaryUnreachableCount = 0
+					log.Info().Msg("emergency promotion successful")
+					return
+				}
+				log.Error().Msg("emergency pg_promote() failed — will retry next tick")
+			}
+		}
+	} else {
+		m.zeroPrimaryCount = 0
+	}
+
 	// Check if WAL receiver is actively streaming from the primary.
 	if conn != nil {
 		m.checkWalReceiver(ctx, conn)
@@ -451,21 +503,22 @@ func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 
 	log.Info().Msg("lease acquired — promoting to primary")
 
-	// CRITICAL: clear the primary label from ALL other pods BEFORE promoting.
-	// This creates a brief "no primary" window (service has no endpoints,
-	// clients get connection refused) rather than a "two primaries" window
-	// (writes go to divergent databases). No-primary is safe; two-primaries
-	// is catastrophic.
-	m.clearPrimaryLabels(ctx)
-
 	if err := m.promote(ctx); err != nil {
 		log.Error().Err(err).Msg("pg_promote() failed")
 		return
 	}
 
+	// Clear the primary label from all other pods AFTER promote succeeds,
+	// then immediately label ourselves. The old primary is already unreachable
+	// (3 ticks + expired lease confirmed), so the brief ~100ms window where
+	// both pods have the label is harmless — no traffic reaches the old pod.
+	// Doing this after promote avoids a deadlock where all pods become
+	// replicas if promote fails.
+	m.clearPrimaryLabels(ctx)
 	m.labelPod(ctx, rolePrimary)
 
 	m.primaryUnreachableCount = 0
+	m.zeroPrimaryCount = 0
 	m.walReceiverDownSince = time.Time{} // reset on promotion
 	log.Info().Msg("promotion successful — now primary")
 }
@@ -764,6 +817,36 @@ func (m *Monitor) labelPod(ctx context.Context, role string) {
 // cluster except this pod. Called before promotion to guarantee there is never
 // more than one pod with role=primary. Creates a brief "no primary" window
 // (service returns no endpoints) which is safe — clients retry connections.
+// countClusterPrimaries returns how many pods in this cluster have role=primary
+// AND are actually running with all containers ready. A pod stuck in a
+// basebackup loop has role=primary label but isn't serving — it shouldn't count.
+func (m *Monitor) countClusterPrimaries(ctx context.Context) int {
+	selector := fmt.Sprintf("pg-swarm.io/cluster=%s,pg-swarm.io/role=%s", m.cfg.ClusterName, rolePrimary)
+	pods, err := m.client.CoreV1().Pods(m.cfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return -1 // unknown, don't trigger emergency
+	}
+	ready := 0
+	for _, pod := range pods.Items {
+		if pod.Status.Phase != "Running" {
+			continue
+		}
+		allReady := true
+		for _, cs := range pod.Status.ContainerStatuses {
+			if !cs.Ready {
+				allReady = false
+				break
+			}
+		}
+		if allReady {
+			ready++
+		}
+	}
+	return ready
+}
+
 func (m *Monitor) clearPrimaryLabels(ctx context.Context) {
 	labelSelector := fmt.Sprintf("pg-swarm.io/cluster=%s,pg-swarm.io/role=%s", m.cfg.ClusterName, rolePrimary)
 	pods, err := m.client.CoreV1().Pods(m.cfg.Namespace).List(ctx, metav1.ListOptions{
@@ -877,6 +960,15 @@ func (m *Monitor) createLease(ctx context.Context) (bool, error) {
 }
 
 // isLeaseExpired checks if the leader lease has expired (or doesn't exist).
+// leaseHeldBySelf returns true if this pod currently holds the leader lease.
+func (m *Monitor) leaseHeldBySelf(ctx context.Context) bool {
+	lease, err := m.client.CoordinationV1().Leases(m.cfg.Namespace).Get(ctx, m.leaseName, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == m.cfg.PodName
+}
+
 func (m *Monitor) isLeaseExpired(ctx context.Context) (bool, error) {
 	lease, err := m.client.CoordinationV1().Leases(m.cfg.Namespace).Get(ctx, m.leaseName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {

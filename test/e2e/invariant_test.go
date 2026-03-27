@@ -16,24 +16,22 @@ func (s *E2ESuite) Test_21_SplitBrainUnderLoad() {
 	s.Require().NoError(err)
 	primaryUID, err := s.k8s.GetPodUID(primary)
 	s.Require().NoError(err)
-	s.T().Logf("killing primary %s (uid=%s) and monitoring labels for 60s...", primary, primaryUID)
+	s.T().Logf("killing primary %s (uid=%s) and monitoring labels...", primary, primaryUID)
 
-	done := make(chan *PodLabelHistory, 1)
-	go func() { done <- s.monitorLabels(60 * time.Second) }()
+	stopMonitor := s.startLabelMonitor(3 * time.Minute)
 
 	err = s.k8s.DeletePod(primary)
 	s.Require().NoError(err)
 
-	_, _ = s.k8s.WatchForNewPrimary(clusterName, primaryUID, 60*time.Second)
+	_, _ = s.k8s.WatchForNewPrimary(clusterName, primaryUID, 90*time.Second)
+	_ = s.k8s.WatchPodsReady(clusterName, 1, 3*time.Minute)
 
-	history := <-done
+	history := stopMonitor()
 	max, when := history.MaxPrimaries()
 	s.T().Logf("label monitoring complete: %s", history.Report())
 	s.Assert().LessOrEqual(max, 1,
 		"SPLIT-BRAIN: observed %d primaries at %s — %s",
 		max, when.Format("15:04:05.000"), history.Report())
-
-	_ = s.k8s.WatchPodsReady(clusterName, 1, 3*time.Minute)
 }
 
 func (s *E2ESuite) Test_30_ProfileUpdateNoBadge() {

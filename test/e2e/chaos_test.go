@@ -13,8 +13,7 @@ func (s *E2ESuite) Test_10_Chaos_KillPrimaryPod() {
 	s.Require().NoError(err)
 	s.T().Logf("killing primary pod: %s (uid=%s)", primary, primaryUID)
 
-	done := make(chan *PodLabelHistory, 1)
-	go func() { done <- s.monitorLabels(90 * time.Second) }()
+	stopMonitor := s.startLabelMonitor(3 * time.Minute)
 
 	err = s.k8s.DeletePod(primary)
 	s.Require().NoError(err)
@@ -26,7 +25,7 @@ func (s *E2ESuite) Test_10_Chaos_KillPrimaryPod() {
 	err = s.k8s.WatchPodsReady(clusterName, 1, 3*time.Minute)
 	s.Require().NoError(err)
 
-	history := <-done
+	history := stopMonitor()
 	max, _ := history.MaxPrimaries()
 	s.Assert().LessOrEqual(max, 1, "SPLIT-BRAIN detected: %s", history.Report())
 	s.logHealth()
@@ -39,8 +38,7 @@ func (s *E2ESuite) Test_11_Chaos_DeletePGDATA() {
 	s.Require().NoError(err)
 	s.T().Logf("deleting PGDATA on primary: %s (uid=%s)", primary, primaryUID)
 
-	done := make(chan *PodLabelHistory, 1)
-	go func() { done <- s.monitorLabels(2 * time.Minute) }()
+	stopMonitor := s.startLabelMonitor(5 * time.Minute)
 
 	err = s.k8s.DeletePGDATA(primary)
 	s.Require().NoError(err)
@@ -52,7 +50,7 @@ func (s *E2ESuite) Test_11_Chaos_DeletePGDATA() {
 	err = s.k8s.WatchPodsReady(clusterName, 1, 5*time.Minute)
 	s.Require().NoError(err)
 
-	history := <-done
+	history := stopMonitor()
 	max, _ := history.MaxPrimaries()
 	s.Assert().LessOrEqual(max, 1, "SPLIT-BRAIN detected: %s", history.Report())
 	s.logHealth()

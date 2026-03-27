@@ -136,21 +136,28 @@ pg_swarm_recover() {
 # --- Helper: nuke PGDATA and re-basebackup from primary ---
 pg_swarm_rebasebackup() {
     local reason="$1"
+    local marker="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
     echo "pg-swarm: $reason — starting full re-basebackup"
     find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
-    for i in $(seq 1 60); do
+    for i in $(seq 1 12); do
+        # If the sidecar removed the marker (emergency deadlock breaker),
+        # abort the rebasebackup loop so the wrapper can start PG directly.
+        if [ ! -f "$marker" ]; then
+            echo "pg-swarm: basebackup marker removed by sidecar — aborting rebasebackup"
+            return 1
+        fi
         if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
             if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
                 -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
                 cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
                 cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
-                rm -f "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+                rm -f "$marker"
                 return 0
             fi
         fi
         sleep 5
     done
-    echo "pg-swarm: re-basebackup failed after 60 attempts"
+    echo "pg-swarm: re-basebackup failed after 12 attempts"
     return 1
 }
 
