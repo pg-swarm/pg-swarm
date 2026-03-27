@@ -1,8 +1,7 @@
-package failover
+package sentinel
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,20 +10,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/remotecommand"
 )
 
 // RecoveryRule is a single log-matching rule loaded from the mounted ConfigMap.
 type RecoveryRule struct {
-	Name            string `json:"name"`
-	Pattern         string `json:"pattern"`
-	Severity        string `json:"severity"`
-	Action          string `json:"action"`
-	ExecCommand     string `json:"exec_command,omitempty"`
+	Name                   string `json:"name"`
+	Pattern                string `json:"pattern"`
+	Severity               string `json:"severity"`
+	Action                 string `json:"action"`
+	ExecCommand            string `json:"exec_command,omitempty"`
 	CooldownSeconds        int32  `json:"cooldown_seconds"`
 	Enabled                bool   `json:"enabled"`
 	Category               string `json:"category"`
@@ -38,43 +38,42 @@ type compiledRule struct {
 	re *regexp.Regexp
 }
 
-// Action severity ordering for the mutex: higher number = more destructive.
-var actionSeverity = map[string]int{
-	"event":       0,
-	"exec":        1,
-	"restart":     2,
-	"rewind":      3,
-	"rebasebackup": 4,
+// EventEmitter sends detection events to the satellite via the gRPC stream.
+// SidecarConnector implements this interface.
+type EventEmitter interface {
+	EmitEvent(evt *pgswarmv1.Event)
 }
 
-// LogWatcher tails PostgreSQL container logs and fires recovery rules.
+// LogWatcher tails PostgreSQL container logs and emits events when recovery
+// rules match. It does not execute any actions — the satellite decides what
+// commands to send back through the sidecar command infrastructure.
 type LogWatcher struct {
-	monitor   *Monitor
-	client    kubernetes.Interface
-	rulesPath string
-	podName   string
-	namespace string
+	client      kubernetes.Interface
+	emitter     EventEmitter
+	rulesPath   string
+	podName     string
+	namespace   string
+	clusterName string
 
-	mu            sync.Mutex
-	rules         []compiledRule
-	cooldowns     map[string]time.Time
-	actionRunning string
-	pendingAction *compiledRule
-	rulesModTime  time.Time
+	mu           sync.Mutex
+	rules        []compiledRule
+	cooldowns    map[string]time.Time
+	rulesModTime time.Time
 
 	matchTimes map[string][]time.Time // per-rule sliding window of match timestamps
 }
 
 // NewLogWatcher creates a log watcher that reads rules from the given file path.
-func NewLogWatcher(mon *Monitor, client kubernetes.Interface, rulesPath, podName, namespace string) *LogWatcher {
+func NewLogWatcher(client kubernetes.Interface, emitter EventEmitter, rulesPath, podName, namespace, clusterName string) *LogWatcher {
 	return &LogWatcher{
-		monitor:   mon,
-		client:    client,
-		rulesPath: rulesPath,
-		podName:   podName,
-		namespace: namespace,
-		cooldowns:  make(map[string]time.Time),
-		matchTimes: make(map[string][]time.Time),
+		client:      client,
+		emitter:     emitter,
+		rulesPath:   rulesPath,
+		podName:     podName,
+		namespace:   namespace,
+		clusterName: clusterName,
+		cooldowns:   make(map[string]time.Time),
+		matchTimes:  make(map[string][]time.Time),
 	}
 }
 
@@ -240,108 +239,41 @@ func (lw *LogWatcher) matchLine(line string) {
 			Str("matched", truncate(line, 120)).
 			Msg("logwatcher: rule fired")
 
-		// Events are non-destructive — always fire, skip mutex
-		if r.Action == "event" {
-			continue
-		}
-
-		lw.dispatchAction(r)
+		lw.emitEvent(r, line)
 	}
 }
 
-// dispatchAction handles the action mutex: one action at a time, higher severity supersedes.
-func (lw *LogWatcher) dispatchAction(r *compiledRule) {
-	lw.mu.Lock()
-
-	if lw.actionRunning != "" {
-		runningSev := actionSeverity[lw.actionRunning]
-		incomingSev := actionSeverity[r.Action]
-
-		if incomingSev <= runningSev {
-			log.Info().Str("rule", r.Name).Str("action", r.Action).Str("running", lw.actionRunning).Msg("logwatcher: action dropped (lower/equal severity already running)")
-			lw.mu.Unlock()
-			return
-		}
-
-		// Queue as pending (supersedes any existing pending)
-		log.Info().Str("rule", r.Name).Str("action", r.Action).Str("running", lw.actionRunning).Msg("logwatcher: action queued (supersedes running)")
-		rc := *r
-		lw.pendingAction = &rc
-		lw.mu.Unlock()
+// emitEvent sends a detection event to the satellite via the EventEmitter.
+// The satellite decides what action to take and sends a command back.
+func (lw *LogWatcher) emitEvent(r *compiledRule, matchedLine string) {
+	if lw.emitter == nil {
 		return
 	}
 
-	lw.actionRunning = r.Action
-	lw.mu.Unlock()
-
-	go lw.executeAction(r)
-}
-
-// executeAction runs the recovery action, then checks for a pending action.
-func (lw *LogWatcher) executeAction(r *compiledRule) {
-	log.Info().Str("rule", r.Name).Str("action", r.Action).Msg("logwatcher: executing action")
-
-	ctx := context.Background()
-	switch r.Action {
-	case "restart":
-		// Stop PG — wrapper loop handles recovery
-		lw.monitor.execInContainer(ctx, "pg_ctl stop -m fast -D /var/lib/postgresql/data/pgdata")
-	case "rewind":
-		// Create standby.signal + stop PG — wrapper runs pg_rewind
-		if err := lw.monitor.rewindOrReinit(ctx); err != nil {
-			log.Error().Err(err).Str("rule", r.Name).Msg("logwatcher: rewind action failed")
-		}
-	case "rebasebackup":
-		// Write marker + stop PG — wrapper nukes PGDATA and rebuilds
-		lw.monitor.execInContainer(ctx, fmt.Sprintf(
-			"echo 'rule:%s' > %s && pg_ctl stop -m fast -D /var/lib/postgresql/data/pgdata",
-			r.Name, pgSwarmNeedsBasebackup))
-	case "exec":
-		if r.ExecCommand != "" {
-			lw.monitor.execInContainer(ctx, r.ExecCommand)
-		}
+	evt := &pgswarmv1.Event{
+		Id:          uuid.NewString(),
+		Type:        "log.rule." + r.Name,
+		ClusterName: lw.clusterName,
+		Namespace:   lw.namespace,
+		PodName:     lw.podName,
+		Severity:    r.Severity,
+		Source:      "sidecar",
+		Timestamp:   timestamppb.Now(),
+		Data: map[string]string{
+			"rule_name":    r.Name,
+			"action":       r.Action,
+			"category":     r.Category,
+			"matched_line": truncate(matchedLine, 200),
+		},
 	}
 
-	// Clear running, check pending
-	lw.mu.Lock()
-	lw.actionRunning = ""
-	pending := lw.pendingAction
-	lw.pendingAction = nil
-	lw.mu.Unlock()
-
-	if pending != nil {
-		log.Info().Str("rule", pending.Name).Str("action", pending.Action).Msg("logwatcher: running queued action")
-		lw.dispatchAction(pending)
-	}
+	lw.emitter.EmitEvent(evt)
 }
 
-// execInContainer is a convenience wrapper for the monitor's exec capability.
+// execInContainer is a convenience wrapper for the shared execInPod helper.
 func (m *Monitor) execInContainer(ctx context.Context, command string) {
-	script := fmt.Sprintf("set -e\n%s", command)
-	req := m.client.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(m.cfg.PodName).
-		Namespace(m.cfg.Namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: "postgres",
-			Command:   []string{"bash", "-c", script},
-			Stdout:    true,
-			Stderr:    true,
-		}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(m.cfg.RestConfig, "POST", req.URL())
-	if err != nil {
-		log.Error().Err(err).Str("command", command).Msg("logwatcher: exec setup failed")
-		return
-	}
-
-	var stdout, stderr bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}); err != nil {
-		log.Error().Err(err).Str("stdout", stdout.String()).Str("stderr", stderr.String()).Msg("logwatcher: exec failed")
+	if err := execInPod(ctx, m.client, m.cfg.RestConfig, m.cfg.PodName, m.cfg.Namespace, command); err != nil {
+		log.Error().Err(err).Str("command", command).Msg("exec failed")
 	}
 }
 

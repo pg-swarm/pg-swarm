@@ -115,8 +115,8 @@ func TestFencePrimary_AllFail(t *testing.T) {
 	e2 := errors.New("err2")
 	e3 := errors.New("err3")
 	m := newMockExecer(map[string]error{
-		"ALTER SYSTEM SET default_transaction_read_only = on;":                                                                      e1,
-		"SELECT pg_reload_conf();":                                                                                                  e2,
+		"ALTER SYSTEM SET default_transaction_read_only = on;": e1,
+		"SELECT pg_reload_conf();":                             e2,
 		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid != pg_backend_pid() AND backend_type = 'client backend';": e3,
 	})
 	err := FencePrimary(context.Background(), m)

@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
+	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // SidecarStreamManager tracks connected sidecar streams and provides
@@ -122,6 +124,129 @@ func NewSidecarStream(podName, cluster, namespace string, cancel context.CancelF
 // DeliverResult delivers a command result to the pending channel for its request ID.
 func (s *SidecarStream) DeliverResult(result *pgswarmv1.CommandResult) {
 	s.deliverResult(result)
+}
+
+// DeliverEventResult delivers an event-based command result using the event's
+// operation_id to correlate with the pending request.
+func (s *SidecarStream) DeliverEventResult(evt *pgswarmv1.Event) {
+	opID := evt.GetOperationId()
+	if opID == "" {
+		return
+	}
+	// Convert event result to CommandResult for the pending channel
+	result := &pgswarmv1.CommandResult{
+		RequestId: opID,
+		Success:   evt.Data["success"] == "true",
+		Error:     evt.Data["error"],
+	}
+	if v, ok := evt.Data["in_recovery"]; ok {
+		result.InRecovery = v == "true"
+	}
+	if v, ok := evt.Data["is_fenced"]; ok {
+		result.IsFenced = v == "true"
+	}
+	s.deliverResult(result)
+}
+
+// SendEventCommandAndWait sends a command as an Event to a sidecar and waits for
+// the event-based result. The command type (e.g., "command.fence") is the event type.
+// Command parameters are carried in the event's data map.
+func (m *SidecarStreamManager) SendEventCommandAndWait(
+	ctx context.Context, namespace, podName string, commandType string, params map[string]string,
+) (*pgswarmv1.CommandResult, error) {
+	stream := m.Get(namespace, podName)
+	if stream == nil {
+		return nil, fmt.Errorf("sidecar %s/%s not connected", namespace, podName)
+	}
+
+	operationID := uuid.NewString()
+
+	evt := &pgswarmv1.Event{
+		Id:          uuid.NewString(),
+		Type:        commandType,
+		ClusterName: stream.Cluster,
+		Namespace:   namespace,
+		PodName:     podName,
+		Severity:    "info",
+		Source:      "satellite",
+		Timestamp:   timestamppb.Now(),
+		OperationId: operationID,
+		Data:        params,
+	}
+	if evt.Data == nil {
+		evt.Data = make(map[string]string)
+	}
+
+	cmd := &pgswarmv1.SidecarCommand{
+		RequestId: operationID,
+		Cmd:       &pgswarmv1.SidecarCommand_Event{Event: evt},
+	}
+
+	respCh := stream.registerPending(operationID)
+	defer stream.removePending(operationID)
+
+	log.Debug().
+		Str("command", commandType).
+		Str("pod", podName).
+		Str("namespace", namespace).
+		Str("operation_id", operationID).
+		Msg("sending event command to sidecar")
+
+	select {
+	case stream.SendCh <- cmd:
+	default:
+		return nil, fmt.Errorf("sidecar %s/%s send channel full", namespace, podName)
+	}
+
+	select {
+	case result := <-respCh:
+		log.Debug().
+			Str("command", commandType).
+			Str("pod", podName).
+			Bool("success", result.Success).
+			Str("operation_id", operationID).
+			Msg("event command result received")
+		return result, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// eventCommandTypeToLegacy maps event command types to legacy SidecarCommand
+// constructors for backward compatibility with old sidecars.
+func eventCommandTypeToLegacy(commandType string, params map[string]string) *pgswarmv1.SidecarCommand {
+	cmd := &pgswarmv1.SidecarCommand{}
+	switch commandType {
+	case "command.fence":
+		cmd.Cmd = &pgswarmv1.SidecarCommand_Fence{Fence: &pgswarmv1.FenceCmd{}}
+	case "command.unfence":
+		cmd.Cmd = &pgswarmv1.SidecarCommand_Unfence{Unfence: &pgswarmv1.UnfenceCmd{}}
+	case "command.checkpoint":
+		cmd.Cmd = &pgswarmv1.SidecarCommand_Checkpoint{Checkpoint: &pgswarmv1.CheckpointCmd{}}
+	case "command.promote":
+		cmd.Cmd = &pgswarmv1.SidecarCommand_Promote{Promote: &pgswarmv1.PromoteCmd{}}
+	case "command.status":
+		cmd.Cmd = &pgswarmv1.SidecarCommand_Status{Status: &pgswarmv1.StatusCmd{}}
+	case "command.reload_conf":
+		cmd.Cmd = &pgswarmv1.SidecarCommand_ReloadConf{ReloadConf: &pgswarmv1.ReloadConfCmd{}}
+	case "command.create_database":
+		cmd.Cmd = &pgswarmv1.SidecarCommand_CreateDatabase{CreateDatabase: &pgswarmv1.CreateDatabaseCmd{
+			DbName:   params["db_name"],
+			DbUser:   params["db_user"],
+			Password: params["password"],
+		}}
+	case "command.restart", "command.rewind", "command.rebuild":
+		// These commands are handled via the event command path in the connector.
+		// They don't have legacy SidecarCommand equivalents — the event carries
+		// the command type and params directly.
+		cmd.Cmd = &pgswarmv1.SidecarCommand_Event{Event: &pgswarmv1.Event{
+			Type: commandType,
+			Data: params,
+		}}
+	default:
+		return nil
+	}
+	return cmd
 }
 
 // deliverResult delivers a command result to the pending channel for its request ID.

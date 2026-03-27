@@ -131,7 +131,7 @@ export default function ClusterDetail() {
   const sat = satellites.find(x => x.id === cluster.satellite_id);
   const h = health.find(x => x.cluster_name === cluster.name && x.satellite_id === cluster.satellite_id);
   const instances = h?.instances || [];
-  const hasFailover = s.failover?.enabled;
+  const hasSentinel = s.sentinel?.enabled;
 
   const clusterEvents = (events || [])
     .filter(e => e.cluster_name === cluster.name && e.satellite_id === cluster.satellite_id)
@@ -256,11 +256,29 @@ export default function ClusterDetail() {
     }
   }
 
+  async function handleSwitchoverContinue() {
+    if (!switchoverOpId || !cluster) return;
+    try {
+      await api.switchoverContinue(cluster.id, switchoverOpId);
+    } catch (e) {
+      toast.error('Continue failed: ' + e.message);
+    }
+  }
+
+  async function handleSwitchoverAbort() {
+    if (!switchoverOpId || !cluster) return;
+    try {
+      await api.switchoverAbort(cluster.id, switchoverOpId);
+    } catch (e) {
+      toast.error('Abort failed: ' + e.message);
+    }
+  }
+
   const detailInst = detailInstId ? instances.find(i => i.pod_name === detailInstId) : null;
 
   const tags = [];
   if (cluster.paused) tags.push('paused');
-  if (s.failover?.enabled) tags.push('failover');
+  if (s.sentinel?.enabled) tags.push('sentinel');
   if (s.archive?.mode) tags.push('archive:' + s.archive.mode);
   if (s.databases?.length) tags.push(s.databases.length + ' db' + (s.databases.length > 1 ? 's' : ''));
 
@@ -379,7 +397,7 @@ export default function ClusterDetail() {
                       <table className="cd-table">
                         <thead>
                           <tr>
-                            {['Instance', 'Role', 'Status', 'Lag', 'Conns', 'Disk', 'TL', ...(hasFailover ? [''] : [])].map((col, i) => (
+                            {['Instance', 'Role', 'Status', 'Lag', 'Conns', 'Disk', 'TL', ...(hasSentinel ? [''] : [])].map((col, i) => (
                               <th key={i}>{col}</th>
                             ))}
                           </tr>
@@ -411,7 +429,7 @@ export default function ClusterDetail() {
                                 </td>
                                 <td className="mono">{formatDisk(inst.disk_used_bytes)}</td>
                                 <td className="mono muted">{inst.timeline_id || '-'}</td>
-                                {hasFailover && (
+                                {hasSentinel && (
                                   <td>
                                     {inst.role === 'replica' && inst.ready && (() => {
                                       const isActiveTarget = switchoverOp && !switchoverOp.done && switchoverOp.target_pod === inst.pod_name;
@@ -525,6 +543,8 @@ export default function ClusterDetail() {
           operation={switchoverOp}
           instances={instances}
           onStart={startSwitchover}
+          onContinue={handleSwitchoverContinue}
+          onAbort={handleSwitchoverAbort}
           onClose={() => {
             setProgressModalVisible(false);
             if (!switchoverOpLocal?.started || switchoverOp.done) {

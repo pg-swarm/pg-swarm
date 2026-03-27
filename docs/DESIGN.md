@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-pg-swarm is a centralized management system for PostgreSQL High Availability (HA) clusters deployed across up to 500 edge Kubernetes clusters. A cloud-hosted **Central** control plane handles registration, configuration distribution, and health monitoring. A **Satellite** agent runs on each edge cluster as a lightweight Kubernetes operator — constructing PG cluster manifests from JSON configs, performing health checks, and orchestrating failover. A **Failover Sidecar** runs alongside each PG pod, managing leader election via Kubernetes Leases and performing automatic promotion and demotion.
+pg-swarm is a centralized management system for PostgreSQL High Availability (HA) clusters deployed across up to 500 edge Kubernetes clusters. A cloud-hosted **Central** control plane handles registration, configuration distribution, and health monitoring. A **Satellite** agent runs on each edge cluster as a lightweight Kubernetes operator — constructing PG cluster manifests from JSON configs, performing health checks, and orchestrating failover. A **Sentinel Sidecar** runs alongside each PG pod, managing leader election via Kubernetes Leases and performing automatic promotion and demotion.
 
 **No CRDs, no external operator frameworks.** pg-swarm builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC resources from scratch.
 
@@ -89,7 +89,7 @@ pg-swarm/
 ├── cmd/
 │   ├── central/main.go              # Central control plane entrypoint
 │   ├── satellite/main.go            # Satellite agent entrypoint
-│   ├── failover-sidecar/main.go     # Failover sidecar entrypoint
+│   ├── sentinel-sidecar/main.go     # Sentinel sidecar entrypoint
 │   └── backup-sidecar/main.go       # Backup sidecar entrypoint
 ├── api/
 │   ├── proto/v1/                    # Protobuf definitions
@@ -130,7 +130,7 @@ pg-swarm/
 │   │   │   ├── manifest_rbac.go     # ServiceAccount, Role, RoleBinding for failover
 │   │   │   ├── manifest_test.go     # Golden-file manifest tests
 │   │   │   └── tombstone.go        # Cluster deletion markers
-│   │   ├── sidecar/                 # gRPC server for failover sidecar streaming
+│   │   ├── sidecar/                 # gRPC server for sentinel sidecar streaming
 │   │   │   ├── server.go           # SidecarStreamService gRPC server
 │   │   │   └── stream_manager.go   # Sidecar connection lifecycle
 │   │   ├── logcapture/             # Satellite log capture and forwarding
@@ -174,7 +174,7 @@ pg-swarm/
 │           │   ├── Badge.jsx        # State badges with lucide-react icons
 │           │   ├── MiniHeader.jsx   # Compact header for full-page routes
 │           │   ├── SwitchoverProgressModal.jsx  # 9-step switchover visualization
-│           │   └── RecoveryRulesTab.jsx  # Recovery rule set editor for Admin
+│           │   └── EventRulesTab.jsx     # Event rule set editor for Admin
 │           ├── context/
 │           │   ├── DataContext.jsx   # Global data provider (10s auto-refresh)
 │           │   └── ToastContext.jsx  # Toast notification system
@@ -275,7 +275,7 @@ message ClusterConfig {
   string profile_name = 15;          // originating profile name
   map<string, string> label_selector = 16; // satellite label matching
   BackupConfig backup_config = 17;   // backup sidecar configuration
-  string recovery_rule_set = 18;     // recovery rule set name
+  string event_rule_set = 18;        // event rule set name
 }
 ```
 
@@ -322,7 +322,7 @@ The satellite health monitor connects to each user database individually to coll
 
 ### 4.5 SidecarStreamService
 
-Bidirectional streaming RPC between failover sidecars and the satellite agent (`internal/satellite/sidecar/`, `internal/failover/connector.go`):
+Bidirectional streaming RPC between sentinel sidecars and the satellite agent (`internal/satellite/sidecar/`, `internal/sentinel/connector.go`):
 
 ```protobuf
 service SidecarStreamService {
@@ -416,7 +416,7 @@ The `Store` interface defines 79 methods across 13 domains:
 | Backup Profiles | 9 | CRUD, attach/detach to profiles, list for profile |
 | Backup Inventory | 4 | Create, update, list, get |
 | Restore Operations | 4 | Create, update, get, list |
-| Recovery Rule Sets | 5 | CRUD |
+| Event Rule Sets | 5 | CRUD |
 | Storage Tiers | 6 | CRUD, satellite tier mappings, reassign configs |
 | Health | 4 | Upsert health, update config state from health, query |
 | Events | 3 | Create, list with limit, filter by cluster |
@@ -466,8 +466,8 @@ The `Store` interface defines 79 methods across 13 domains:
                                                       └──────────────────┘
 
 ┌──────────────────┐       ┌──────────────────────┐       ┌──────────────────┐
-│ backup_profiles   │       │ profile_backup_       │       │ recovery_rule_   │
-├──────────────────┤       │ profiles (junction)   │       │ sets             │
+│ backup_profiles   │       │ profile_backup_       │       │ event_rule_sets  │
+├──────────────────┤       │ profiles (junction)   │       │                  │
 │ id (PK)          │◄──FK──├──────────────────────┤       ├──────────────────┤
 │ name (UQ)        │       │ profile_id ──────────┼──►    │ id (PK)          │
 │ config JSONB     │       │ backup_profile_id     │       │ name (UQ)        │
@@ -564,12 +564,12 @@ The 64-message buffer prevents slow satellites from blocking the REST API. If th
 | POST | `/storage-tiers` | Create storage tier |
 | PUT | `/storage-tiers/{id}` | Update storage tier |
 | DELETE | `/storage-tiers/{id}` | Delete storage tier |
-| **Recovery Rule Sets** | | |
-| GET | `/recovery-rule-sets` | List recovery rule sets |
-| POST | `/recovery-rule-sets` | Create recovery rule set |
-| GET | `/recovery-rule-sets/{id}` | Get recovery rule set |
-| PUT | `/recovery-rule-sets/{id}` | Update recovery rule set |
-| DELETE | `/recovery-rule-sets/{id}` | Delete recovery rule set |
+| **Event Rule Sets** | | |
+| GET | `/event-rule-sets` | List event rule sets |
+| POST | `/event-rule-sets` | Create event rule set |
+| GET | `/event-rule-sets/{id}` | Get event rule set |
+| PUT | `/event-rule-sets/{id}` | Update event rule set |
+| DELETE | `/event-rule-sets/{id}` | Delete event rule set |
 | **Clusters** | | |
 | GET | `/clusters` | List all cluster configs |
 | POST | `/clusters` | Create cluster config → triggers push |
@@ -694,7 +694,7 @@ From a `ClusterConfig`, the operator builds these Kubernetes resources:
 | ConfigMap | `{name}-config` | postgresql.conf + pg_hba.conf |
 | Secret | `{name}-secret` | Superuser + replication + app DB passwords |
 | ConfigMap | `{name}-store` | Central connection info for health reporting |
-| ServiceAccount | `{name}-failover` | Identity for failover sidecar |
+| ServiceAccount | `{name}-failover` | Identity for sentinel sidecar |
 | Role | `{name}-failover` | pods (get,patch), pods/exec (create), leases (get,create,update) |
 | RoleBinding | `{name}-failover` | Binds role to service account |
 
@@ -718,7 +718,7 @@ From a `ClusterConfig`, the operator builds these Kubernetes resources:
 
 **VolumeClaimTemplates are immutable**: the operator warns on VCT changes but cannot apply them to existing StatefulSets (K8s limitation).
 
-**Pod role labels** (`pg-swarm.io/role=primary` / `pg-swarm.io/role=replica`) drive service routing via label selectors. The failover sidecar manages these labels.
+**Pod role labels** (`pg-swarm.io/role=primary` / `pg-swarm.io/role=replica`) drive service routing via label selectors. The sentinel sidecar manages these labels.
 
 ### 7.5 Health Monitor
 
@@ -773,13 +773,13 @@ The satellite orchestrates switchover as a 9-step process with progress tracking
 
 **Progress tracking**: Each step is reported to the ops tracker (`internal/central/server/ops_tracker.go`), which broadcasts updates to dashboard clients via WebSocket. The dashboard renders a `SwitchoverProgressModal` with real-time step visualization and a PONR indicator.
 
-**Rollback**: Steps 1-6 are reversible (unfence primary, restore lease). After step 7 (promote), the switchover cannot be rolled back — the old primary's failover sidecar detects the split-brain condition on its next tick and automatically demotes PG to a standby (see Section 8).
+**Rollback**: Steps 1-6 are reversible (unfence primary, restore lease). After step 7 (promote), the switchover cannot be rolled back — the old primary's sentinel sidecar detects the split-brain condition on its next tick and automatically demotes PG to a standby (see Section 8).
 
 ---
 
-## 8. Failover Sidecar
+## 8. Sentinel Sidecar
 
-The failover sidecar (`cmd/failover-sidecar`) runs as a container alongside each postgres pod in the StatefulSet. It manages leader election using Kubernetes Coordination Leases and handles automatic failover.
+The sentinel sidecar (`cmd/sentinel-sidecar`) runs as a container alongside each postgres pod in the StatefulSet. It manages leader election using Kubernetes Coordination Leases and handles automatic failover.
 
 ### 8.1 Leader Election
 
@@ -825,7 +825,7 @@ Each sidecar contends for a Lease resource (`{cluster}-leader`) in the cluster n
 
 ### 8.3 SQL Fencing (`internal/shared/pgfence`)
 
-Fencing is a shared package used by both the failover sidecar and the switchover handler:
+Fencing is a shared package used by both the sentinel sidecar and the switchover handler:
 
 **`FencePrimary(ctx, db)`** — three steps, all attempted even if earlier ones fail:
 1. `ALTER SYSTEM SET default_transaction_read_only = on` — block writes
@@ -864,7 +864,7 @@ This requires the `pods/exec` permission in the failover Role.
 
 ### 8.5 RBAC
 
-The failover sidecar requires these Kubernetes permissions:
+The sentinel sidecar requires these Kubernetes permissions:
 
 | Resource | Verbs | Purpose |
 |----------|-------|---------|
@@ -884,7 +884,7 @@ The failover sidecar requires these Kubernetes permissions:
 | `HEALTH_CHECK_INTERVAL` | Config | Tick interval in seconds (default: 1) |
 | `PRIMARY_HOST` | Config | RW service DNS for direct primary reachability check |
 
-### 8.7 Log Watcher (`internal/failover/logwatcher.go`)
+### 8.7 Log Watcher (`internal/sentinel/logwatcher.go`)
 
 Real-time PostgreSQL log monitoring via the Kubernetes log API. The log watcher tails the postgres container's stdout/stderr and matches log lines against recovery patterns.
 
@@ -911,11 +911,11 @@ Real-time PostgreSQL log monitoring via the Kubernetes log API. The log watcher 
 
 **Safety features:** cooldown period between actions (prevents action storms), pattern deduplication (same log line won't trigger twice), action mutex (only one recovery action at a time).
 
-Recovery patterns can be managed centrally via recovery rule sets and attached to clusters.
+Recovery patterns can be managed centrally via event rule sets and attached to clusters.
 
-### 8.8 Sidecar Streaming (`internal/failover/connector.go`)
+### 8.8 Sidecar Streaming (`internal/sentinel/connector.go`)
 
-Bidirectional gRPC streaming between each failover sidecar and the satellite agent. This enables the satellite to dispatch commands directly to specific sidecars during switchover and other operations.
+Bidirectional gRPC streaming between each sentinel sidecar and the satellite agent. This enables the satellite to dispatch commands directly to specific sidecars during switchover and other operations.
 
 **Connection lifecycle:**
 1. Sidecar connects to satellite's `SidecarStreamService` (see Section 4.5)
@@ -1097,11 +1097,11 @@ The `SwitchoverProgressModal` component visualizes the 9-step satellite-controll
 - Real-time updates via WebSocket from the ops tracker
 - Error details if a step fails, with rollback status for pre-PONR failures
 
-### 11.5 Recovery Rules Editor
+### 11.5 Event Rules Editor
 
-The `RecoveryRulesTab` component in the Admin page provides:
+The `EventRulesTab` component in the Admin page provides:
 
-- Recovery rule set CRUD (create, edit, delete)
+- Event rule set CRUD (create, edit, delete)
 - Inline rule editing — add/remove patterns, configure actions, set cooldowns
 - Pattern sandbox — test regex patterns against sample log lines
 
@@ -1132,7 +1132,7 @@ The `RecoveryRulesTab` component in the Admin page provides:
 | `K8S_CLUSTER_NAME` | — | **Yes** | Kubernetes cluster identifier |
 | `REGION` | `""` | No | Geographic region label |
 
-### 11.3 Failover Sidecar
+### 11.3 Sentinel Sidecar
 
 See Section 8.6.
 
@@ -1162,7 +1162,7 @@ Edge clusters may be behind NAT or firewalls. The satellite initiates the connec
 
 Minimizing the edge footprint. CRDs require cluster-admin to install, and operator-sdk adds framework weight. By constructing raw manifests (StatefulSet, Service, ConfigMap, Secret), the satellite only needs basic RBAC on a single namespace.
 
-### Why a per-pod failover sidecar instead of satellite-driven failover?
+### Why a per-pod sentinel sidecar instead of satellite-driven failover?
 
 The sidecar runs locally to each pod and uses Kubernetes Leases for leader election. This is faster than satellite-driven failover (no cross-pod exec needed), works even if the satellite agent is down, and provides a clean separation of concerns. The satellite handles planned switchovers; the sidecar handles automatic failover.
 
@@ -1172,7 +1172,7 @@ Demotion involves creating `standby.signal` and restarting PG, which takes sever
 
 ### Why K8s exec for demotion?
 
-The failover sidecar runs in a separate container from postgres. Creating `standby.signal` and running `pg_ctl stop` requires filesystem access to PGDATA. The Kubernetes exec API (`remotecommand.NewSPDYExecutor`) allows the sidecar to run commands inside the postgres container without sharing volumes.
+The sentinel sidecar runs in a separate container from postgres. Creating `standby.signal` and running `pg_ctl stop` requires filesystem access to PGDATA. The Kubernetes exec API (`remotecommand.NewSPDYExecutor`) allows the sidecar to run commands inside the postgres container without sharing volumes.
 
 ### Why SHA-256 token hashing (not bcrypt)?
 

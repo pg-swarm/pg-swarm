@@ -247,7 +247,7 @@ export default function DeploymentRules() {
                           {spec.wal_storage && <span className="tag">{spec.wal_storage.size} WAL</span>}
                           <span className="tag">{spec.resources?.cpu_request || '?'} / {spec.resources?.cpu_limit || '?'} CPU</span>
                           <span className="tag">{spec.resources?.memory_request || '?'} / {spec.resources?.memory_limit || '?'} mem</span>
-                          {spec.failover?.enabled && <span className="tag">failover</span>}
+                          {spec.sentinel?.enabled && <span className="tag">failover</span>}
                           {spec.archive?.mode && <span className="tag">archive:{spec.archive.mode}</span>}
                           {(spec.databases || []).length > 0 && <span className="tag">{spec.databases.length} db(s)</span>}
                         </div>

@@ -41,7 +41,7 @@ cd deploy/docker
 docker-compose up -d
 
 # Dashboard dev server with mock data
-cd web/dashboard
+cd dashboard
 MOCK=true npm run dev
 ```
 
@@ -53,7 +53,7 @@ Look for issues labeled [`good first issue`](https://github.com/pg-swarm/pg-swar
 
 ### Areas Where Help is Welcome
 
-- **Tests** — Unit and integration test coverage, especially for the operator and failover sidecar
+- **Tests** — Unit and integration test coverage, especially for the operator and sentinel sidecar
 - **Documentation** — Tutorials, deployment guides, API examples
 - **Bug fixes** — Check the issue tracker
 - **Dashboard** — UI improvements, new visualizations

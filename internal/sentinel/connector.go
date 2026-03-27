@@ -1,4 +1,4 @@
-package failover
+package sentinel
 
 import (
 	"context"
@@ -13,12 +13,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/shared/pgfence"
 )
 
-// SidecarConnector connects the failover sidecar to the satellite's gRPC server,
+// SidecarConnector connects the sentinel sidecar to the satellite's gRPC server,
 // receives commands, executes them against localhost PostgreSQL, and sends results.
 type SidecarConnector struct {
 	satelliteAddr string
@@ -26,16 +28,34 @@ type SidecarConnector struct {
 	identity      *pgswarmv1.SidecarIdentity
 	connString    string // localhost PG connection string
 	sendCh        chan *pgswarmv1.SidecarMessage
+
+	// K8s exec capability for restart/rewind/rebuild commands
+	k8sClient  kubernetes.Interface
+	restConfig *rest.Config
 }
 
 // NewSidecarConnector creates a new connector for the sidecar-to-satellite stream.
-func NewSidecarConnector(satelliteAddr, authToken string, identity *pgswarmv1.SidecarIdentity, connString string) *SidecarConnector {
+func NewSidecarConnector(satelliteAddr, authToken string, identity *pgswarmv1.SidecarIdentity, connString string, k8sClient kubernetes.Interface, restConfig *rest.Config) *SidecarConnector {
 	return &SidecarConnector{
 		satelliteAddr: satelliteAddr,
 		authToken:     authToken,
 		identity:      identity,
 		connString:    connString,
 		sendCh:        make(chan *pgswarmv1.SidecarMessage, 16),
+		k8sClient:     k8sClient,
+		restConfig:    restConfig,
+	}
+}
+
+// EmitEvent sends a detection event to the satellite via the gRPC stream.
+// Non-blocking: drops the event if the send channel is full.
+func (c *SidecarConnector) EmitEvent(evt *pgswarmv1.Event) {
+	select {
+	case c.sendCh <- &pgswarmv1.SidecarMessage{
+		Payload: &pgswarmv1.SidecarMessage_Event{Event: evt},
+	}:
+	default:
+		log.Warn().Str("type", evt.GetType()).Msg("logwatcher: send channel full, event dropped")
 	}
 }
 
@@ -127,6 +147,9 @@ func (c *SidecarConnector) handleCommand(ctx context.Context, cmd *pgswarmv1.Sid
 		result = c.handleCreateDatabase(ctx, cmd)
 	case *pgswarmv1.SidecarCommand_ReloadConf:
 		result = c.handleReloadConf(ctx, cmd)
+	case *pgswarmv1.SidecarCommand_Event:
+		c.handleEventCommand(ctx, cmd)
+		return // event handler sends its own response
 	default:
 		result = &pgswarmv1.CommandResult{
 			RequestId: cmd.RequestId,
@@ -386,4 +409,169 @@ func (c *SidecarConnector) handleReloadConf(ctx context.Context, cmd *pgswarmv1.
 	}
 	log.Info().Msg("sidecar: pg_reload_conf() executed")
 	return result
+}
+
+func (c *SidecarConnector) handleRestart(ctx context.Context, cmd *pgswarmv1.SidecarCommand) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: cmd.RequestId, Success: true}
+
+	if err := execInPod(ctx, c.k8sClient, c.restConfig, c.identity.PodName, c.identity.Namespace,
+		"pg_ctl stop -m fast -D /var/lib/postgresql/data/pgdata"); err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("restart: %v", err)
+	}
+	log.Info().Msg("sidecar: pg_ctl stop executed (wrapper will restart)")
+	return result
+}
+
+func (c *SidecarConnector) handleRewind(ctx context.Context, cmd *pgswarmv1.SidecarCommand) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: cmd.RequestId, Success: true}
+
+	rwSvc := fmt.Sprintf("%s-rw", c.identity.ClusterName)
+	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, c.identity.Namespace)
+
+	script := fmt.Sprintf(`set -e
+PGDATA="/var/lib/postgresql/data/pgdata"
+touch "$PGDATA/standby.signal"
+sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
+sed -i '/^default_transaction_read_only/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
+echo "primary_conninfo = 'host=%s port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=%s'" >> "$PGDATA/postgresql.auto.conf"
+if [ -f "$PGDATA/backup_label" ]; then rm -f "$PGDATA/backup_label"; fi
+if [ -f "$PGDATA/tablespace_map" ]; then rm -f "$PGDATA/tablespace_map"; fi
+pg_ctl -D "$PGDATA" stop -m fast`, primaryHost, c.identity.PodName)
+
+	if err := execInPod(ctx, c.k8sClient, c.restConfig, c.identity.PodName, c.identity.Namespace, script); err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("rewind: %v", err)
+	}
+	log.Info().Msg("sidecar: standby conversion executed (wrapper will handle pg_rewind)")
+	return result
+}
+
+func (c *SidecarConnector) handleRebuild(ctx context.Context, cmd *pgswarmv1.SidecarCommand) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: cmd.RequestId, Success: true}
+
+	ruleName := "unknown"
+	if evt := cmd.GetEvent(); evt != nil {
+		if rn, ok := evt.Data["rule_name"]; ok {
+			ruleName = rn
+		}
+	}
+
+	script := fmt.Sprintf(
+		"echo 'rule:%s' > /var/lib/postgresql/data/.pg-swarm-needs-basebackup && pg_ctl stop -m fast -D /var/lib/postgresql/data/pgdata",
+		ruleName,
+	)
+	if err := execInPod(ctx, c.k8sClient, c.restConfig, c.identity.PodName, c.identity.Namespace, script); err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("rebuild: %v", err)
+	}
+	log.Info().Msg("sidecar: rebuild marker written + pg_ctl stop (wrapper will rebuild)")
+	return result
+}
+
+// handleEventCommand processes an event-based command from the satellite.
+// It dispatches based on event type, executes the corresponding action, and
+// sends back an event-based result (command.*.completed) via SidecarMessage_Event.
+func (c *SidecarConnector) handleEventCommand(ctx context.Context, cmd *pgswarmv1.SidecarCommand) {
+	evt := cmd.GetEvent()
+	if evt == nil {
+		return
+	}
+
+	eventType := evt.GetType()
+	operationID := evt.GetOperationId()
+
+	log.Info().
+		Str("command", eventType).
+		Str("pod", evt.GetPodName()).
+		Str("operation_id", operationID).
+		Msg("sidecar: processing event command")
+
+	// Dispatch to existing handlers by building legacy commands
+	var result *pgswarmv1.CommandResult
+	switch eventType {
+	case "command.fence":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		legacyCmd.Cmd = &pgswarmv1.SidecarCommand_Fence{Fence: &pgswarmv1.FenceCmd{}}
+		result = c.handleFence(ctx, legacyCmd)
+	case "command.unfence":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		legacyCmd.Cmd = &pgswarmv1.SidecarCommand_Unfence{Unfence: &pgswarmv1.UnfenceCmd{}}
+		result = c.handleUnfence(ctx, legacyCmd)
+	case "command.checkpoint":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		legacyCmd.Cmd = &pgswarmv1.SidecarCommand_Checkpoint{Checkpoint: &pgswarmv1.CheckpointCmd{}}
+		result = c.handleCheckpoint(ctx, legacyCmd)
+	case "command.promote":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		legacyCmd.Cmd = &pgswarmv1.SidecarCommand_Promote{Promote: &pgswarmv1.PromoteCmd{}}
+		result = c.handlePromote(ctx, legacyCmd)
+	case "command.status":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		legacyCmd.Cmd = &pgswarmv1.SidecarCommand_Status{Status: &pgswarmv1.StatusCmd{}}
+		result = c.handleStatus(ctx, legacyCmd)
+	case "command.create_database":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		legacyCmd.Cmd = &pgswarmv1.SidecarCommand_CreateDatabase{CreateDatabase: &pgswarmv1.CreateDatabaseCmd{
+			DbName:   evt.Data["db_name"],
+			DbUser:   evt.Data["db_user"],
+			Password: evt.Data["password"],
+		}}
+		result = c.handleCreateDatabase(ctx, legacyCmd)
+	case "command.reload_conf":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		legacyCmd.Cmd = &pgswarmv1.SidecarCommand_ReloadConf{ReloadConf: &pgswarmv1.ReloadConfCmd{}}
+		result = c.handleReloadConf(ctx, legacyCmd)
+	case "command.restart":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		result = c.handleRestart(ctx, legacyCmd)
+	case "command.rewind":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID}
+		result = c.handleRewind(ctx, legacyCmd)
+	case "command.rebuild":
+		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID, Cmd: cmd.Cmd}
+		result = c.handleRebuild(ctx, legacyCmd)
+	default:
+		log.Warn().Str("command", eventType).Msg("sidecar: unknown event command type")
+		result = &pgswarmv1.CommandResult{
+			RequestId: operationID,
+			Error:     fmt.Sprintf("unknown event command: %s", eventType),
+		}
+	}
+
+	// Send result back as an event
+	resultEvt := &pgswarmv1.Event{
+		Id:          fmt.Sprintf("%s-result", operationID),
+		Type:        eventType + ".completed",
+		ClusterName: evt.GetClusterName(),
+		Namespace:   evt.GetNamespace(),
+		PodName:     c.identity.PodName,
+		Severity:    "info",
+		Source:      "sidecar",
+		Timestamp:   timestamppb.Now(),
+		OperationId: operationID,
+		Data: map[string]string{
+			"success": fmt.Sprintf("%t", result.Success),
+		},
+	}
+	if result.Error != "" {
+		resultEvt.Data["error"] = result.Error
+		resultEvt.Severity = "error"
+	}
+	if result.InRecovery {
+		resultEvt.Data["in_recovery"] = "true"
+	}
+	if result.IsFenced {
+		resultEvt.Data["is_fenced"] = "true"
+	}
+
+	log.Info().
+		Str("command", eventType).
+		Bool("success", result.Success).
+		Str("operation_id", operationID).
+		Msg("sidecar: event command completed")
+
+	c.sendCh <- &pgswarmv1.SidecarMessage{
+		Payload: &pgswarmv1.SidecarMessage_Event{Event: resultEvt},
+	}
 }

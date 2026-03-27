@@ -5,8 +5,8 @@
 | Layer | Runs when | Location | Responsibility |
 |-------|-----------|----------|----------------|
 | **Init container** | Pod (re)created | `manifest_statefulset.go` `buildInitContainer` | Bootstrap or repair PGDATA before PG starts |
-| **Wrapper loop** | Continuously in postgres container | `manifest_statefulset.go` `buildMainContainer` | Detect PG exit, run `pg_swarm_recover()`, restart PG in-place |
-| **Failover sidecar** | Continuously in failover container | `monitor.go` | Lease management, split-brain detection, promotion, demotion, WAL receiver monitoring |
+| **Wrapper loop** | Continuously in postgres container | `manifest_statefulset.go` `buildMainContainer` | Detect PG exit, run `pg_swarm_recover()`, restart PG in-place. Two variants: sentinel-enabled (slim, delegates to sidecar) and standalone (full self-contained recovery with `pg_resetwal`). |
+| **Sentinel sidecar** | Continuously in sentinel container | `monitor.go` | Lease management, split-brain detection, promotion, demotion, WAL receiver monitoring |
 
 ---
 

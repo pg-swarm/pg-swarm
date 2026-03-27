@@ -14,7 +14,7 @@ Each PostgreSQL pod in the StatefulSet contains:
 |-----------------|----------------------------------|------------------------------|----------------------------------------------|
 | `pg-init`       | `postgres:17-alpine`             | Always                       | Init container — bootstraps PGDATA           |
 | `postgres`      | `postgres:17-alpine`             | Always                       | Main container — PG with restart-loop wrapper |
-| `failover`      | `pg-swarm-failover:latest`       | Only if `Failover.Enabled`   | Sidecar — leader lease + promotion           |
+| `sentinel`      | `pg-swarm-sentinel:latest`       | Only if `Failover.Enabled`   | Sidecar — leader lease + promotion           |
 | `backup`        | `pg-swarm-backup-sidecar:latest` | Only if `Backups` configured | Sidecar — WAL archiving + backups            |
 
 ### Role Labeling
@@ -26,11 +26,11 @@ routes traffic to a pod. There are **two actors** that set these labels:
    to pods that have no role label yet: ordinal 0 = `primary`, others = `replica`.
    Never overwrites an existing label.
 
-2. **Failover sidecar** (if present) — takes authority after initial labeling.
+2. **Sentinel sidecar** (if present) — takes authority after initial labeling.
    Queries `pg_is_in_recovery()` on every tick and patches the pod label to
    match the actual PostgreSQL state. Handles promotion and demotion.
 
-Without the failover sidecar, the operator's initial labeling is permanent.
+Without the sentinel sidecar, the operator's initial labeling is permanent.
 There is **no automatic failover** — manual intervention is required.
 
 ### Shared Volumes
@@ -144,16 +144,16 @@ Operator reconcile:
 
 After this, RW service routes to ordinal 0 and RO service routes to the rest.
 
-### Phase 4: Failover Sidecar (`failover`) — ONLY IF `Failover.Enabled`
+### Phase 4: Sentinel Sidecar (`sentinel`) — ONLY IF `Failover.Enabled`
 
-If the failover sidecar is not configured, skip this phase. The operator's
+If the sentinel sidecar is not configured, skip this phase. The operator's
 initial label is permanent, and there is no automatic failover.
 
-When present, the failover sidecar starts in parallel with the main container
+When present, the sentinel sidecar starts in parallel with the main container
 and takes over role labeling authority from the operator.
 
 ```
-t=1  Failover sidecar starts
+t=1  Sentinel sidecar starts
      │
      ├── Read config from env: CLUSTER_NAME, POD_NAME, POD_NAMESPACE, PRIMARY_HOST
      ├── Initialize K8s client (in-cluster config)
@@ -258,7 +258,7 @@ STEADY STATE — Primary pod fully operational:
      │       PG writes completed WAL segments to /wal-staging/
      └── Streaming replication to connected replicas
 
-  Failover sidecar (if Failover.Enabled)
+  Sentinel sidecar (if Failover.Enabled)
      └── Every 5s: renew leader Lease in K8s API, patch label role=primary
 
   Backup sidecar (if Backups configured)
@@ -355,16 +355,16 @@ Same as primary: the operator's `labelPods()` patches this pod with
 `pg-swarm.io/role = replica` (since ordinal != 0). The RO service begins
 routing read traffic here.
 
-### Phase 4: Failover Sidecar — ONLY IF `Failover.Enabled`
+### Phase 4: Sentinel Sidecar — ONLY IF `Failover.Enabled`
 
-Without the failover sidecar, the replica runs PG in standby mode with
+Without the sentinel sidecar, the replica runs PG in standby mode with
 streaming replication but there is no monitoring for primary failure and
 no automatic promotion.
 
 When present:
 
 ```
-t=1  Failover sidecar starts
+t=1  Sentinel sidecar starts
      │
      ├── Tick loop begins:
      │
@@ -475,7 +475,7 @@ PRIMARY POD (ordinal 0):
   │  │   └── completed WAL segments land in /wal-staging/        │
   │  └── Probes: pg_isready every 5-10s                          │
   ├──────────────────────────────────────────────────────────────┤
-  │  failover sidecar  (only if Failover.Enabled)                │
+  │  sentinel sidecar  (only if Failover.Enabled)                │
   │  └── Every 5s: renew Lease, patch label role=primary         │
   ├──────────────────────────────────────────────────────────────┤
   │  backup sidecar  (only if Backups configured)                │
@@ -499,7 +499,7 @@ REPLICA POD (ordinal 1):
   │  │   └── used when WAL gaps exist (archive recovery)         │
   │  └── Probes: pg_isready every 5-10s                          │
   ├──────────────────────────────────────────────────────────────┤
-  │  failover sidecar  (only if Failover.Enabled)                │
+  │  sentinel sidecar  (only if Failover.Enabled)                │
   │  ├── Every 5s: check primary reachability (fast-path pgx)    │
   │  ├── Label: role=replica                                     │
   │  └── If primary unreachable 3+ ticks → check lease → promote │
@@ -522,18 +522,18 @@ K8s SERVICES (always present):
 
 ## Scenario 3: Failover — Replica Promotes to Primary
 
-**Requires `Failover.Enabled`.** Without the failover sidecar, there is no
+**Requires `Failover.Enabled`.** Without the sentinel sidecar, there is no
 automatic promotion. The primary stays down until manually recovered.
 
 Assume: primary (ordinal 0) crashes or becomes unreachable.
-Both pods have the failover sidecar injected.
+Both pods have the sentinel sidecar injected.
 
 ### Phase 1: Primary Failure Detection
 
 ```
 t=0   Primary pod's PG crashes (or pod is deleted, or node goes down)
 
-      PRIMARY'S FAILOVER SIDECAR (if still running):
+      PRIMARY'S SENTINEL SIDECAR (if still running):
       ├── Tick: connect to local PG → FAIL
       ├── localPGDownCount = 1, consecutiveHealthyTicks = 0
       │
@@ -550,7 +550,7 @@ t=0   Primary pod's PG crashes (or pod is deleted, or node goes down)
 ### Phase 2: Replica Detects Failure and Promotes
 
 ```
-t≈3   REPLICA'S FAILOVER SIDECAR detects primary failure:
+t≈3   REPLICA'S SENTINEL SIDECAR detects primary failure:
       │
       ├── Tick: query local PG → pg_is_in_recovery() = TRUE (still replica)
       │
@@ -633,9 +633,9 @@ t≈30  Old primary pod restarts (K8s recreates it or PG restarts in-place)
       ├── Call pg_swarm_recover():
       │   ├── standby.signal exists? → may or may not
       │   │   If no standby.signal (was primary):
-      │   │   └── Skip timeline check (handled by failover sidecar)
+      │   │   └── Skip timeline check (handled by sentinel sidecar)
       │   │
-      │   If failover sidecar already demoted this node:
+      │   If sentinel sidecar already demoted this node:
       │   ├── standby.signal was created by demotion
       │   ├── Get local timeline: pg_controldata → timeline 1
       │   ├── Wait for new primary (via RW service DNS, now points to promoted replica)
@@ -672,7 +672,7 @@ t≈30  Old primary pod restarts (K8s recreates it or PG restarts in-place)
       │   └── Set up as standby
       └── Main container starts PG as replica
 
-      FAILOVER SIDECAR on old primary (present since Failover.Enabled):
+      SENTINEL SIDECAR on old primary (present since Failover.Enabled):
       ├── Tick: pg_is_in_recovery() → TRUE (now a replica)
       ├── Patch label: role=replica
       │   (RO service now routes to this pod too)
@@ -695,7 +695,7 @@ t≈30  Old primary pod restarts (K8s recreates it or PG restarts in-place)
 If the old primary's PG somehow comes back as primary while the lease is held by another pod:
 
 ```
-      OLD PRIMARY'S FAILOVER SIDECAR:
+      OLD PRIMARY'S SENTINEL SIDECAR:
       ├── Tick: pg_is_in_recovery() → FALSE (PG thinks it's primary)
       │
       ├── PRIMARY path:
@@ -729,7 +729,7 @@ If the old primary's PG somehow comes back as primary while the lease is held by
 | Primary init container completes | Always | ~5-10s |
 | Primary PG accepting connections | Always | ~15-20s |
 | Operator labels pod (role=primary) | Always | During reconcile |
-| Failover sidecar acquires lease | Failover.Enabled | ~20s |
+| Sentinel sidecar acquires lease | Failover.Enabled | ~20s |
 | Backup sidecar WAL watcher active | Backups configured | ~25s (waits for PG) |
 | Replica init container (pg_basebackup) | Always | ~20-60s (data size) |
 | Replica PG streaming from primary | Always | ~30-70s |

@@ -49,7 +49,7 @@
       <a href="#config-management" class="docs-link">Configuration Management</a>
       <a href="#cluster-databases" class="docs-link">Cluster Databases</a>
       <a href="#deployment-rules" class="docs-link">Deployment Rules</a>
-      <a href="#failover-sidecar" class="docs-link">Failover Sidecar</a>
+      <a href="#sentinel-sidecar" class="docs-link">Sentinel Sidecar</a>
       <a href="#sidecar-streaming" class="docs-link">Sidecar Streaming</a>
       <a href="#log-watcher" class="docs-link">Log Watcher</a>
       <a href="#recovery-rules" class="docs-link">Recovery Rules</a>
@@ -82,7 +82,7 @@
 
     <article class="concept" data-reveal id="central">
       <h3>Central Control Plane</h3>
-      <p>PG-Swarm consists of three binaries: <strong>central</strong> (<code>cmd/central</code>), <strong>satellite</strong> (<code>cmd/satellite</code>), and <strong>failover sidecar</strong> (<code>cmd/failover-sidecar</code>). The central server is the brain of the system, exposing three interfaces:</p>
+      <p>PG-Swarm consists of three binaries: <strong>central</strong> (<code>cmd/central</code>), <strong>satellite</strong> (<code>cmd/satellite</code>), and <strong>sentinel sidecar</strong> (<code>cmd/sentinel-sidecar</code>). The central server is the brain of the system, exposing three interfaces:</p>
       <ul>
         <li><strong>gRPC server (:9090)</strong> — accepts persistent bidirectional streams from satellites. Pushes cluster configurations, receives health reports, backup statuses, and event notifications.</li>
         <li><strong>REST API (:8080)</strong> — 60+ endpoints for managing satellites, cluster profiles, deployment rules, backup profiles, recovery rule sets, storage tiers, image variants, and restore operations. WebSocket endpoint for real-time state push. Used by the dashboard and any external tooling.</li>
@@ -147,11 +147,11 @@
       <p><strong>How it works:</strong></p>
       <ol>
         <li>An operator creates a database entry for a cluster via the dashboard or API, specifying the database name, owner role, and optional IP subnet access restrictions.</li>
-        <li>PG-Swarm sends a command to the failover sidecar on the primary pod.</li>
+        <li>PG-Swarm sends a command to the sentinel sidecar on the primary pod.</li>
         <li>The sidecar executes <code>CREATE ROLE</code> and <code>CREATE DATABASE</code> directly against the local PostgreSQL instance.</li>
         <li>If per-database IP subnet access control is specified, the sidecar generates HBA rules for that database and runs <code>pg_reload_conf()</code> to apply them.</li>
       </ol>
-      <p><strong>Zero pod restart:</strong> The entire process — role creation, database creation, and HBA rule application — happens live without any pod restarts. The failover sidecar handles the SQL commands, and <code>pg_reload_conf()</code> applies HBA changes immediately.</p>
+      <p><strong>Zero pod restart:</strong> The entire process — role creation, database creation, and HBA rule application — happens live without any pod restarts. The sentinel sidecar handles the SQL commands, and <code>pg_reload_conf()</code> applies HBA changes immediately.</p>
     </article>
 
     <article class="concept" data-reveal id="deployment-rules">
@@ -165,9 +165,9 @@ Namespace: "databases"</code></pre>
       <p>This is how PG-Swarm scales to hundreds of edge sites — you define the intent once, and the system fans it out.</p>
     </article>
 
-    <article class="concept" data-reveal id="failover-sidecar">
-      <h3>Failover Sidecar</h3>
-      <p>The failover sidecar (<code>cmd/failover-sidecar</code>) runs as a container alongside PostgreSQL in every pod of the StatefulSet. It handles:</p>
+    <article class="concept" data-reveal id="sentinel-sidecar">
+      <h3>Sentinel Sidecar</h3>
+      <p>The sentinel sidecar (<code>cmd/sentinel-sidecar</code>) runs as a container alongside PostgreSQL in every pod of the StatefulSet. It handles:</p>
       <ul>
         <li><strong>Leader election</strong> via Kubernetes Leases. The primary pod holds the lease and renews it every few seconds. If the primary dies, the lease expires after 15 seconds.</li>
         <li><strong>Promotion</strong>: the first replica to acquire the expired lease calls <code>pg_promote()</code> and relabels its pod as <code>pg-swarm.io/role=primary</code>.</li>
@@ -181,7 +181,7 @@ Namespace: "databases"</code></pre>
 
     <article class="concept" data-reveal id="sidecar-streaming">
       <h3>Sidecar Streaming</h3>
-      <p>Each failover sidecar maintains a <strong>bidirectional gRPC stream</strong> to the satellite agent running on the same edge cluster. This enables the satellite to dispatch commands directly to specific pods during switchover and other operations.</p>
+      <p>Each sentinel sidecar maintains a <strong>bidirectional gRPC stream</strong> to the satellite agent running on the same edge cluster. This enables the satellite to dispatch commands directly to specific pods during switchover and other operations.</p>
       <p><strong>How it works:</strong></p>
       <ol>
         <li>On startup, the sidecar connects to the satellite's <code>SidecarStreamService</code> and sends a <code>SidecarIdentity</code> message with its pod name, cluster name, and namespace.</li>
@@ -195,7 +195,7 @@ Namespace: "databases"</code></pre>
 
     <article class="concept" data-reveal id="log-watcher">
       <h3>Log Watcher</h3>
-      <p>The log watcher (<code>internal/failover/logwatcher.go</code>) monitors PostgreSQL's log output in real-time via the Kubernetes log API. It matches log lines against <strong>40+ recovery patterns</strong> across 9 categories and triggers automated recovery actions.</p>
+      <p>The log watcher (<code>internal/sentinel/logwatcher.go</code>) monitors PostgreSQL's log output in real-time via the Kubernetes log API. It matches log lines against <strong>40+ recovery patterns</strong> across 9 categories and triggers automated recovery actions.</p>
       <p><strong>Pattern categories:</strong></p>
       <ul>
         <li><strong>Data corruption</strong> — checksum failures, invalid page headers &rarr; re-basebackup</li>

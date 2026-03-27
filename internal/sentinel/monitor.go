@@ -1,4 +1,4 @@
-package failover
+package sentinel
 
 import (
 	"bytes"
@@ -49,7 +49,7 @@ const (
 	roleReplica = "replica"
 )
 
-// Config holds the failover monitor configuration.
+// Config holds the sentinel monitor configuration.
 type Config struct {
 	PodName             string
 	Namespace           string
@@ -107,9 +107,13 @@ type Monitor struct {
 	// zeroPrimaryCount tracks consecutive ticks where no pod in the cluster
 	// has role=primary. After 5 ticks (~25s), triggers emergency promotion.
 	zeroPrimaryCount int
+
+	// eventEmitter sends log-rule detection events to the satellite.
+	// Set via SetEventEmitter before Run.
+	eventEmitter EventEmitter
 }
 
-// NewMonitor creates a new failover monitor.
+// NewMonitor creates a new sentinel monitor.
 func NewMonitor(cfg Config, client kubernetes.Interface) *Monitor {
 	ld := cfg.LeaseDuration
 	if ld <= 0 {
@@ -123,17 +127,23 @@ func NewMonitor(cfg Config, client kubernetes.Interface) *Monitor {
 	}
 }
 
+// SetEventEmitter sets the emitter used by the logwatcher to send detection
+// events to the satellite. Must be called before Run.
+func (m *Monitor) SetEventEmitter(e EventEmitter) {
+	m.eventEmitter = e
+}
+
 // Run starts the monitoring loop. It blocks until the context is cancelled.
 func (m *Monitor) Run(ctx context.Context) error {
 	log.Info().
 		Str("pod", m.cfg.PodName).
 		Str("cluster", m.cfg.ClusterName).
 		Dur("interval", m.cfg.Interval).
-		Msg("failover monitor starting")
+		Msg("sentinel monitor starting")
 
 	// Start log watcher for recovery rules (non-blocking)
 	if m.cfg.RecoveryRulesPath != "" {
-		lw := NewLogWatcher(m, m.client, m.cfg.RecoveryRulesPath, m.cfg.PodName, m.cfg.Namespace)
+		lw := NewLogWatcher(m.client, m.eventEmitter, m.cfg.RecoveryRulesPath, m.cfg.PodName, m.cfg.Namespace, m.cfg.ClusterName)
 		go lw.Run(ctx)
 	}
 
@@ -151,10 +161,10 @@ func (m *Monitor) Run(ctx context.Context) error {
 }
 
 const (
-	pgDataDir               = "/var/lib/postgresql/data/pgdata"
-	pgVersionFile           = pgDataDir + "/PG_VERSION"
-	pgStandbySignal         = pgDataDir + "/standby.signal"
-	pgSwarmNeedsBasebackup  = "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+	pgDataDir              = "/var/lib/postgresql/data/pgdata"
+	pgVersionFile          = pgDataDir + "/PG_VERSION"
+	pgStandbySignal        = pgDataDir + "/standby.signal"
+	pgSwarmNeedsBasebackup = "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
 )
 
 // tick runs a single iteration of the monitoring loop: connects to PG,

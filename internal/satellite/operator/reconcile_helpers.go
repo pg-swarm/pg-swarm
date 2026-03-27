@@ -162,7 +162,7 @@ func createOrUpdateStatefulSet(ctx context.Context, client kubernetes.Interface,
 }
 
 // labelPods assigns initial role labels to pods that don't have one yet.
-// Pods that already carry a role label are left alone — the failover sidecar
+// Pods that already carry a role label are left alone — the sentinel sidecar
 // is the authority on role after initial deployment (it detects pg_is_in_recovery).
 // On first creation: ordinal 0 = primary, rest = replica.
 func labelPods(ctx context.Context, client kubernetes.Interface, namespace, clusterName string) error {
@@ -177,7 +177,7 @@ func labelPods(ctx context.Context, client kubernetes.Interface, namespace, clus
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 
-		// Skip pods that already have a role label — the failover sidecar manages
+		// Skip pods that already have a role label — the sentinel sidecar manages
 		// role labels based on actual PostgreSQL state (pg_is_in_recovery).
 		if _, hasRole := pod.Labels[LabelRole]; hasRole {
 			continue

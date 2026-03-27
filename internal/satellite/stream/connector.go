@@ -15,14 +15,10 @@ import (
 // Connector maintains a persistent bidirectional gRPC stream to central,
 // automatically reconnecting with exponential backoff on disconnection.
 type Connector struct {
-	centralAddr     string
-	authToken       string
-	sendCh          chan *pgswarmv1.SatelliteMessage
-	OnConfig              func(*pgswarmv1.ClusterConfig) error
-	OnDelete              func(*pgswarmv1.DeleteCluster) error
-	OnStorageClassRequest func() *pgswarmv1.StorageClassReport
-	OnSwitchover          func(*pgswarmv1.SwitchoverRequest, func(int32, string, string, string, string, bool)) *pgswarmv1.SwitchoverResult
-	OnSetLogLevel         func(string)
+	centralAddr string
+	authToken   string
+	sendCh      chan *pgswarmv1.SatelliteMessage
+	OnEvent     func(context.Context, *pgswarmv1.Event) error
 }
 
 // NewConnector creates a new stream Connector targeting the given central
@@ -45,6 +41,14 @@ func (c *Connector) SendMessage(msg *pgswarmv1.SatelliteMessage) {
 	}
 }
 
+// ForwardEvent wraps an Event in a SatelliteMessage and enqueues it for
+// sending to central. Used as the EventBus forward function.
+func (c *Connector) ForwardEvent(evt *pgswarmv1.Event) {
+	c.SendMessage(&pgswarmv1.SatelliteMessage{
+		Payload: &pgswarmv1.SatelliteMessage_Event{Event: evt},
+	})
+}
+
 // Run connects to central and processes messages in a loop. On disconnection
 // it reconnects with exponential backoff (max 30s). It blocks until ctx is
 // cancelled.
@@ -56,7 +60,6 @@ func (c *Connector) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// Reset backoff after a connection was established (and then broke).
 		backoff = time.Second
 		log.Warn().Err(err).Dur("backoff", backoff).Msg("stream disconnected, reconnecting...")
 
@@ -66,7 +69,6 @@ func (c *Connector) Run(ctx context.Context) error {
 		case <-time.After(backoff):
 		}
 
-		// Exponential backoff, max 30s
 		backoff *= 2
 		if backoff > 30*time.Second {
 			backoff = 30 * time.Second
@@ -81,10 +83,8 @@ func (c *Connector) connect(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
-	log.Trace().Msg("gRPC dial succeeded")
 
 	client := pgswarmv1.NewSatelliteStreamServiceClient(conn)
-
 	md := metadata.New(map[string]string{"authorization": c.authToken})
 	streamCtx := metadata.NewOutgoingContext(ctx, md)
 
@@ -92,161 +92,38 @@ func (c *Connector) connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Trace().Msg("bidi stream opened")
 
-	// Reset backoff on successful connection
 	log.Info().Msg("connected to central stream")
 
-	// Combined write loop (serializes all writes — gRPC streams are not concurrent-send-safe)
+	// Write loop (serializes all writes — gRPC streams are not concurrent-send-safe)
 	go c.writeLoop(ctx, stream)
 
-	// Send storage classes on connect
-	c.sendStorageClasses()
-
-	// Read loop
+	// Read loop — all messages from central are events or heartbeat acks
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
 			return err
 		}
 
-		log.Trace().Msg("received message from central")
 		switch payload := msg.Payload.(type) {
-		case *pgswarmv1.CentralMessage_ClusterConfig:
-			log.Trace().Str("cluster", payload.ClusterConfig.ClusterName).Msg("received ClusterConfig message")
+		case *pgswarmv1.CentralMessage_Event:
+			evt := payload.Event
 			log.Info().
-				Str("cluster", payload.ClusterConfig.ClusterName).
-				Int64("version", payload.ClusterConfig.ConfigVersion).
-				Msg("received cluster config")
-			c.handleConfig(payload.ClusterConfig)
-		case *pgswarmv1.CentralMessage_DeleteCluster:
-			log.Trace().Str("cluster", payload.DeleteCluster.ClusterName).Msg("received DeleteCluster message")
-			log.Info().
-				Str("cluster", payload.DeleteCluster.ClusterName).
-				Msg("received delete cluster")
-			c.handleDelete(payload.DeleteCluster)
-		case *pgswarmv1.CentralMessage_HeartbeatAck:
-			log.Trace().Msg("received HeartbeatAck message")
-			log.Debug().Msg("heartbeat ack received")
-		case *pgswarmv1.CentralMessage_RequestStorageClasses:
-			log.Trace().Msg("received RequestStorageClasses message")
-			log.Info().Msg("storage class refresh requested by central")
-			c.sendStorageClasses()
-		case *pgswarmv1.CentralMessage_Switchover:
-			log.Trace().Str("cluster", payload.Switchover.ClusterName).Msg("received Switchover message")
-			log.Info().
-				Str("cluster", payload.Switchover.ClusterName).
-				Str("target", payload.Switchover.TargetPod).
-				Msg("switchover requested by central")
-			c.handleSwitchover(payload.Switchover)
-		case *pgswarmv1.CentralMessage_SetLogLevel:
-			log.Info().Str("level", payload.SetLogLevel.Level).Msg("log level change requested by central")
-			if c.OnSetLogLevel != nil {
-				c.OnSetLogLevel(payload.SetLogLevel.Level)
+				Str("event_type", evt.GetType()).
+				Str("cluster", evt.GetClusterName()).
+				Str("source", evt.GetSource()).
+				Msg("received event from central")
+			if c.OnEvent != nil {
+				if err := c.OnEvent(ctx, evt); err != nil {
+					log.Warn().Err(err).
+						Str("event_type", evt.GetType()).
+						Str("cluster", evt.GetClusterName()).
+						Msg("failed to process event from central")
+				}
 			}
+		case *pgswarmv1.CentralMessage_HeartbeatAck:
+			log.Debug().Msg("heartbeat ack received")
 		}
-	}
-}
-
-func (c *Connector) handleConfig(cfg *pgswarmv1.ClusterConfig) {
-	log.Trace().Str("cluster", cfg.ClusterName).Msg("handleConfig entry")
-	if c.OnConfig == nil {
-		return
-	}
-
-	err := c.OnConfig(cfg)
-	log.Trace().Str("cluster", cfg.ClusterName).Bool("success", err == nil).Msg("handleConfig callback returned")
-
-	ack := &pgswarmv1.ConfigAck{
-		ClusterName:   cfg.ClusterName,
-		ConfigVersion: cfg.ConfigVersion,
-		Success:       err == nil,
-	}
-	if err != nil {
-		ack.ErrorMessage = err.Error()
-		log.Error().Err(err).
-			Str("cluster", cfg.ClusterName).
-			Int64("version", cfg.ConfigVersion).
-			Msg("config handling failed")
-	}
-
-	c.SendMessage(&pgswarmv1.SatelliteMessage{
-		Payload: &pgswarmv1.SatelliteMessage_ConfigAck{
-			ConfigAck: ack,
-		},
-	})
-}
-
-func (c *Connector) sendStorageClasses() {
-	log.Trace().Msg("sendStorageClasses entry")
-	if c.OnStorageClassRequest == nil {
-		return
-	}
-	report := c.OnStorageClassRequest()
-	if report == nil {
-		return
-	}
-	log.Trace().Int("count", len(report.StorageClasses)).Msg("sendStorageClasses sending report")
-	c.SendMessage(&pgswarmv1.SatelliteMessage{
-		Payload: &pgswarmv1.SatelliteMessage_StorageClassReport{
-			StorageClassReport: report,
-		},
-	})
-	log.Info().Int("count", len(report.StorageClasses)).Msg("sent storage class report to central")
-}
-
-func (c *Connector) handleSwitchover(req *pgswarmv1.SwitchoverRequest) {
-	if c.OnSwitchover == nil {
-		return
-	}
-
-	// Build progress callback that streams SwitchoverProgress messages to central
-	progressFn := func(step int32, stepName, status, targetPod, errorMsg string, ponr bool) {
-		c.SendMessage(&pgswarmv1.SatelliteMessage{
-			Payload: &pgswarmv1.SatelliteMessage_SwitchoverProgress{
-				SwitchoverProgress: &pgswarmv1.SwitchoverProgress{
-					OperationId:     req.OperationId,
-					ClusterName:     req.ClusterName,
-					Step:            step,
-					StepName:        stepName,
-					Status:          status,
-					TargetPod:       targetPod,
-					ErrorMessage:    errorMsg,
-					PointOfNoReturn: ponr,
-					Timestamp:       timestamppb.Now(),
-				},
-			},
-		})
-	}
-
-	result := c.OnSwitchover(req, progressFn)
-	if result == nil {
-		return
-	}
-	c.SendMessage(&pgswarmv1.SatelliteMessage{
-		Payload: &pgswarmv1.SatelliteMessage_SwitchoverResult{
-			SwitchoverResult: result,
-		},
-	})
-	if result.Success {
-		log.Info().Str("cluster", req.ClusterName).Str("target", req.TargetPod).Msg("switchover completed")
-	} else {
-		log.Error().Str("cluster", req.ClusterName).Str("error", result.ErrorMessage).Msg("switchover failed")
-	}
-}
-
-func (c *Connector) handleDelete(del *pgswarmv1.DeleteCluster) {
-	log.Trace().Str("cluster", del.ClusterName).Msg("handleDelete entry")
-	if c.OnDelete == nil {
-		return
-	}
-
-	if err := c.OnDelete(del); err != nil {
-		log.Error().Err(err).
-			Str("cluster", del.ClusterName).
-			Msg("delete handling failed")
-	} else {
-		log.Trace().Str("cluster", del.ClusterName).Msg("handleDelete completed")
 	}
 }
 

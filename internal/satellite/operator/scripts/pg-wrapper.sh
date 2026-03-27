@@ -1,21 +1,16 @@
 #!/bin/bash
-# pg-swarm wrapper: keeps the container alive across PG restarts.
+# pg-swarm wrapper (sentinel-enabled): keeps the container alive across PG restarts.
 #
-# When the failover sidecar demotes this node (pg_ctl stop) or PG crashes
-# from a timeline mismatch, PG exits but the CONTAINER stays running.
-# The wrapper detects the exit, runs pg_rewind if needed, and restarts PG
-# in-place — no K8s container restart, no restart counter increment.
+# Recovery decisions are made by the sentinel sidecar (leader lease, PGDATA
+# deletion detection, WAL monitoring, log-based pattern matching). This wrapper
+# executes the actions the sentinel requests via marker files and standby.signal.
 #
 # Only a K8s SIGTERM (pod deletion / rolling update) exits the container.
-# We distinguish the two cases via a SHUTTING_DOWN flag set by the trap.
 
 PRIMARY_HOST="{{PRIMARY_HOST}}"
 ORDINAL=${POD_NAME##*-}
 
 # --- Compute WAL segment name from a checkpoint LSN ---
-# Reads REDO WAL file + Latest checkpoint location from pg_controldata,
-# and derives the segment containing the checkpoint record itself.
-# Sets: CKPT_WAL (REDO file), CKPT_REC_WAL (checkpoint record file).
 pg_swarm_wal_segments() {
     CTLDATA=$(pg_controldata -D "$PGDATA" 2>/dev/null)
     CKPT_WAL=$(echo "$CTLDATA" | grep "REDO WAL file" | awk '{print $NF}')
@@ -30,7 +25,10 @@ pg_swarm_wal_segments() {
     fi
 }
 
-# --- Timeline recovery function ---
+# --- Timeline recovery (simplified for sentinel-enabled mode) ---
+# The sentinel's doRewind() writes standby.signal + stops PG, then this
+# function handles the actual pg_rewind. On failure, writes the basebackup
+# marker and returns — the marker handler picks it up next loop.
 pg_swarm_recover() {
     if [ ! -f "$PGDATA/standby.signal" ] || [ ! -f "$PGDATA/PG_VERSION" ]; then
         return
@@ -39,11 +37,8 @@ pg_swarm_recover() {
     LOCAL_TLI=$(pg_controldata -D "$PGDATA" 2>/dev/null | grep "Latest checkpoint.s TimeLineID" | awk '{print $NF}')
     echo "pg-swarm: checking timeline, local=${LOCAL_TLI:-unknown}"
 
-    # Wait for the primary (up to 30s)
     for i in $(seq 1 6); do
-        if pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then
-            break
-        fi
+        if pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then break; fi
         echo "pg-swarm: waiting for primary ($i/6)..."
         if [ "$i" = "6" ]; then
             echo "pg-swarm: primary not reachable — will start PG anyway"
@@ -62,8 +57,7 @@ pg_swarm_recover() {
     # Ensure clean shutdown state for pg_rewind
     DB_STATE=$(pg_controldata -D "$PGDATA" 2>/dev/null | grep "Database cluster state" | sed 's/.*: *//')
     case "$DB_STATE" in
-        "shut down"|"shut down in recovery")
-            ;;
+        "shut down"|"shut down in recovery") ;;
         *)
             echo "pg-swarm: unclean state ($DB_STATE) — running single-user recovery"
             postgres --single -D "$PGDATA" -c config_file="$PGDATA/postgresql.conf" </dev/null >/dev/null 2>&1 || true
@@ -75,12 +69,7 @@ pg_swarm_recover() {
         --source-server="host=$PRIMARY_HOST port=5432 user=postgres password=$POSTGRES_PASSWORD dbname=postgres" \
         --progress 2>&1; then
         echo "pg-swarm: pg_rewind succeeded"
-        if [ -f "$PGDATA/backup_label" ]; then echo "pg-swarm: removing stale backup_label after pg_rewind"; rm -f "$PGDATA/backup_label"; fi
-        if [ -f "$PGDATA/tablespace_map" ]; then echo "pg-swarm: removing stale tablespace_map after pg_rewind"; rm -f "$PGDATA/tablespace_map"; fi
-        # Clean up stale/pre-allocated WAL segments to prevent "invalid record length".
-        # Keep BOTH the REDO WAL file (replay start) AND the segment holding the
-        # checkpoint record itself — they can be in different segments when a
-        # checkpoint spans a WAL segment boundary.
+        rm -f "$PGDATA/backup_label" "$PGDATA/tablespace_map"
         pg_swarm_wal_segments
         if [ -n "$CKPT_WAL" ]; then
             echo "pg-swarm: cleaning stale WAL segments after pg_rewind (keeping $CKPT_WAL${CKPT_REC_WAL:+ and $CKPT_REC_WAL})"
@@ -89,42 +78,18 @@ pg_swarm_recover() {
                 -delete 2>/dev/null || true
         fi
         if [ -n "$CKPT_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_WAL" ]; then
-            echo "pg-swarm: checkpoint WAL $CKPT_WAL missing after pg_rewind — falling back to pg_basebackup"
-            if ! pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then
-                echo "pg-swarm: primary not reachable — skipping destructive recovery to preserve data"
-                return
-            fi
-            MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
-            touch "$MARKER"
-            find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
-            if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
-                -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
-                rm -f "$MARKER"
-                cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-                cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
-            else
-                echo "pg-swarm: pg_basebackup failed — will retry on next loop iteration"
-                return
-            fi
+            echo "pg-swarm: checkpoint WAL missing after pg_rewind — requesting re-basebackup"
+            touch "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+            return
         fi
     else
-        echo "pg-swarm: pg_rewind failed — checking if primary is available for re-basebackup"
+        echo "pg-swarm: pg_rewind failed — requesting re-basebackup"
         if ! pg_isready -h "$PRIMARY_HOST" -U postgres -t 5 >/dev/null 2>&1; then
             echo "pg-swarm: primary not reachable — skipping destructive recovery to preserve data"
             return
         fi
-        MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
-        touch "$MARKER"
-        find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
-        if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
-            -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
-            rm -f "$MARKER"
-            cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
-            cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
-        else
-            echo "pg-swarm: pg_basebackup failed — will retry on next loop iteration"
-            return
-        fi
+        touch "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+        return
     fi
 
     touch "$PGDATA/standby.signal"
@@ -140,10 +105,10 @@ pg_swarm_rebasebackup() {
     echo "pg-swarm: $reason — starting full re-basebackup"
     find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
     for i in $(seq 1 12); do
-        # If the sidecar removed the marker (emergency deadlock breaker),
-        # abort the rebasebackup loop so the wrapper can start PG directly.
+        # If the sentinel removed the marker (emergency deadlock breaker),
+        # abort so the wrapper can start PG directly.
         if [ ! -f "$marker" ]; then
-            echo "pg-swarm: basebackup marker removed by sidecar — aborting rebasebackup"
+            echo "pg-swarm: basebackup marker removed by sentinel — aborting rebasebackup"
             return 1
         fi
         if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
@@ -167,9 +132,8 @@ CRASH_COUNT=0
 trap 'SHUTTING_DOWN=true; kill -TERM $PG_PID 2>/dev/null' TERM
 
 while true; do
-    # Crash-loop breaker: if PG crashed quickly 3 times in a row the data
-    # directory is broken beyond what pg_rewind/guards can fix.
-    # Force a full re-basebackup (replicas) or pg_resetwal (primary).
+    # Crash-loop handler: replicas do a full re-basebackup; for primaries,
+    # the sentinel yields the lease so a healthy replica can promote.
     if [ "$CRASH_COUNT" -ge 3 ]; then
         echo "pg-swarm: CRASH LOOP DETECTED ($CRASH_COUNT consecutive fast crashes)"
         if [ "$ORDINAL" != "0" ]; then
@@ -178,8 +142,8 @@ while true; do
                 continue
             fi
         else
-            echo "pg-swarm: primary crash loop — attempting pg_resetwal"
-            pg_resetwal -f -D "$PGDATA" 2>&1 || true
+            echo "pg-swarm: primary crash loop — waiting for sentinel to yield lease"
+            sleep 15
         fi
         CRASH_COUNT=0
     fi
@@ -187,10 +151,9 @@ while true; do
     # Check and fix timeline divergence before starting PG
     pg_swarm_recover
 
-    # Check if a forced re-basebackup was requested by the sidecar (e.g. WAL gap,
-    # PGDATA loss). All pods — including ordinal 0 — honour this marker because
-    # after a failover, ordinal 0 is no longer the primary and must rebuild from
-    # the new primary.
+    # Check if a forced re-basebackup was requested by the sentinel (e.g. WAL
+    # gap, PGDATA loss). All pods honour this marker — after failover, ordinal 0
+    # is no longer the primary and must rebuild from the new primary.
     MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
     if [ -f "$MARKER" ]; then
         echo "pg-swarm: forced re-basebackup requested"
@@ -198,68 +161,21 @@ while true; do
         continue
     fi
 
-    # Guard: PGDATA is empty on primary after it was previously initialized
-    # — this means PGDATA was deleted at runtime. Yield for failover, then
-    # re-basebackup from the new primary once it's available.
+    # Guard: corrupt PGDATA (no PG_VERSION but dir not empty). Clean up and
+    # trigger re-basebackup. On first boot (no sentinel marker), let initdb run.
     SENTINEL="/var/lib/postgresql/data/.pg-swarm-initialized"
-    if [ "$ORDINAL" = "0" ] && [ -d "$PGDATA" ] && [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ] && [ -f "$SENTINEL" ]; then
-        echo "pg-swarm: PRIMARY PGDATA is empty but was previously initialized — yielding lease for failover"
-        # Sleep to let the sidecar's lease expire and a replica promote.
-        sleep 30
-        echo "pg-swarm: attempting re-basebackup from new primary"
-        rm -f "$SENTINEL"
-        pg_swarm_rebasebackup "primary PGDATA lost — rebuilding from new primary" || { sleep 5; continue; }
-        continue
-    fi
-
-    # Guard: if PGDATA has files but no PG_VERSION, it is corrupt (e.g. a
-    # previous pg_basebackup failed partway through). Clean up and either
-    # re-basebackup (replicas) or yield for failover (primary, if previously initialized).
     if [ -d "$PGDATA" ] && [ -n "$(ls -A "$PGDATA" 2>/dev/null)" ] && [ ! -s "$PGDATA/PG_VERSION" ]; then
         echo "pg-swarm: corrupt PGDATA (no PG_VERSION) — cleaning up"
-        if [ "$ORDINAL" != "0" ]; then
+        find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+        if [ -f "$SENTINEL" ]; then
+            touch "$MARKER"
             pg_swarm_rebasebackup "corrupt PGDATA" || { sleep 5; continue; }
-        elif [ -f "$SENTINEL" ]; then
-            echo "pg-swarm: PRIMARY PGDATA lost at runtime — yielding lease for failover"
-            sleep 30
-            echo "pg-swarm: attempting re-basebackup from new primary"
-            find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
-            rm -f "$SENTINEL"
-            pg_swarm_rebasebackup "primary PGDATA corrupt — rebuilding from new primary" || { sleep 5; continue; }
             continue
-        else
-            # First boot: clean up and let docker-entrypoint.sh initdb
-            find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
         fi
+        # First boot: clean slate for docker-entrypoint.sh initdb
     fi
 
-    # Final guard: verify BOTH the REDO WAL file and the checkpoint record
-    # WAL segment exist before starting PG. They can be different files when
-    # a checkpoint spans a segment boundary.
-    if [ -f "$PGDATA/PG_VERSION" ]; then
-        pg_swarm_wal_segments
-        WAL_MISSING=false
-        if [ -n "$CKPT_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_WAL" ]; then
-            echo "pg-swarm: CRITICAL — REDO WAL $CKPT_WAL missing from pg_wal/"
-            WAL_MISSING=true
-        fi
-        if [ -n "$CKPT_REC_WAL" ] && [ ! -f "$PGDATA/pg_wal/$CKPT_REC_WAL" ]; then
-            echo "pg-swarm: CRITICAL — checkpoint record WAL $CKPT_REC_WAL missing from pg_wal/"
-            WAL_MISSING=true
-        fi
-        if [ "$WAL_MISSING" = "true" ]; then
-            if [ "$ORDINAL" != "0" ]; then
-                pg_swarm_rebasebackup "checkpoint WAL missing" || { sleep 5; continue; }
-            else
-                echo "pg-swarm: primary — attempting pg_resetwal to recover"
-                pg_resetwal -f -D "$PGDATA" 2>&1 || true
-            fi
-        fi
-    fi
-
-    # Guard: wal_level=minimal in controldata means WAL lacks replication
-    # info. Replicas cannot recover from it — go straight to rebasebackup.
-    # This typically happens after a pg_resetwal on the primary.
+    # Guard: wal_level=minimal in controldata means replicas cannot recover.
     if [ -f "$PGDATA/PG_VERSION" ] && [ -f "$PGDATA/standby.signal" ]; then
         WAL_LEVEL=$(pg_controldata -D "$PGDATA" 2>/dev/null | grep "wal_level setting" | awk '{print $NF}')
         if [ "$WAL_LEVEL" = "minimal" ]; then
@@ -268,16 +184,12 @@ while true; do
         fi
     fi
 
-    # Start PG in the background so we can catch its exit.
-    # Tee output to a temp log so we can scan for fatal errors after exit.
-    PG_LOG=$(mktemp /tmp/pg-swarm-pglog.XXXXXX)
+    # Start PG
     PG_START=$(date +%s)
-    docker-entrypoint.sh postgres 2>&1 | tee "$PG_LOG" &
+    docker-entrypoint.sh postgres &
     PG_PID=$!
 
     # Mark that this pod has been initialized at least once.
-    # Used to distinguish first boot from runtime PGDATA loss.
-    SENTINEL="/var/lib/postgresql/data/.pg-swarm-initialized"
     if [ ! -f "$SENTINEL" ]; then
         for _i in $(seq 1 10); do
             if pg_isready -t 1 >/dev/null 2>&1; then
@@ -292,28 +204,10 @@ while true; do
     wait $PG_PID
     EXIT_CODE=$?
 
-    # K8s sent SIGTERM → exit the container cleanly
     if [ "$SHUTTING_DOWN" = "true" ]; then
-        rm -f "$PG_LOG"
         echo "pg-swarm: shutting down"
         exit 0
     fi
-
-    # Scan PG output for fatal errors that are immediately unrecoverable.
-    # React on the FIRST crash instead of waiting for the crash-loop breaker.
-    # Skip if the failover sidecar already wrote the basebackup marker
-    # (it detects these errors in real-time via logwatcher).
-    if [ "$ORDINAL" != "0" ] && [ -f "$PG_LOG" ] && [ ! -f "$MARKER" ]; then
-        if grep -qE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal|could not open file.*pg_filenode\.map' "$PG_LOG"; then
-            MATCHED=$(grep -oE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal|could not open file.*pg_filenode\.map' "$PG_LOG" | head -1)
-            echo "pg-swarm: FATAL unrecoverable error detected: $MATCHED"
-            rm -f "$PG_LOG"
-            pg_swarm_rebasebackup "fatal: $MATCHED" || { sleep 5; continue; }
-            CRASH_COUNT=0
-            continue
-        fi
-    fi
-    rm -f "$PG_LOG"
 
     # Track fast crashes for crash-loop detection
     PG_ELAPSED=$(( $(date +%s) - PG_START ))

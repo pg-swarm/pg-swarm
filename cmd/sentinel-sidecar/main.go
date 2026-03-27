@@ -10,7 +10,7 @@ import (
 	"time"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
-	"github.com/pg-swarm/pg-swarm/internal/failover"
+	"github.com/pg-swarm/pg-swarm/internal/sentinel"
 	"github.com/pg-swarm/pg-swarm/internal/shared/loglevel"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -20,7 +20,7 @@ import (
 
 func main() {
 	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).
-		With().Timestamp().Str("component", "failover-sidecar").Logger()
+		With().Timestamp().Str("component", "sentinel-sidecar").Logger()
 
 	// Set log level from env (default: info)
 	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
@@ -70,7 +70,7 @@ func main() {
 		recoveryRulesPath = "/etc/recovery-rules/rules.json"
 	}
 
-	mon := failover.NewMonitor(failover.Config{
+	mon := sentinel.NewMonitor(sentinel.Config{
 		PodName:             podName,
 		Namespace:           namespace,
 		ClusterName:         clusterName,
@@ -90,7 +90,7 @@ func main() {
 	satelliteAddr := os.Getenv("SATELLITE_ADDR")
 	sidecarToken := os.Getenv("SIDECAR_STREAM_TOKEN")
 	if satelliteAddr != "" && sidecarToken != "" {
-		connector := failover.NewSidecarConnector(
+		connector := sentinel.NewSidecarConnector(
 			satelliteAddr,
 			sidecarToken,
 			&pgswarmv1.SidecarIdentity{
@@ -99,7 +99,11 @@ func main() {
 				Namespace:   namespace,
 			},
 			connString,
+			client,
+			k8sCfg,
 		)
+		// Wire connector as the event emitter for the log watcher
+		mon.SetEventEmitter(connector)
 		go func() {
 			if err := connector.Run(ctx); err != nil && ctx.Err() == nil {
 				log.Error().Err(err).Msg("sidecar connector exited with error")
@@ -109,6 +113,6 @@ func main() {
 	}
 
 	if err := mon.Run(ctx); err != nil {
-		log.Fatal().Err(err).Msg("failover monitor exited with error")
+		log.Fatal().Err(err).Msg("sentinel monitor exited with error")
 	}
 }

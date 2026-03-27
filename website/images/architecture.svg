@@ -142,7 +142,7 @@
   <rect x="140" y="510" width="12" height="12" rx="2" fill="rgba(59,130,246,0.12)" stroke="rgba(59,130,246,0.4)" stroke-width="1"/>
   <text x="158" y="521" fill="#8899aa" font-size="11" font-family="Inter, sans-serif">PG = PostgreSQL container</text>
   <rect x="340" y="510" width="12" height="12" rx="2" fill="rgba(251,146,60,0.12)" stroke="rgba(251,146,60,0.5)" stroke-width="1"/>
-  <text x="358" y="521" fill="#8899aa" font-size="11" font-family="Inter, sans-serif">FS = Failover Sidecar</text>
+  <text x="358" y="521" fill="#8899aa" font-size="11" font-family="Inter, sans-serif">FS = Sentinel Sidecar</text>
   <rect x="520" y="510" width="12" height="12" rx="2" fill="rgba(4,109,57,0.3)"/>
   <text x="538" y="521" fill="#8899aa" font-size="11" font-family="Inter, sans-serif">PRIMARY</text>
   <rect x="610" y="510" width="12" height="12" rx="2" fill="rgba(59,130,246,0.15)"/>

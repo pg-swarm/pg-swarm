@@ -81,7 +81,7 @@ Events are **cluster-level**, not per-pod. Each event includes the pod identity 
 | `pgdata_missing` | Sidecar | pod | PG_VERSION file absent (PGDATA deleted/corrupt) |
 | `wal_receiver_down` | Sidecar | pod, duration, replay_lsn | WAL streaming stopped |
 | `timeline_divergence` | Sidecar | pod, local_tli, primary_tli | Timeline mismatch detected |
-| `log_match` | LogWatcher | pod, rule_name, pattern, line | Log pattern matched a recovery rule |
+| `log_match` | LogWatcher | pod, rule_name, pattern, line | Log pattern matched an event rule |
 | `recovery_started` | Wrapper/Sidecar | pod, action (rewind/basebackup/restart) | Recovery action initiated |
 | `recovery_completed` | Wrapper/Sidecar | pod, action, success, duration | Recovery action finished |
 | `lease_acquired` | Sidecar | pod | This pod now holds the leader lease |
@@ -373,7 +373,7 @@ oneof payload {
 | `internal/central/server/grpc.go` | 1 | Handle ClusterEvent in stream handler |
 | `internal/central/store/` | 1 | New: cluster_events table + store methods |
 | `internal/central/agent/` | 2 | New: cluster state machine, command dispatcher |
-| `internal/failover/monitor.go` | 2 | Accept commands from satellite stream, disable local failover when managed |
+| `internal/sentinel/monitor.go` | 2 | Accept commands from satellite stream, disable local failover when managed |
 | `internal/satellite/stream/connector.go` | 2 | Route RecoveryCommand to correct pod's sidecar |
 | `internal/central/agent/learner.go` | 4 | New: outcome tracking, rule optimization |
 | `dashboard/src/pages/ClusterDetail.jsx` | 1 | New: Cluster Timeline tab |
@@ -388,11 +388,11 @@ The sidecar maintains a **local cache of event-based rules** pushed down from ce
 Central                              Sidecar
   │                                    │
   │  ClusterConfig push (includes      │
-  │  recovery rules + event rules)     │
+  │  event rules)                      │
   ├───────────────────────────────────→│
   │                                    ├─ Write to local cache
-  │                                    │  /etc/recovery-rules/rules.json (ConfigMap)
-  │                                    │  + event-rules.json (new, from stream)
+  │                                    │  /etc/event-rules/rules.json (ConfigMap)
+  │                                    │  + event-rules.json (from stream)
   │                                    │
   │  Rule update (central learned      │
   │  a better strategy)                │
@@ -485,7 +485,7 @@ In **degraded mode** (fresh sidecar, never connected to central), the sidecar fa
 
 ### Cache Sync Protocol
 
-1. **Initial sync**: When the satellite connects to central, the full rule set is pushed as part of the cluster config (extends the existing `ClusterConfig.recovery_rules` field).
+1. **Initial sync**: When the satellite connects to central, the full rule set is pushed as part of the cluster config (extends the existing `ClusterConfig.event_rules` field).
 2. **Incremental updates**: When central's learning engine updates a rule, it pushes a `RuleCacheUpdate` message down the stream. The sidecar applies it atomically.
 3. **Version tracking**: Each cache has a version number. On reconnect, the sidecar sends its cache version. Central sends a diff if outdated, or "up to date" if current.
 4. **Persistence**: The cache is written to the data volume (`/var/lib/postgresql/data/.pg-swarm-rules-cache.json`) so it survives container restarts.

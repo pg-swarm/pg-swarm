@@ -48,6 +48,6 @@ dashboard/static/
 
 /central
 /satellite
-/failover-sidecar
+/sentinel-sidecar
 /backup-sidecar
 

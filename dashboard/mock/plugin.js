@@ -12,7 +12,11 @@ import {
   postgresVariants,
   storageTiers,
   pgParamClassifications,
-  recoveryRuleSets,
+  eventRules,
+  eventActions,
+  eventHandlers,
+  eventRuleSets,
+  ruleSetHandlers,
   generateLogs,
 } from './data.js';
 
@@ -41,7 +45,11 @@ export default function mockApiPlugin() {
     postgresVariants: [...postgresVariants],
     storageTiers: [...storageTiers],
     pgParamClassifications: [...pgParamClassifications],
-    recoveryRuleSets: recoveryRuleSets.map(rs => ({ ...rs, rules: rs.rules.map(r => ({ ...r })) })),
+    eventRules:    [...eventRules],
+    eventActions:  [...eventActions],
+    eventHandlers: [...eventHandlers],
+    eventRuleSets: [...eventRuleSets],
+    ruleSetHandlers: { ...Object.fromEntries(Object.entries(ruleSetHandlers).map(([k, v]) => [k, [...v]])) },
   };
 
   return {
@@ -299,36 +307,146 @@ export default function mockApiPlugin() {
           return json(res, { ok: true });
         }
 
-        // ---- Recovery Rule Sets ----
-        if (path === '/recovery-rule-sets' && method === 'GET') {
-          return json(res, state.recoveryRuleSets);
+        // ---- Event Rules (global) ----
+        if (path === '/event-rules' && method === 'GET') {
+          return json(res, state.eventRules);
         }
-        if (path === '/recovery-rule-sets' && method === 'POST') {
+        if (path === '/event-rules' && method === 'POST') {
           body(req).then((b) => {
-            const rs = { id: 'rs-' + Date.now(), created_at: new Date().toISOString(), updated_at: new Date().toISOString(), builtin: false, ...b };
-            state.recoveryRuleSets.push(rs);
-            json(res, rs, 201);
+            const r = { id: 'er-' + Date.now(), builtin: false, enabled: true, ...b };
+            state.eventRules.push(r);
+            json(res, r, 201);
           });
           return;
         }
-        if (path.match(/^\/recovery-rule-sets\/[^/]+$/) && method === 'GET') {
-          const id = path.split('/')[2];
-          return json(res, state.recoveryRuleSets.find((rs) => rs.id === id) || { error: 'not found' });
-        }
-        if (path.match(/^\/recovery-rule-sets\/[^/]+$/) && method === 'PUT') {
+        if (path.match(/^\/event-rules\/[^/]+$/) && method === 'PUT') {
           const id = path.split('/')[2];
           body(req).then((b) => {
-            const idx = state.recoveryRuleSets.findIndex((rs) => rs.id === id);
-            if (idx >= 0) { Object.assign(state.recoveryRuleSets[idx], b, { updated_at: new Date().toISOString() }); json(res, state.recoveryRuleSets[idx]); }
+            const idx = state.eventRules.findIndex((r) => r.id === id);
+            if (idx >= 0) { Object.assign(state.eventRules[idx], b); json(res, state.eventRules[idx]); }
             else json(res, { error: 'not found' }, 404);
           });
           return;
         }
-        if (path.match(/^\/recovery-rule-sets\/[^/]+$/) && method === 'DELETE') {
+        if (path.match(/^\/event-rules\/[^/]+$/) && method === 'DELETE') {
           const id = path.split('/')[2];
-          const rs = state.recoveryRuleSets.find((r) => r.id === id);
+          state.eventRules = state.eventRules.filter((r) => r.id !== id);
+          return json(res, { ok: true });
+        }
+
+        // ---- Event Actions (global) ----
+        if (path === '/event-actions' && method === 'GET') {
+          return json(res, state.eventActions);
+        }
+        if (path === '/event-actions' && method === 'POST') {
+          body(req).then((b) => {
+            const a = { id: 'ea-' + Date.now(), ...b };
+            state.eventActions.push(a);
+            json(res, a, 201);
+          });
+          return;
+        }
+        if (path.match(/^\/event-actions\/[^/]+$/) && method === 'PUT') {
+          const id = path.split('/')[2];
+          body(req).then((b) => {
+            const idx = state.eventActions.findIndex((a) => a.id === id);
+            if (idx >= 0) { Object.assign(state.eventActions[idx], b); json(res, state.eventActions[idx]); }
+            else json(res, { error: 'not found' }, 404);
+          });
+          return;
+        }
+        if (path.match(/^\/event-actions\/[^/]+$/) && method === 'DELETE') {
+          const id = path.split('/')[2];
+          state.eventActions = state.eventActions.filter((a) => a.id !== id);
+          return json(res, { ok: true });
+        }
+
+        // ---- Event Handlers (global) ----
+        if (path === '/event-handlers' && method === 'GET') {
+          return json(res, state.eventHandlers);
+        }
+        if (path === '/event-handlers' && method === 'POST') {
+          body(req).then((b) => {
+            const rule   = state.eventRules.find((r) => r.id === b.event_rule_id);
+            const action = state.eventActions.find((a) => a.id === b.event_action_id);
+            const h = { id: 'eh-' + Date.now(), event_rule_name: rule?.name || '', event_action_name: action?.name || '', enabled: true, ...b };
+            state.eventHandlers.push(h);
+            json(res, h, 201);
+          });
+          return;
+        }
+        if (path.match(/^\/event-handlers\/[^/]+$/) && method === 'PUT') {
+          const id = path.split('/')[2];
+          body(req).then((b) => {
+            const idx = state.eventHandlers.findIndex((h) => h.id === id);
+            if (idx >= 0) { Object.assign(state.eventHandlers[idx], b); json(res, state.eventHandlers[idx]); }
+            else json(res, { error: 'not found' }, 404);
+          });
+          return;
+        }
+        if (path.match(/^\/event-handlers\/[^/]+$/) && method === 'DELETE') {
+          const id = path.split('/')[2];
+          state.eventHandlers = state.eventHandlers.filter((h) => h.id !== id);
+          return json(res, { ok: true });
+        }
+
+        // ---- Event Rule Sets ----
+        if (path === '/event-rule-sets' && method === 'GET') {
+          return json(res, state.eventRuleSets);
+        }
+        if (path === '/event-rule-sets' && method === 'POST') {
+          body(req).then((b) => {
+            const rs = { id: 'rs-' + Date.now(), created_at: new Date().toISOString(), updated_at: new Date().toISOString(), builtin: false, ...b };
+            state.eventRuleSets.push(rs);
+            state.ruleSetHandlers[rs.id] = [];
+            json(res, rs, 201);
+          });
+          return;
+        }
+        if (path.match(/^\/event-rule-sets\/[^/]+$/) && method === 'GET') {
+          const id = path.split('/')[2];
+          return json(res, state.eventRuleSets.find((rs) => rs.id === id) || { error: 'not found' });
+        }
+        if (path.match(/^\/event-rule-sets\/[^/]+$/) && method === 'PUT') {
+          const id = path.split('/')[2];
+          body(req).then((b) => {
+            const idx = state.eventRuleSets.findIndex((rs) => rs.id === id);
+            if (idx >= 0) { Object.assign(state.eventRuleSets[idx], b, { updated_at: new Date().toISOString() }); json(res, state.eventRuleSets[idx]); }
+            else json(res, { error: 'not found' }, 404);
+          });
+          return;
+        }
+        if (path.match(/^\/event-rule-sets\/[^/]+$/) && method === 'DELETE') {
+          const id = path.split('/')[2];
+          const rs = state.eventRuleSets.find((r) => r.id === id);
           if (rs && rs.builtin) return json(res, { error: 'cannot delete built-in rule set' }, 400);
-          state.recoveryRuleSets = state.recoveryRuleSets.filter((r) => r.id !== id);
+          state.eventRuleSets = state.eventRuleSets.filter((r) => r.id !== id);
+          delete state.ruleSetHandlers[id];
+          return json(res, { ok: true });
+        }
+        if (path.match(/^\/event-rule-sets\/[^/]+\/handlers$/) && method === 'GET') {
+          const id = path.split('/')[2];
+          const ids = state.ruleSetHandlers[id] || [];
+          return json(res, state.eventHandlers.filter((h) => ids.includes(h.id)));
+        }
+        if (path.match(/^\/event-rule-sets\/[^/]+\/handlers$/) && method === 'POST') {
+          const id = path.split('/')[2];
+          body(req).then((b) => {
+            if (!state.ruleSetHandlers[id]) state.ruleSetHandlers[id] = [];
+            if (!state.ruleSetHandlers[id].includes(b.handler_id)) {
+              state.ruleSetHandlers[id].push(b.handler_id);
+            }
+            json(res, { ok: true });
+          });
+          return;
+        }
+        if (path.match(/^\/event-rule-sets\/[^/]+\/handlers\/[^/]+$/) && method === 'DELETE') {
+          const parts = path.split('/');
+          const rsId = parts[2];
+          const hId  = parts[4];
+          if (state.ruleSetHandlers[rsId]) {
+            state.ruleSetHandlers[rsId] = state.ruleSetHandlers[rsId].filter((x) => x !== hId);
+          }
           return json(res, { ok: true });
         }
 

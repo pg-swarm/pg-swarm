@@ -20,6 +20,7 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/central/auth"
 	"github.com/pg-swarm/pg-swarm/internal/central/registry"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/eventbus"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
 	"github.com/pg-swarm/pg-swarm/internal/shared/reqid"
 	"github.com/rs/zerolog"
@@ -112,6 +113,13 @@ func (s *GRPCServer) Register(ctx context.Context, req *pgswarmv1.RegisterReques
 		return nil, status.Errorf(codes.Internal, "registration failed: %v", err)
 	}
 
+	emitCentralEvent(ctx, s.store, "satellite.registered", id, "info", map[string]string{
+		"satellite_id": id.String(),
+		"hostname":     req.GetHostname(),
+		"k8s_cluster":  req.GetK8SClusterName(),
+		"region":       req.GetRegion(),
+	})
+
 	return &pgswarmv1.RegisterResponse{
 		SatelliteId: id.String(),
 		TempToken:   tempToken,
@@ -166,6 +174,14 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 
 	log.Info().Str("satellite_id", satID.String()).Msg("satellite connected")
 
+	// Emit satellite.connected event
+	satData := map[string]string{"satellite_id": satID.String()}
+	if sat, err := s.store.GetSatellite(ctx, satID); err == nil {
+		satData["hostname"] = sat.Hostname
+		satData["k8s_cluster"] = sat.K8sClusterName
+	}
+	emitCentralEvent(ctx, s.store, "satellite.connected", satID, "info", satData)
+
 	// Push existing configs for this satellite on connect
 	s.syncConfigs(ctx, satID, satStream)
 
@@ -198,122 +214,6 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					log.Warn().Str("satellite_id", satID.String()).Msg("send channel full, dropping heartbeat ack")
 				}
 
-			case *pgswarmv1.SatelliteMessage_ConfigAck:
-				ack := payload.ConfigAck
-				logger := log.With().
-					Str("satellite_id", satID.String()).
-					Str("cluster", ack.ClusterName).
-					Int64("version", ack.ConfigVersion).
-					Bool("success", ack.Success).
-					Logger()
-				if ack.Success {
-					logger.Info().Msg("config ack received")
-				} else {
-					logger.Warn().Str("error", ack.ErrorMessage).Msg("config ack received with error")
-				}
-
-			case *pgswarmv1.SatelliteMessage_HealthReport:
-				report := payload.HealthReport
-				instances, err := protoInstancesToJSON(report.Instances)
-				if err != nil {
-					log.Error().Err(err).Str("satellite_id", satID.String()).Msg("failed to marshal instances")
-					break
-				}
-				h := models.ClusterHealth{
-					SatelliteID: satID,
-					ClusterName: report.ClusterName,
-					State:       protoStateToModel(report.State),
-					Instances:   instances,
-					UpdatedAt:   time.Now(),
-				}
-				if err := s.store.UpsertClusterHealth(ctx, &h); err != nil {
-					log.Error().Err(err).Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Msg("failed to upsert health")
-				} else {
-					log.Debug().Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Str("state", string(h.State)).Msg("health report processed")
-					// Sync cluster config state with health-reported state
-					if err := s.store.UpdateClusterConfigState(ctx, satID, report.ClusterName, h.State); err != nil {
-						log.Warn().Err(err).Str("cluster", report.ClusterName).Msg("failed to update cluster config state")
-					}
-					// Push to dashboard immediately (50ms debounce in hub)
-					if s.wsHub != nil {
-						s.wsHub.Notify()
-					}
-				}
-
-			case *pgswarmv1.SatelliteMessage_EventReport:
-				report := payload.EventReport
-				evt := models.Event{
-					ID:          uuid.New(),
-					SatelliteID: satID,
-					ClusterName: report.ClusterName,
-					Severity:    report.Severity,
-					Message:     report.Message,
-					Source:      report.Source,
-					CreatedAt:   time.Now(),
-				}
-				if err := s.store.CreateEvent(ctx, &evt); err != nil {
-					log.Error().Err(err).Str("satellite_id", satID.String()).Msg("failed to create event")
-				} else {
-					log.Info().Str("satellite_id", satID.String()).Str("cluster", report.ClusterName).Str("severity", report.Severity).Msg("event recorded")
-				}
-
-			case *pgswarmv1.SatelliteMessage_SwitchoverProgress:
-				prog := payload.SwitchoverProgress
-				log.Debug().
-					Str("satellite_id", satID.String()).
-					Str("cluster", prog.ClusterName).
-					Int32("step", prog.Step).
-					Str("step_name", prog.StepName).
-					Str("status", prog.Status).
-					Msg("switchover progress")
-				if s.opsTracker != nil {
-					s.opsTracker.UpdateStep(prog.OperationId, prog.Step, prog.StepName, prog.Status, prog.TargetPod, prog.ErrorMessage, prog.PointOfNoReturn)
-					if prog.StepName == "find_primary" && prog.Status == "completed" && prog.TargetPod != "" {
-						s.opsTracker.SetPrimaryPod(prog.OperationId, prog.TargetPod)
-					}
-				}
-				if s.wsHub != nil {
-					s.wsHub.BroadcastJSON("switchover_progress", map[string]interface{}{
-						"operation_id":       prog.OperationId,
-						"cluster_name":       prog.ClusterName,
-						"step":               prog.Step,
-						"step_name":          prog.StepName,
-						"status":             prog.Status,
-						"target_pod":         prog.TargetPod,
-						"error_message":      prog.ErrorMessage,
-						"point_of_no_return": prog.PointOfNoReturn,
-					})
-				}
-
-			case *pgswarmv1.SatelliteMessage_SwitchoverResult:
-				result := payload.SwitchoverResult
-				if result.Success {
-					log.Info().Str("satellite_id", satID.String()).Str("cluster", result.ClusterName).Msg("switchover succeeded")
-					_ = s.store.CreateEvent(ctx, &models.Event{
-						ID: uuid.New(), SatelliteID: satID, ClusterName: result.ClusterName,
-						Severity: "info", Message: "planned switchover completed successfully", Source: "switchover",
-						CreatedAt: time.Now(),
-					})
-				} else {
-					log.Warn().Str("satellite_id", satID.String()).Str("cluster", result.ClusterName).Str("error", result.ErrorMessage).Msg("switchover failed")
-					_ = s.store.CreateEvent(ctx, &models.Event{
-						ID: uuid.New(), SatelliteID: satID, ClusterName: result.ClusterName,
-						Severity: "error", Message: "switchover failed: " + result.ErrorMessage, Source: "switchover",
-						CreatedAt: time.Now(),
-					})
-				}
-				if s.opsTracker != nil && result.OperationId != "" {
-					s.opsTracker.Complete(result.OperationId, result.Success, result.ErrorMessage)
-				}
-				if s.wsHub != nil && result.OperationId != "" {
-					s.wsHub.BroadcastJSON("switchover_complete", map[string]interface{}{
-						"operation_id": result.OperationId,
-						"cluster_name": result.ClusterName,
-						"success":      result.Success,
-						"error":        result.ErrorMessage,
-					})
-				}
-
 			case *pgswarmv1.SatelliteMessage_LogEntry:
 				entry := payload.LogEntry
 				ts := ""
@@ -328,27 +228,9 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 					Logger:    entry.Logger,
 				})
 
-			case *pgswarmv1.SatelliteMessage_StorageClassReport:
-				report := payload.StorageClassReport
-				classes := make([]models.StorageClassInfo, 0, len(report.StorageClasses))
-				for _, sc := range report.StorageClasses {
-					classes = append(classes, models.StorageClassInfo{
-						Name:              sc.Name,
-						Provisioner:       sc.Provisioner,
-						ReclaimPolicy:     sc.ReclaimPolicy,
-						VolumeBindingMode: sc.VolumeBindingMode,
-						IsDefault:         sc.IsDefault,
-					})
-				}
-				if err := s.store.UpdateSatelliteStorageClasses(ctx, satID, classes); err != nil {
-					log.Error().Err(err).Str("satellite_id", satID.String()).Msg("failed to store storage classes")
-				} else {
-					log.Info().Str("satellite_id", satID.String()).Int("count", len(classes)).Msg("storage classes updated")
-				}
-
-			case *pgswarmv1.SatelliteMessage_DatabaseStatus:
-				report := payload.DatabaseStatus
-				s.handleDatabaseStatusReport(ctx, satID, report)
+			case *pgswarmv1.SatelliteMessage_Event:
+				evt := payload.Event
+				s.handleEvent(ctx, satID, evt)
 
 			}
 		}
@@ -365,6 +247,7 @@ func (s *GRPCServer) Connect(stream grpc.BidiStreamingServer[pgswarmv1.Satellite
 			// Mark as disconnected
 			_ = s.store.UpdateSatelliteState(context.Background(), satID, models.SatelliteStateDisconnected)
 			log.Info().Str("satellite_id", satID.String()).Msg("satellite disconnected")
+			emitCentralEvent(context.Background(), s.store, "satellite.disconnected", satID, "warning", satData)
 			return err
 		case <-ctx.Done():
 			return ctx.Err()
@@ -396,10 +279,11 @@ func (s *GRPCServer) syncConfigs(ctx context.Context, satID uuid.UUID, satStream
 			continue
 		}
 
+		evt := eventbus.NewEvent("cluster.update", protoConfig.ClusterName, protoConfig.Namespace, "central")
+		evt.Payload = &pgswarmv1.Event_ClusterConfig{ClusterConfig: protoConfig}
+
 		msg := &pgswarmv1.CentralMessage{
-			Payload: &pgswarmv1.CentralMessage_ClusterConfig{
-				ClusterConfig: protoConfig,
-			},
+			Payload: &pgswarmv1.CentralMessage_Event{Event: evt},
 		}
 
 		select {
@@ -407,12 +291,12 @@ func (s *GRPCServer) syncConfigs(ctx context.Context, satID uuid.UUID, satStream
 			log.Info().
 				Str("satellite_id", satID.String()).
 				Str("cluster", cfg.Name).
-				Msg("sync-configs: pushed config on connect")
+				Msg("sync-configs: pushed config event on connect")
 		default:
 			log.Warn().
 				Str("satellite_id", satID.String()).
 				Str("cluster", cfg.Name).
-				Msg("sync-configs: send channel full, skipping config")
+				Msg("sync-configs: send channel full, skipping config event")
 		}
 	}
 }
@@ -442,9 +326,9 @@ func (sm *StreamManager) Get(id uuid.UUID) (*SatelliteStream, bool) {
 }
 
 // PushConfig sends a cluster configuration to the specified satellite over its
-// active stream. Returns an error if the satellite is not connected or its
-// send channel is full.
-func (sm *StreamManager) PushConfig(satelliteID uuid.UUID, config *pgswarmv1.ClusterConfig) error {
+// PushEvent sends an event to a specific satellite. Used by the REST API to
+// push user-initiated events (cluster.create, switchover.requested, etc.).
+func (sm *StreamManager) PushEvent(satelliteID uuid.UUID, evt *pgswarmv1.Event) error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -454,113 +338,18 @@ func (sm *StreamManager) PushConfig(satelliteID uuid.UUID, config *pgswarmv1.Clu
 	}
 
 	msg := &pgswarmv1.CentralMessage{
-		Payload: &pgswarmv1.CentralMessage_ClusterConfig{
-			ClusterConfig: config,
+		Payload: &pgswarmv1.CentralMessage_Event{
+			Event: evt,
 		},
 	}
 
 	select {
 	case stream.SendCh <- msg:
-		return nil
-	default:
-		return fmt.Errorf("satellite %s send channel full", satelliteID)
-	}
-}
-
-// RequestStorageClasses asks the specified satellite to report its available
-// Kubernetes storage classes.
-func (sm *StreamManager) RequestStorageClasses(satelliteID uuid.UUID) error {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	stream, ok := sm.streams[satelliteID]
-	if !ok {
-		return fmt.Errorf("satellite %s not connected", satelliteID)
-	}
-
-	msg := &pgswarmv1.CentralMessage{
-		Payload: &pgswarmv1.CentralMessage_RequestStorageClasses{
-			RequestStorageClasses: &pgswarmv1.RequestStorageClasses{},
-		},
-	}
-
-	select {
-	case stream.SendCh <- msg:
-		return nil
-	default:
-		return fmt.Errorf("satellite %s send channel full", satelliteID)
-	}
-}
-
-// PushSwitchover sends a switchover request to the specified satellite,
-// instructing it to promote a replica to primary.
-func (sm *StreamManager) PushSwitchover(satelliteID uuid.UUID, req *pgswarmv1.SwitchoverRequest) error {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	stream, ok := sm.streams[satelliteID]
-	if !ok {
-		return fmt.Errorf("satellite %s not connected", satelliteID)
-	}
-
-	msg := &pgswarmv1.CentralMessage{
-		Payload: &pgswarmv1.CentralMessage_Switchover{
-			Switchover: req,
-		},
-	}
-
-	select {
-	case stream.SendCh <- msg:
-		return nil
-	default:
-		return fmt.Errorf("satellite %s send channel full", satelliteID)
-	}
-}
-
-// PushSetLogLevel sends a log level change command to the specified satellite.
-func (sm *StreamManager) PushSetLogLevel(satelliteID uuid.UUID, level string) error {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	stream, ok := sm.streams[satelliteID]
-	if !ok {
-		return fmt.Errorf("satellite %s not connected", satelliteID)
-	}
-
-	msg := &pgswarmv1.CentralMessage{
-		Payload: &pgswarmv1.CentralMessage_SetLogLevel{
-			SetLogLevel: &pgswarmv1.SetLogLevel{
-				Level: level,
-			},
-		},
-	}
-
-	select {
-	case stream.SendCh <- msg:
-		return nil
-	default:
-		return fmt.Errorf("satellite %s send channel full", satelliteID)
-	}
-}
-
-// PushDelete sends a cluster deletion command to the specified satellite.
-func (sm *StreamManager) PushDelete(satelliteID uuid.UUID, del *pgswarmv1.DeleteCluster) error {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	stream, ok := sm.streams[satelliteID]
-	if !ok {
-		return fmt.Errorf("satellite %s not connected", satelliteID)
-	}
-
-	msg := &pgswarmv1.CentralMessage{
-		Payload: &pgswarmv1.CentralMessage_DeleteCluster{
-			DeleteCluster: del,
-		},
-	}
-
-	select {
-	case stream.SendCh <- msg:
+		log.Debug().
+			Str("satellite_id", satelliteID.String()).
+			Str("event_type", evt.GetType()).
+			Str("cluster", evt.GetClusterName()).
+			Msg("pushed event to satellite")
 		return nil
 	default:
 		return fmt.Errorf("satellite %s send channel full", satelliteID)

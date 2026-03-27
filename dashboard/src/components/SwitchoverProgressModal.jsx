@@ -82,7 +82,7 @@ function StepRow({ def, stepData, logData }) {
   );
 }
 
-export default function SwitchoverProgressModal({ operation, instances, onStart, onClose }) {
+export default function SwitchoverProgressModal({ operation, instances, onStart, onClose, onContinue, onAbort }) {
   if (!operation) return null;
   const logRef = useRef(null);
 
@@ -191,6 +191,19 @@ export default function SwitchoverProgressModal({ operation, instances, onStart,
                 <Play size={12} /> Start Switchover
               </button>
             </>
+          )}
+          {started && !operation.done && operation.waiting_for_user && (
+            <>
+              <button className="btn-sm" onClick={onAbort} title="Abort and rollback">
+                Abort
+              </button>
+              <button className="btn-sm btn-danger" onClick={onContinue}>
+                <ArrowRight size={12} /> Continue
+              </button>
+            </>
+          )}
+          {started && !operation.done && !operation.waiting_for_user && (
+            <span style={{ color: 'var(--text-secondary)', fontSize: 12 }}>Running step...</span>
           )}
           {started && operation.done && (
             <button className="btn-sm" onClick={onClose}>Close</button>

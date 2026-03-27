@@ -1,4 +1,4 @@
-package failover
+package sentinel
 
 import (
 	"context"

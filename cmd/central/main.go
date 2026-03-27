@@ -101,11 +101,11 @@ func getEnv(key, defaultVal string) string {
 }
 
 func buildDatabaseURL() string {
-	host     := getEnv("PG_HOST",     "localhost")
-	port     := getEnv("PG_PORT",     "5432")
-	user     := getEnv("PG_USER",     "pgswarm")
+	host := getEnv("PG_HOST", "localhost")
+	port := getEnv("PG_PORT", "5432")
+	user := getEnv("PG_USER", "pgswarm")
 	password := getEnv("PG_PASSWORD", "pgswarm")
-	db       := getEnv("PG_DB",       "pgswarm")
-	sslMode  := getEnv("PG_SSL_MODE", "disable")
+	db := getEnv("PG_DB", "pgswarm")
+	sslMode := getEnv("PG_SSL_MODE", "disable")
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, password, host, port, db, sslMode)
 }

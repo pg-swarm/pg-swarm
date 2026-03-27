@@ -6,7 +6,7 @@ Centralized management system for PostgreSQL HA clusters across edge Kubernetes 
 
 - **Central** (`cmd/central`): gRPC server (:9090) + REST API (:8080, 60+ endpoints) + embedded React dashboard + WebSocket hub
 - **Satellite** (`cmd/satellite`): Lightweight agent on each edge K8s cluster, sidecar streaming, log capture
-- **Failover sidecar** (`cmd/failover-sidecar`): Per-pod sidecar for leader election, promotion, log watcher, sidecar streaming
+- **Sentinel sidecar** (`cmd/sentinel-sidecar`): Per-pod sidecar for leader election, promotion, log watcher, sidecar streaming
 - **Protobuf** definitions in `api/proto/v1/`, generated code in `api/gen/v1/`
 
 ## Build & Test
@@ -37,12 +37,12 @@ make dashboard         # Build React dashboard
 - `internal/central/server/ws.go` — WebSocket hub for real-time updates
 - `internal/central/server/ops_tracker.go` — Active operation tracking
 - `internal/satellite/` — Satellite agent (operator, stream connector, registration)
-- `internal/satellite/sidecar/` — Sidecar streaming (gRPC server for failover sidecars)
+- `internal/satellite/sidecar/` — Sidecar streaming (gRPC server for sentinel sidecars)
 - `internal/satellite/logcapture/` — Satellite log capture and forwarding
 - `internal/satellite/operator/tombstone.go` — Cluster deletion markers
-- `internal/failover/` — Failover monitor (leader lease, pg_promote, log watcher, sidecar connector)
-- `internal/failover/logwatcher.go` — Real-time PG log monitoring (40+ recovery patterns)
-- `internal/failover/connector.go` — Bidirectional gRPC streaming to satellite
+- `internal/sentinel/` — Failover monitor (leader lease, pg_promote, log watcher, sidecar connector)
+- `internal/sentinel/logwatcher.go` — Real-time PG log monitoring (40+ recovery patterns)
+- `internal/sentinel/connector.go` — Bidirectional gRPC streaming to satellite
 - `internal/shared/models/` — Shared Go types
 - `dashboard/` — React SPA + Go embed (10 pages)
 - `deploy/docker/` — Dockerfiles + docker-compose

@@ -9,10 +9,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/satellite/operator"
@@ -25,10 +25,10 @@ const clusterStartGrace = 10 * time.Minute
 
 // Monitor periodically checks the health of all managed PostgreSQL clusters.
 type Monitor struct {
-	client       kubernetes.Interface
-	operator     *operator.Operator
-	onHealth     func(*pgswarmv1.ClusterHealthReport)
-	onEvent      func(*pgswarmv1.EventReport)
+	client     kubernetes.Interface
+	operator   *operator.Operator
+	onHealth   func(*pgswarmv1.ClusterHealthReport)
+	onEvent    func(*pgswarmv1.EventReport)
 	interval   time.Duration
 	lastStates map[string]pgswarmv1.ClusterState
 	mu         sync.Mutex

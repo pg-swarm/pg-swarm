@@ -140,8 +140,8 @@ func classifyChanges(old, new *models.ClusterSpec, classifications ParamClassifi
 	// archive (sequential — except archive_mode off→on handled via pg_params)
 	diffArchive(diff, old.Archive, new.Archive)
 
-	// failover (sequential)
-	diffFailover(diff, old.Failover, new.Failover)
+	// sentinel (sequential)
+	diffSentinel(diff, old.Sentinel, new.Sentinel)
 
 	// deletion_protection (no restart, PVC-level)
 	if old.DeletionProtection != new.DeletionProtection {
@@ -260,12 +260,12 @@ func diffArchive(diff *ConfigDiff, old, new *models.ArchiveSpec) {
 	}
 }
 
-func diffFailover(diff *ConfigDiff, old, new *models.FailoverSpec) {
+func diffSentinel(diff *ConfigDiff, old, new *models.SentinelSpec) {
 	if old == nil && new == nil {
 		return
 	}
-	o := failoverOrEmpty(old)
-	n := failoverOrEmpty(new)
+	o := sentinelOrEmpty(old)
+	n := sentinelOrEmpty(new)
 	if o.Enabled != n.Enabled {
 		diff.SequentialChanges = append(diff.SequentialChanges, ParamChange{
 			Path:     "failover.enabled",
@@ -296,9 +296,9 @@ func archiveOrEmpty(a *models.ArchiveSpec) models.ArchiveSpec {
 	return *a
 }
 
-func failoverOrEmpty(f *models.FailoverSpec) models.FailoverSpec {
+func sentinelOrEmpty(f *models.SentinelSpec) models.SentinelSpec {
 	if f == nil {
-		return models.FailoverSpec{}
+		return models.SentinelSpec{}
 	}
 	return *f
 }
@@ -330,4 +330,3 @@ func stringSliceEqual(a, b []string) bool {
 	}
 	return true
 }
-

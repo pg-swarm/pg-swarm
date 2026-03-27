@@ -26,6 +26,7 @@ message SatelliteMessage {
     SwitchoverProgress switchover_progress = 10;
     // field 11 reserved
     DatabaseStatusReport database_status = 12;
+    Event event = 13;
   }
 }
 
@@ -61,6 +62,7 @@ message CentralMessage {
     SetLogLevel set_log_level = 6;
     RestoreCommand restore_command = 7;
     BackupTrigger backup_trigger = 20;
+    Event event = 21;
   }
 }
 
@@ -68,8 +70,9 @@ message CentralMessage {
 message SwitchoverRequest {
   string cluster_name = 1;
   string namespace = 2;
-  string target_pod = 3; // pod to promote (must be a replica)
+  string target_pod = 3;   // pod to promote (must be a replica)
   string operation_id = 4; // unique operation ID for progress tracking
+  bool interactive = 5;    // if true, execute one step at a time, waiting for user confirmation
 }
 
 // SwitchoverResult is sent back by the satellite after a switchover attempt.
@@ -134,14 +137,14 @@ message ClusterConfig {
   int64 config_version = 9;
   ArchiveSpec archive = 10;           // optional WAL archiving config
   // field 11 reserved (was databases)
-  FailoverSpec failover = 12;            // optional automatic failover sidecar
+  SentinelSpec sentinel = 12;            // optional automatic sentinel sidecar
   StorageSpec wal_storage = 13;          // optional separate WAL volume
   string profile_name = 14;                      // name of the source profile (for K8s labels)
   map<string, string> label_selector = 15;       // deployment rule label selector (for K8s labels)
   bool paused = 16;                              // when true, RW service is removed (read-only mode)
   bool deletion_protection = 17;                  // when true, PVCs get a finalizer to prevent accidental deletion
   BackupConfig backups = 18;                        // backup sidecar configuration (resolved from profile + store)
-  repeated RecoveryRule recovery_rules = 19;       // log-based recovery rules for failover sidecar
+  repeated RecoveryRule recovery_rules = 19;       // log-based recovery rules for sentinel sidecar
   repeated ClusterDatabase cluster_databases = 21; // dynamically managed databases at cluster level
 }
 
@@ -191,10 +194,10 @@ message SecretRef {
   string name = 1;  // existing K8s Secret in cluster namespace
 }
 
-message FailoverSpec {
+message SentinelSpec {
   bool enabled = 1;
   int32 health_check_interval_seconds = 2; // default 5
-  string sidecar_image = 3;                // default: pg-swarm-failover:latest
+  string sidecar_image = 3;                // default: pg-swarm-sentinel:latest
 }
 
 message RecoveryRule {
@@ -213,6 +216,39 @@ message DeleteCluster {
   string namespace = 2;
 }
 
+// --- Event-driven architecture ---
+//
+// Event is the universal message type for the event-driven framework.
+// Events are immutable facts about what happened. They flow in all directions:
+//   Central  -> Satellite  (user-initiated: cluster.create, switchover.requested)
+//   Satellite -> Central   (state changes: cluster.state_changed, recovery.completed)
+//   Sidecar  -> Satellite  (pod-level: instance.pg_down, log.wal.missing_checkpoint)
+//   K8s watch -> Satellite  (infrastructure: k8s.pod.ready, k8s.statefulset.updated)
+message Event {
+  string id = 1;                           // UUID, generated at source
+  string type = 2;                         // dot-separated: "cluster.create", "instance.pg_down"
+  string cluster_name = 3;
+  string namespace = 4;
+  string pod_name = 5;                     // empty for cluster-level events
+  string severity = 6;                     // info, warning, error, critical
+  map<string, string> data = 7;            // event-specific key-value pairs
+  google.protobuf.Timestamp timestamp = 8;
+  string source = 9;                       // "central", "satellite", "sidecar", "k8s-watch"
+  string operation_id = 10;                // correlates multi-step operations
+
+  // Typed payloads for events that carry structured proto data.
+  // Most events use only the data map; these are for events carrying
+  // rich configuration (cluster lifecycle, switchover, etc.).
+  oneof payload {
+    ClusterConfig cluster_config = 20;         // cluster.create, cluster.update
+    SwitchoverRequest switchover_request = 21; // switchover.requested
+    DeleteCluster delete_cluster = 22;         // cluster.delete
+    RestoreCommand restore_command = 23;       // restore.requested
+    BackupTrigger backup_trigger = 24;         // backup.trigger
+    ClusterHealthReport health_report = 25;    // health.report (rich instance data)
+  }
+}
+
 // --- Sidecar ↔ Satellite bidi stream ---
 
 service SidecarStreamService {
@@ -225,6 +261,7 @@ message SidecarMessage {
     SidecarIdentity identity = 1;    // sent on connect
     SidecarHeartbeat heartbeat = 2;
     CommandResult command_result = 3; // response to a command
+    Event event = 4;                 // sidecar -> satellite events
   }
 }
 
@@ -258,6 +295,7 @@ message SidecarCommand {
     SidecarHeartbeatAck heartbeat_ack = 7;
     CreateDatabaseCmd create_database = 8;
     ReloadConfCmd reload_conf = 9;
+    Event event = 10;                    // event-driven command path
   }
 }
 

@@ -127,7 +127,7 @@
           <div class="solution-item" data-reveal>
             <span class="solution-icon">&#10003;</span>
             <div>
-              <strong>Per-pod failover sidecar</strong>
+              <strong>Per-pod sentinel sidecar</strong>
               <p>Leader election via K8s Leases. Promotion in seconds with no central dependency.</p>
             </div>
           </div>
@@ -333,9 +333,9 @@
         <img src="images/screenshots/admin.png" alt="Admin - Storage Tiers" loading="lazy">
         <span class="screenshot-caption">Admin</span>
       </div>
-      <div class="screenshot-item" data-reveal data-modal="modal-recovery-rules">
-        <img src="images/screenshots/admin-recovery-rules.png" alt="Recovery Rules" loading="lazy">
-        <span class="screenshot-caption">Recovery Rules</span>
+      <div class="screenshot-item" data-reveal data-modal="modal-event-rules">
+        <img src="images/screenshots/admin-event-rules.png" alt="Event Rules" loading="lazy">
+        <span class="screenshot-caption">Event Rules</span>
       </div>
       <div class="screenshot-item" data-reveal data-modal="modal-update-rules">
         <img src="images/screenshots/admin-update-rules.png" alt="Update Rules" loading="lazy">
@@ -377,8 +377,8 @@
         <p>Lightweight agent per edge cluster. Persistent gRPC stream with auto-reconnection. Kubernetes operator that builds PG clusters from JSON configs.</p>
       </div>
       <div class="arch-card" data-reveal>
-        <h3>Failover Sidecar</h3>
-        <code>cmd/failover-sidecar</code>
+        <h3>Sentinel Sidecar</h3>
+        <code>cmd/sentinel-sidecar</code>
         <p>Per-pod sidecar for leader election via K8s Leases. Detects split-brain, fences writes, demotes old primary, recovers timeline divergence. Log watcher with 40+ recovery patterns. Bidirectional gRPC streaming to satellite for command dispatch.</p>
       </div>
     </div>
@@ -397,7 +397,7 @@
         <div class="timeline-marker">1</div>
         <div class="timeline-content">
           <h4>Primary Dies</h4>
-          <p>The primary pod crashes or becomes unreachable. The failover sidecar's lease renewal stops.</p>
+          <p>The primary pod crashes or becomes unreachable. The sentinel sidecar's lease renewal stops.</p>
         </div>
       </div>
       <div class="timeline-item" data-reveal>
@@ -664,13 +664,13 @@ const ssData = {
   },
   'modal-admin': {
     title: 'Admin Console',
-    desc: 'Five-tab administration page. Storage Tiers define abstract storage classes (fast, standard, replicated, archive) that each satellite maps to its concrete provisioners. Image Variants manage postgres base images. PG Versions track supported PostgreSQL releases with default selection. Recovery Rules and Update Rules are managed in their own tabs.',
-    images: ['images/screenshots/admin.png', 'images/screenshots/admin-recovery-rules.png', 'images/screenshots/admin-update-rules.png'],
+    desc: 'Five-tab administration page. Storage Tiers define abstract storage classes (fast, standard, replicated, archive) that each satellite maps to its concrete provisioners. Image Variants manage postgres base images. PG Versions track supported PostgreSQL releases with default selection. Event Rules and Update Rules are managed in their own tabs.',
+    images: ['images/screenshots/admin.png', 'images/screenshots/admin-event-rules.png', 'images/screenshots/admin-update-rules.png'],
   },
-  'modal-recovery-rules': {
-    title: 'Recovery Rules',
-    desc: 'Centrally managed recovery rule sets with 38 built-in rules across 9 categories: WAL & Checkpoint, Timeline & Replication, Corruption, Connections, Replication Slots, Authentication, Recovery, Streaming, and Archive. Each rule defines a regex pattern, severity, action (event, restart, rewind, rebasebackup), and cooldown. Rule sets can be cloned and customized per environment. Active and auto-recovery counts shown per set.',
-    images: ['images/screenshots/admin-recovery-rules.png', 'images/screenshots/admin.png'],
+  'modal-event-rules': {
+    title: 'Event Rules',
+    desc: 'Centrally managed event rule sets with 38 built-in rules across 9 categories: WAL & Checkpoint, Timeline & Replication, Corruption, Connections, Replication Slots, Authentication, Recovery, Streaming, and Archive. Each rule defines a regex pattern, severity, action (event, restart, rewind, rebasebackup), and cooldown. Rule sets can be cloned and customized per environment. Active and auto-recovery counts shown per set.',
+    images: ['images/screenshots/admin-event-rules.png', 'images/screenshots/admin.png'],
   },
   'modal-update-rules': {
     title: 'Update Rules',

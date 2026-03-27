@@ -16,7 +16,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" \
-    -o /out/failover-sidecar ./cmd/failover-sidecar
+    -o /out/sentinel-sidecar ./cmd/sentinel-sidecar
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM alpine:3.23
@@ -25,8 +25,8 @@ RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S pgswarm \
     && adduser  -S pgswarm -G pgswarm
 
-COPY --from=builder /out/failover-sidecar /usr/local/bin/failover-sidecar
+COPY --from=builder /out/sentinel-sidecar /usr/local/bin/sentinel-sidecar
 
 USER pgswarm
 
-ENTRYPOINT ["failover-sidecar"]
+ENTRYPOINT ["sentinel-sidecar"]

@@ -46,6 +46,21 @@ spec:
             - name: sidecar-grpc
               containerPort: 9091
               protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
           envFrom:
             - configMapRef:
                 name: satellite-config

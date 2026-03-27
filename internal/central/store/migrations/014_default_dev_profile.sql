@@ -33,7 +33,7 @@ INSERT INTO cluster_profiles (id, name, description, config) VALUES (
         "hba_rules": [
             "host all all 0.0.0.0/0 md5"
         ],
-        "failover": {
+        "sentinel": {
             "enabled": true,
             "health_check_interval_seconds": 5
         }

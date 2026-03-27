@@ -108,7 +108,7 @@ func cleanupNamespace(t *testing.T, ns string) {
 // newTestOperator creates an Operator for integration tests.
 func newTestOperator(t *testing.T, ns string) *Operator {
 	t.Helper()
-	return New(testClient, "integ-test", ns, "ghcr.io/pg-swarm/pg-swarm-failover:latest")
+	return New(testClient, "integ-test", ns, "ghcr.io/pg-swarm/pg-swarm-sentinel:latest")
 }
 
 // integrationCfg returns a minimal ClusterConfig for testing.

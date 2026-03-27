@@ -6,7 +6,7 @@ const DataContext = createContext(null);
 const EMPTY = {
   satellites: [], clusters: [], health: [], events: [], profiles: [],
   deploymentRules: [], postgresVersions: [], postgresVariants: [],
-  storageTiers: [], recoveryRuleSets: [], backupStores: [],
+  storageTiers: [], eventRuleSets: [], eventRules: [], eventActions: [], eventHandlers: [], backupStores: [],
 };
 
 function wsUrl() {
@@ -26,8 +26,8 @@ export function DataProvider({ children }) {
   const refresh = useCallback(async () => {
     try {
       const safe = (p) => p.catch(() => null);
-      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets, backupStores] = await Promise.all([
-        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.storageTiers()), safe(api.recoveryRuleSets()), safe(api.backupStores()),
+      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, storageTiers, eventRuleSets, eventRules, eventActions, eventHandlers, backupStores] = await Promise.all([
+        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.storageTiers()), safe(api.eventRuleSets()), safe(api.eventRules()), safe(api.eventActions()), safe(api.eventHandlers()), safe(api.backupStores()),
       ]);
       setData({
         satellites:        satellites || [],
@@ -39,7 +39,10 @@ export function DataProvider({ children }) {
         postgresVersions:  postgresVersions || [],
         postgresVariants:  postgresVariants || [],
         storageTiers:      storageTiers || [],
-        recoveryRuleSets:  recoveryRuleSets || [],
+        eventRuleSets:     eventRuleSets || [],
+        eventRules:        eventRules || [],
+        eventActions:      eventActions || [],
+        eventHandlers:     eventHandlers || [],
         backupStores:      backupStores || [],
       });
       setLastRefresh(new Date());
@@ -75,7 +78,10 @@ export function DataProvider({ children }) {
       postgresVersions:  state.postgresVersions || [],
       postgresVariants:  state.postgresVariants || [],
       storageTiers:      state.storageTiers || [],
-      recoveryRuleSets:  state.recoveryRuleSets || [],
+      eventRuleSets:     state.eventRuleSets || [],
+      eventRules:        state.eventRules    || [],
+      eventActions:      state.eventActions  || [],
+      eventHandlers:     state.eventHandlers || [],
       backupStores:      state.backupStores || [],
     });
     if (state.activeOperations) {
@@ -119,6 +125,7 @@ export function DataProvider({ children }) {
                   ...prev,
                   [p.operation_id]: {
                     ...existing,
+                    waiting_for_user: p.waiting_for_user || false,
                     steps: {
                       ...existing.steps,
                       [p.step]: {
