@@ -185,6 +185,30 @@ func (m *Monitor) tick(ctx context.Context) {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "57P03" {
 			log.Debug().Msg("postgres is starting up, waiting for WAL replay to complete")
+
+			// Even during WAL replay, check for zero-primary deadlock.
+			// A standby stuck waiting for WAL from a nonexistent primary
+			// will stay in 57P03 forever — we must break the deadlock.
+			if count := m.countClusterPrimaries(ctx); count == 0 {
+				m.zeroPrimaryCount++
+				if m.zeroPrimaryCount >= 5 {
+					expired, _ := m.isLeaseExpired(ctx)
+					if expired || m.leaseHeldBySelf(ctx) {
+						if _, err := m.acquireOrRenew(ctx); err == nil {
+							log.Error().Int("ticks", m.zeroPrimaryCount).
+								Msg("EMERGENCY: zero primaries, PG stuck in WAL replay — forcing primary")
+							m.execInContainer(ctx, "pg_ctl stop -m immediate -D "+pgDataDir)
+							os.Remove(pgSwarmNeedsBasebackup)
+							os.Remove(pgStandbySignal)
+							m.labelPod(ctx, rolePrimary)
+							m.zeroPrimaryCount = 0
+							m.wasConnected = false // suppress PGDATA detector re-writing marker
+						}
+					}
+				}
+			} else {
+				m.zeroPrimaryCount = 0
+			}
 			return
 		}
 		m.localPGDownCount++
@@ -217,6 +241,7 @@ func (m *Monitor) tick(ctx context.Context) {
 						os.Remove(pgStandbySignal)
 						m.labelPod(ctx, rolePrimary)
 						m.zeroPrimaryCount = 0
+						m.wasConnected = false // suppress PGDATA detector re-writing marker
 					}
 				}
 			}
@@ -504,7 +529,11 @@ func (m *Monitor) handleReplica(ctx context.Context, conn *pgx.Conn) {
 	log.Info().Msg("lease acquired — promoting to primary")
 
 	if err := m.promote(ctx); err != nil {
-		log.Error().Err(err).Msg("pg_promote() failed")
+		log.Error().Err(err).Msg("pg_promote() failed — removing standby.signal for retry")
+		// Remove standby.signal so PG doesn't restart as a standby that
+		// waits forever for WAL from a nonexistent primary. On the next
+		// wrapper restart, PG will come up as primary.
+		os.Remove(pgStandbySignal)
 		return
 	}
 
