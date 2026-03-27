@@ -6,7 +6,7 @@ const DataContext = createContext(null);
 const EMPTY = {
   satellites: [], clusters: [], health: [], events: [], profiles: [],
   deploymentRules: [], postgresVersions: [], postgresVariants: [],
-  storageTiers: [], recoveryRuleSets: [],
+  storageTiers: [], recoveryRuleSets: [], backupStores: [],
 };
 
 function wsUrl() {
@@ -26,8 +26,8 @@ export function DataProvider({ children }) {
   const refresh = useCallback(async () => {
     try {
       const safe = (p) => p.catch(() => null);
-      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets] = await Promise.all([
-        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.storageTiers()), safe(api.recoveryRuleSets()),
+      const [satellites, clusters, health, events, profiles, deploymentRules, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets, backupStores] = await Promise.all([
+        safe(api.satellites()), safe(api.clusters()), safe(api.health()), safe(api.events(50)), safe(api.profiles()), safe(api.deploymentRules()), safe(api.postgresVersions()), safe(api.postgresVariants()), safe(api.storageTiers()), safe(api.recoveryRuleSets()), safe(api.backupStores()),
       ]);
       setData({
         satellites:        satellites || [],
@@ -40,6 +40,7 @@ export function DataProvider({ children }) {
         postgresVariants:  postgresVariants || [],
         storageTiers:      storageTiers || [],
         recoveryRuleSets:  recoveryRuleSets || [],
+        backupStores:      backupStores || [],
       });
       setLastRefresh(new Date());
     } catch (err) {
@@ -75,6 +76,7 @@ export function DataProvider({ children }) {
       postgresVariants:  state.postgresVariants || [],
       storageTiers:      state.storageTiers || [],
       recoveryRuleSets:  state.recoveryRuleSets || [],
+      backupStores:      state.backupStores || [],
     });
     if (state.activeOperations) {
       setActiveOperations(state.activeOperations);

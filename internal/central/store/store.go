@@ -97,6 +97,25 @@ type Store interface {
 	UpdateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error
 	DeleteRecoveryRuleSet(ctx context.Context, id uuid.UUID) error
 
+	// Backup Stores
+	CreateBackupStore(ctx context.Context, bs *models.BackupStore) error
+	GetBackupStore(ctx context.Context, id uuid.UUID) (*models.BackupStore, error)
+	ListBackupStores(ctx context.Context) ([]*models.BackupStore, error)
+	UpdateBackupStore(ctx context.Context, bs *models.BackupStore) error
+	DeleteBackupStore(ctx context.Context, id uuid.UUID) error
+
+	// Backup Inventory
+	CreateBackupInventory(ctx context.Context, bi *models.BackupInventory) error
+	GetBackupInventory(ctx context.Context, id uuid.UUID) (*models.BackupInventory, error)
+	ListBackupInventory(ctx context.Context, satelliteID uuid.UUID, clusterName string, limit int) ([]*models.BackupInventory, error)
+	UpdateBackupInventory(ctx context.Context, bi *models.BackupInventory) error
+
+	// Restore Operations
+	CreateRestoreOperation(ctx context.Context, ro *models.RestoreOperation) error
+	GetRestoreOperation(ctx context.Context, id uuid.UUID) (*models.RestoreOperation, error)
+	ListRestoreOperations(ctx context.Context, satelliteID uuid.UUID, clusterName string, limit int) ([]*models.RestoreOperation, error)
+	UpdateRestoreOperation(ctx context.Context, ro *models.RestoreOperation) error
+
 	// Config Versions
 	CreateConfigVersion(ctx context.Context, v *models.ConfigVersion) error
 	ListConfigVersions(ctx context.Context, profileID uuid.UUID) ([]*models.ConfigVersion, error)

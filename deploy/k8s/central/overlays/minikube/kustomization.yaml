@@ -4,7 +4,7 @@ kind: Kustomization
 resources:
   - ../../base/
 
-namespace: pgswarm-system-central
+namespace: pgswarm-system
 
 patches:
   - path: pg-host-patch.yaml

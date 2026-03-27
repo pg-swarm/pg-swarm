@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/part-of: pg-swarm
 data:
   # Central runs on the host; minikube resolves host.minikube.internal to the host IP.
-  CENTRAL_ADDR: "pg-swarm-central-grpc.pgswarm-system-central.svc.cluster.local:9090"
+  CENTRAL_ADDR: "pg-swarm-central-grpc.pgswarm-system.svc.cluster.local:9090"
   K8S_CLUSTER_NAME: "minikube"
   REGION: "local"
   DEPLOY_NAMESPACE: "default"

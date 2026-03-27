@@ -54,6 +54,9 @@ test: ## Run unit tests
 test-integration: ## Run integration tests against minikube (requires running cluster)
 	go test -tags integration -timeout 10m -v ./internal/satellite/operator/
 
+test-e2e: ## Run end-to-end chaos tests (requires minikube with images loaded)
+	go test -tags e2e -timeout 30m -v ./test/e2e/
+
 manifests: ## Regenerate operator manifest YAMLs in testdata/
 	go test ./internal/satellite/operator/ -run TestManifests -count=1
 

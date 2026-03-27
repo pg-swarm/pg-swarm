@@ -136,21 +136,28 @@ pg_swarm_recover() {
 # --- Helper: nuke PGDATA and re-basebackup from primary ---
 pg_swarm_rebasebackup() {
     local reason="$1"
+    local marker="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
     echo "pg-swarm: $reason — starting full re-basebackup"
     find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
-    for i in $(seq 1 60); do
+    for i in $(seq 1 12); do
+        # If the sidecar removed the marker (emergency deadlock breaker),
+        # abort the rebasebackup loop so the wrapper can start PG directly.
+        if [ ! -f "$marker" ]; then
+            echo "pg-swarm: basebackup marker removed by sidecar — aborting rebasebackup"
+            return 1
+        fi
         if pg_isready -h "$PRIMARY_HOST" -U postgres -t 2 >/dev/null 2>&1; then
             if PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
                 -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P; then
                 cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
                 cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"
-                rm -f "/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
+                rm -f "$marker"
                 return 0
             fi
         fi
         sleep 5
     done
-    echo "pg-swarm: re-basebackup failed after 60 attempts"
+    echo "pg-swarm: re-basebackup failed after 12 attempts"
     return 1
 }
 
@@ -180,27 +187,49 @@ while true; do
     # Check and fix timeline divergence before starting PG
     pg_swarm_recover
 
-    # Check if a forced re-basebackup was requested by the sidecar (e.g. WAL gap)
+    # Check if a forced re-basebackup was requested by the sidecar (e.g. WAL gap,
+    # PGDATA loss). All pods — including ordinal 0 — honour this marker because
+    # after a failover, ordinal 0 is no longer the primary and must rebuild from
+    # the new primary.
     MARKER="/var/lib/postgresql/data/.pg-swarm-needs-basebackup"
     if [ -f "$MARKER" ]; then
-        echo "pg-swarm: forced re-basebackup requested (e.g. WAL gap)"
-        if [ "$ORDINAL" != "0" ]; then
-            pg_swarm_rebasebackup "basebackup marker found" || { sleep 5; continue; }
-        else
-            rm -f "$MARKER"
-        fi
+        echo "pg-swarm: forced re-basebackup requested"
+        pg_swarm_rebasebackup "basebackup marker found" || { sleep 5; continue; }
+        continue
+    fi
+
+    # Guard: PGDATA is empty on primary after it was previously initialized
+    # — this means PGDATA was deleted at runtime. Yield for failover, then
+    # re-basebackup from the new primary once it's available.
+    SENTINEL="/var/lib/postgresql/data/.pg-swarm-initialized"
+    if [ "$ORDINAL" = "0" ] && [ -d "$PGDATA" ] && [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ] && [ -f "$SENTINEL" ]; then
+        echo "pg-swarm: PRIMARY PGDATA is empty but was previously initialized — yielding lease for failover"
+        # Sleep to let the sidecar's lease expire and a replica promote.
+        sleep 30
+        echo "pg-swarm: attempting re-basebackup from new primary"
+        rm -f "$SENTINEL"
+        pg_swarm_rebasebackup "primary PGDATA lost — rebuilding from new primary" || { sleep 5; continue; }
+        continue
     fi
 
     # Guard: if PGDATA has files but no PG_VERSION, it is corrupt (e.g. a
     # previous pg_basebackup failed partway through). Clean up and either
-    # re-basebackup (replicas) or let docker-entrypoint.sh initdb (primary).
+    # re-basebackup (replicas) or yield for failover (primary, if previously initialized).
     if [ -d "$PGDATA" ] && [ -n "$(ls -A "$PGDATA" 2>/dev/null)" ] && [ ! -s "$PGDATA/PG_VERSION" ]; then
         echo "pg-swarm: corrupt PGDATA (no PG_VERSION) — cleaning up"
         if [ "$ORDINAL" != "0" ]; then
             pg_swarm_rebasebackup "corrupt PGDATA" || { sleep 5; continue; }
-        else
+        elif [ -f "$SENTINEL" ]; then
+            echo "pg-swarm: PRIMARY PGDATA lost at runtime — yielding lease for failover"
+            sleep 30
+            echo "pg-swarm: attempting re-basebackup from new primary"
             find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
-            # Fall through to docker-entrypoint.sh which will initdb
+            rm -f "$SENTINEL"
+            pg_swarm_rebasebackup "primary PGDATA corrupt — rebuilding from new primary" || { sleep 5; continue; }
+            continue
+        else
+            # First boot: clean up and let docker-entrypoint.sh initdb
+            find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
         fi
     fi
 
@@ -245,6 +274,21 @@ while true; do
     PG_START=$(date +%s)
     docker-entrypoint.sh postgres 2>&1 | tee "$PG_LOG" &
     PG_PID=$!
+
+    # Mark that this pod has been initialized at least once.
+    # Used to distinguish first boot from runtime PGDATA loss.
+    SENTINEL="/var/lib/postgresql/data/.pg-swarm-initialized"
+    if [ ! -f "$SENTINEL" ]; then
+        for _i in $(seq 1 10); do
+            if pg_isready -t 1 >/dev/null 2>&1; then
+                touch "$SENTINEL"
+                echo "pg-swarm: initialization sentinel written"
+                break
+            fi
+            sleep 1
+        done
+    fi
+
     wait $PG_PID
     EXIT_CODE=$?
 
@@ -260,8 +304,8 @@ while true; do
     # Skip if the failover sidecar already wrote the basebackup marker
     # (it detects these errors in real-time via logwatcher).
     if [ "$ORDINAL" != "0" ] && [ -f "$PG_LOG" ] && [ ! -f "$MARKER" ]; then
-        if grep -qE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal' "$PG_LOG"; then
-            MATCHED=$(grep -oE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal' "$PG_LOG" | head -1)
+        if grep -qE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal|could not open file.*pg_filenode\.map' "$PG_LOG"; then
+            MATCHED=$(grep -oE 'wal_level=minimal.*cannot continue recovering|could not locate a valid checkpoint record|database files are incompatible with server|could not open directory.*pg_wal|could not open file.*pg_filenode\.map' "$PG_LOG" | head -1)
             echo "pg-swarm: FATAL unrecoverable error detected: $MATCHED"
             rm -f "$PG_LOG"
             pg_swarm_rebasebackup "fatal: $MATCHED" || { sleep 5; continue; }
