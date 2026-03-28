@@ -25,6 +25,7 @@
       <a href="#dashboard">Dashboard</a>
       <a href="#screenshots">Screenshots</a>
       <a href="#architecture">Architecture</a>
+      <a href="#events-arch">Events</a>
       <a href="#how-it-works">How It Works</a>
       <a href="#backup">Backup</a>
       <a href="#quickstart">Quick Start</a>
@@ -360,7 +361,7 @@
   <div class="container">
     <div class="section-header">
       <h2 class="section-title center" data-reveal>Architecture</h2>
-      <p class="section-sub center" data-reveal>Bidirectional gRPC streaming across every layer. Continuous log monitoring with pattern-driven recovery rules. Real-time WebSocket state push. Sidecar command dispatch for zero-latency switchover.</p>
+      <p class="section-sub center" data-reveal>Autonomous agents communicate through a typed event system. Every cluster operation — create, failover, switchover, recovery — is modeled as a named event dispatched through a satellite-local EventBus. Bidirectional gRPC streaming across every layer. Real-time WebSocket state push to the dashboard.</p>
     </div>
     <div class="arch-diagram" data-reveal>
       <img src="images/architecture.svg" alt="PG-Swarm architecture diagram" class="arch-svg">
@@ -385,19 +386,121 @@
   </div>
 </section>
 
+<!-- Agent & Event Architecture -->
+<section class="section section-alt" id="events-arch">
+  <div class="container">
+    <div class="section-header">
+      <h2 class="section-title center" data-reveal>Agent &amp; Event Architecture</h2>
+      <p class="section-sub center" data-reveal>Every operation is modeled as a typed event. Autonomous agents subscribe, react, and emit — with no tight coupling between components.</p>
+    </div>
+
+    <div class="event-flow" data-reveal>
+      <div class="event-flow-node ev-central">Central</div>
+      <div class="event-flow-arrow">&#8594;</div>
+      <div class="event-flow-node ev-bus">satellite<br>.eventbus</div>
+      <div class="event-flow-arrow">&#8594;</div>
+      <div class="event-flow-node ev-handler">Lifecycle<br>Switchover<br>Health</div>
+      <div class="event-flow-arrow">&#8594;</div>
+      <div class="event-flow-node ev-sidecar">Sentinel<br>Sidecar</div>
+      <div class="event-flow-arrow">&#8594;</div>
+      <div class="event-flow-node ev-k8s">K8s<br>Resources</div>
+    </div>
+
+    <div class="feature-grid" data-reveal-stagger style="margin-bottom: 56px;">
+      <div class="feature-card" data-reveal>
+        <div class="feature-icon">&#128225;</div>
+        <h3>Satellite Agent</h3>
+        <p>Self-registers, maintains a persistent gRPC stream, and operates independently. Runs its own EventBus that dispatches all cluster operations locally. No central dependency for failover or recovery decisions.</p>
+      </div>
+      <div class="feature-card" data-reveal>
+        <div class="feature-icon">&#128737;</div>
+        <h3>Sentinel Sidecar</h3>
+        <p>Per-pod autonomous agent. Detects primary failure via K8s Lease expiry, runs leader election, and calls <code>pg_promote()</code> — all without contacting central. Streams events back via bidirectional gRPC.</p>
+      </div>
+      <div class="feature-card" data-reveal>
+        <div class="feature-icon">&#128268;</div>
+        <h3>EventBus</h3>
+        <p>Satellite-local pub/sub engine. Supports exact-match (<code>cluster.create</code>), prefix (<code>instance.*</code>), and wildcard subscriptions. Auto-forwards all events to central. Source-tagged to prevent echo loops.</p>
+      </div>
+    </div>
+
+    <div class="event-types-section" data-reveal>
+      <div class="event-types-label">Event Types</div>
+      <div class="event-types-grid">
+        <code class="event-type-pill lifecycle">cluster.create</code>
+        <code class="event-type-pill lifecycle">cluster.update</code>
+        <code class="event-type-pill lifecycle">cluster.delete</code>
+        <code class="event-type-pill lifecycle">cluster.pause</code>
+        <code class="event-type-pill lifecycle">cluster.state_changed</code>
+        <code class="event-type-pill switchover">switchover.requested</code>
+        <code class="event-type-pill switchover">switchover.step</code>
+        <code class="event-type-pill switchover">switchover.step.execute</code>
+        <code class="event-type-pill switchover">switchover.completed</code>
+        <code class="event-type-pill switchover">switchover.failed</code>
+        <code class="event-type-pill health">health.report</code>
+        <code class="event-type-pill health">instance.pg_down</code>
+        <code class="event-type-pill recovery">log.recovery.*</code>
+        <code class="event-type-pill recovery">log.wal.*</code>
+        <code class="event-type-pill config">config.applied</code>
+        <code class="event-type-pill config">config.rejected</code>
+        <code class="event-type-pill config">database.created</code>
+      </div>
+    </div>
+
+    <div class="feature-grid" data-reveal-stagger>
+      <div class="event-op-card eoc-lifecycle" data-reveal>
+        <div class="event-op-title">
+          <span class="event-op-title-dot"></span>Cluster Lifecycle
+        </div>
+        <ul class="event-op-steps">
+          <li>Central emits <code>cluster.create</code></li>
+          <li>Satellite EventBus routes to LifecycleHandler</li>
+          <li>LifecycleHandler calls <code>Operator.HandleConfig()</code></li>
+          <li>Operator creates StatefulSet, Services, RBAC in K8s</li>
+          <li>Satellite emits <code>config.applied</code> back to Central</li>
+        </ul>
+      </div>
+      <div class="event-op-card eoc-switchover" data-reveal>
+        <div class="event-op-title">
+          <span class="event-op-title-dot"></span>Planned Switchover
+        </div>
+        <ul class="event-op-steps">
+          <li>Central emits <code>switchover.requested</code></li>
+          <li>SwitchoverHandler receives via EventBus</li>
+          <li>Interactive: pauses at PONR, awaits <code>switchover.step.execute</code></li>
+          <li>Dispatches sidecar commands: fence, checkpoint, promote</li>
+          <li>Emits <code>switchover.step</code> ×9 → <code>switchover.completed</code></li>
+        </ul>
+      </div>
+      <div class="event-op-card eoc-fault" data-reveal>
+        <div class="event-op-title">
+          <span class="event-op-title-dot"></span>Fault Detection
+        </div>
+        <ul class="event-op-steps">
+          <li>LogWatcher tails PG container logs in real-time</li>
+          <li>Matches against 40+ patterns (WAL, OOM, corruption)</li>
+          <li>Emits <code>log.recovery.*</code> or <code>log.wal.*</code> events</li>
+          <li>EventBus handler triggers: restart, rewind, or rebasebackup</li>
+          <li>Sentinel monitor emits <code>instance.pg_down</code> on lease expiry</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- How It Works -->
 <section class="section" id="how-it-works">
   <div class="container">
     <div class="section-header">
       <h2 class="section-title center" data-reveal>How Failover Works</h2>
-      <p class="section-sub center" data-reveal>From primary failure to full recovery in under 20 seconds, with zero manual intervention.</p>
+      <p class="section-sub center" data-reveal>Entirely event-driven. From primary failure to full recovery in under 20 seconds, with zero manual intervention and no central round-trip.</p>
     </div>
     <div class="timeline" data-reveal-stagger>
       <div class="timeline-item" data-reveal>
         <div class="timeline-marker">1</div>
         <div class="timeline-content">
           <h4>Primary Dies</h4>
-          <p>The primary pod crashes or becomes unreachable. The sentinel sidecar's lease renewal stops.</p>
+          <p>The primary pod crashes or becomes unreachable. The sentinel sidecar's K8s Lease renewal stops, triggering the event chain.</p>
         </div>
       </div>
       <div class="timeline-item" data-reveal>
