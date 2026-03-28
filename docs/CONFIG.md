@@ -73,7 +73,7 @@ The API and dashboard must **reject** these changes with a clear error message. 
 
 ## 3. Sequential Restart Flow
 
-For changes classified as safe for sequential restart, no custom orchestration is needed. The operator updates the ConfigMap and StatefulSet pod template — Kubernetes handles the rolling restart automatically, and the existing failover sidecar handles primary promotion.
+For changes classified as safe for sequential restart, no custom orchestration is needed. The operator updates the ConfigMap and StatefulSet pod template — Kubernetes handles the rolling restart automatically, and the existing sentinel sidecar handles primary promotion.
 
 ### 3.1 Flow
 
@@ -90,7 +90,7 @@ For changes classified as safe for sequential restart, no custom orchestration i
    b. Waits for replacement pod to become Ready before proceeding
    c. Each new pod picks up the updated ConfigMap on startup
 7. When the primary pod is restarted:
-   a. Failover sidecar on a replica detects primary is gone
+   a. Sentinel sidecar on a replica detects primary is gone
    b. Acquires leader lease and promotes itself (existing failover mechanism)
    c. Primary pod restarts as a replica and re-joins the cluster
 8. Central receives health update, creates Event, pushes WebSocket update
@@ -413,7 +413,7 @@ The satellite operator, upon receiving a new `ClusterConfig`:
 1. Compare new config against the last applied config.
 2. Classify the changes using the logic in section 7.
 3. Choose apply strategy:
-   - **Sequential restart**: Normal reconciliation — update ConfigMap + StatefulSet template. K8s rolling update + failover sidecar handle the rest. No new code needed.
+   - **Sequential restart**: Normal reconciliation — update ConfigMap + StatefulSet template. K8s rolling update + sentinel sidecar handle the rest. No new code needed.
    - **Full restart**: Fence → scale to 0 → update ConfigMap + StatefulSet → scale back. Requires explicit orchestration.
    - **Scale only**: Update StatefulSet replicas directly.
    - **PVC only**: Patch PVC finalizers.
@@ -427,7 +427,7 @@ For sequential restart, the operator runs its existing reconciliation:
 createOrUpdateConfigMap(ctx, o.client, buildConfigMap(cfg))
 createOrUpdateStatefulSet(ctx, o.client, buildStatefulSet(cfg, ...))
 // K8s rolling update kicks in automatically when pod template changes.
-// Failover sidecar handles promotion when primary pod is restarted.
+// Sentinel sidecar handles promotion when primary pod is restarted.
 ```
 
 This is the same code path the operator already uses. The only new behavior is that it is now allowed to run on config changes (previously blocked by profile locking).
@@ -1081,7 +1081,7 @@ CREATE UNIQUE INDEX idx_config_versions_profile_version
 ALTER TABLE cluster_profiles DROP COLUMN IF EXISTS locked;
 ```
 
-### 13.7 Dashboard Changes (`web/dashboard/src/pages/Profiles.jsx`)
+### 13.7 Dashboard Changes (`dashboard/src/pages/Profiles.jsx`)
 
 #### 13.7.1 Remove Lock State
 
@@ -1178,7 +1178,7 @@ function VersionHistoryTab({ profileId }) {
 }
 ```
 
-#### 13.7.5 API Client Additions (`web/dashboard/src/api.js`)
+#### 13.7.5 API Client Additions (`dashboard/src/api.js`)
 
 ```js
 // Config versions
@@ -1202,10 +1202,10 @@ applyCluster: (id) => post(`/clusters/${id}/apply`, { confirmed: true }),
 | `internal/satellite/operator/reconcile_helpers.go` | Change VCT warning from silent to explicit error log |
 | `internal/central/store/migrations/018_config_versions.sql` | **New file** — `config_versions` table, drop `locked` column |
 | `api/proto/v1/config.proto` | No changes needed |
-| `web/dashboard/src/pages/Profiles.jsx` | Remove locking UI; add confirmation dialog, version history tab |
-| `web/dashboard/src/api.js` | Add version/apply/revert API functions |
-| `web/dashboard/mock/data.js` | Add mock config versions |
-| `web/dashboard/mock/plugin.js` | Add mock version/apply/revert routes |
+| `dashboard/src/pages/Profiles.jsx` | Remove locking UI; add confirmation dialog, version history tab |
+| `dashboard/src/api.js` | Add version/apply/revert API functions |
+| `dashboard/mock/data.js` | Add mock config versions |
+| `dashboard/mock/plugin.js` | Add mock version/apply/revert routes |
 
 ---
 

@@ -3,9 +3,9 @@ import { useData } from '../context/DataContext';
 import { useToast } from '../context/ToastContext';
 import { api } from '../api';
 import {
-  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database, Shield, SlidersHorizontal, HardDrive
+  Plus, Pencil, Trash2, Save, X, Star, Settings, Layers, Box, Database, Zap, SlidersHorizontal, HardDrive
 } from 'lucide-react';
-import RecoveryRulesTab from '../components/RecoveryRulesTab';
+import EventRulesTab from '../components/EventRulesTab';
 
 export default function Admin() {
   const { postgresVersions, postgresVariants, storageTiers, backupStores, refresh } = useData();
@@ -18,7 +18,7 @@ export default function Admin() {
     { key: 'tiers', label: 'Storage Tiers', icon: <Layers size={14} /> },
     { key: 'variants', label: 'Image Variants', icon: <Box size={14} /> },
     { key: 'versions', label: 'PG Versions', icon: <Database size={14} /> },
-    { key: 'recovery', label: 'Recovery Rules', icon: <Shield size={14} /> },
+    { key: 'events', label: 'Event Rules', icon: <Zap size={14} /> },
     { key: 'pgparams', label: 'Update Rules', icon: <SlidersHorizontal size={14} /> },
     { key: 'backupstores', label: 'Backup Stores', icon: <HardDrive size={14} /> },
   ];
@@ -41,7 +41,7 @@ export default function Admin() {
       {activeTab === 'tiers' && <StorageTiersTab storageTiers={storageTiers} refresh={refresh} toast={toast} />}
       {activeTab === 'variants' && <VariantsTab postgresVariants={postgresVariants} refresh={refresh} toast={toast} />}
       {activeTab === 'versions' && <VersionsTab postgresVersions={postgresVersions} postgresVariants={postgresVariants} refresh={refresh} toast={toast} />}
-      {activeTab === 'recovery' && <RecoveryRulesTab toast={toast} />}
+      {activeTab === 'events' && <EventRulesTab toast={toast} />}
       {activeTab === 'pgparams' && <PgParamClassificationsTab toast={toast} />}
       {activeTab === 'backupstores' && <BackupStoresTab backupStores={backupStores} refresh={refresh} toast={toast} />}
       </div>

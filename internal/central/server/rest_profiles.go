@@ -9,6 +9,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/eventbus"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
 	"github.com/rs/zerolog/log"
 )
@@ -142,11 +143,11 @@ func (s *RESTServer) updateProfile(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"profile": profile,
 			"change_impact": fiber.Map{
-				"affected_clusters":    clusterNames,
-				"reload_changes":       diff.ReloadChanges,
-				"sequential_changes":   diff.SequentialChanges,
-				"full_restart_changes": diff.FullRestartChanges,
-				"apply_strategy":       diff.ApplyStrategy(),
+				"affected_clusters":     clusterNames,
+				"reload_changes":        diff.ReloadChanges,
+				"sequential_changes":    diff.SequentialChanges,
+				"full_restart_changes":  diff.FullRestartChanges,
+				"apply_strategy":        diff.ApplyStrategy(),
 				"requires_confirmation": true,
 			},
 		})
@@ -288,11 +289,11 @@ func (s *RESTServer) revertProfile(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"profile": existing,
 			"change_impact": fiber.Map{
-				"affected_clusters":    clusterNames,
-				"reload_changes":       diff.ReloadChanges,
-				"sequential_changes":   diff.SequentialChanges,
-				"full_restart_changes": diff.FullRestartChanges,
-				"apply_strategy":       diff.ApplyStrategy(),
+				"affected_clusters":     clusterNames,
+				"reload_changes":        diff.ReloadChanges,
+				"sequential_changes":    diff.SequentialChanges,
+				"full_restart_changes":  diff.FullRestartChanges,
+				"apply_strategy":        diff.ApplyStrategy(),
 				"requires_confirmation": true,
 			},
 		})
@@ -319,8 +320,11 @@ func (s *RESTServer) deleteProfile(c *fiber.Ctx) error {
 		for _, cfg := range clusters {
 			if cfg.SatelliteID != nil {
 				del := &pgswarmv1.DeleteCluster{ClusterName: cfg.Name, Namespace: cfg.Namespace}
-				if pushErr := s.streams.PushDelete(*cfg.SatelliteID, del); pushErr != nil {
-					log.Warn().Err(pushErr).Str("cluster", cfg.Name).Msg("cascade: failed to push delete to satellite")
+				evt := eventbus.NewEvent("cluster.delete", cfg.Name, cfg.Namespace, "central")
+				eventbus.WithSeverity(evt, "warning")
+				evt.Payload = &pgswarmv1.Event_DeleteCluster{DeleteCluster: del}
+				if pushErr := s.streams.PushEvent(*cfg.SatelliteID, evt); pushErr != nil {
+					log.Warn().Err(pushErr).Str("cluster", cfg.Name).Msg("cascade: failed to push delete event to satellite")
 				}
 			}
 			if delErr := s.store.DeleteClusterConfig(ctx, cfg.ID); delErr != nil {

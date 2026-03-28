@@ -12,6 +12,7 @@ import (
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/central/crypto"
 	"github.com/pg-swarm/pg-swarm/internal/central/store"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/eventbus"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
 	"github.com/rs/zerolog/log"
 )
@@ -153,8 +154,11 @@ func (s *RESTServer) deleteClusterConfig(c *fiber.Ctx) error {
 	// Notify satellite to tear down resources
 	if cfg.SatelliteID != nil {
 		del := &pgswarmv1.DeleteCluster{ClusterName: cfg.Name, Namespace: cfg.Namespace}
-		if err := s.streams.PushDelete(*cfg.SatelliteID, del); err != nil {
-			log.Warn().Err(err).Str("config_id", id.String()).Msg("failed to push delete to satellite (may be offline)")
+		evt := eventbus.NewEvent("cluster.delete", cfg.Name, cfg.Namespace, "central")
+		eventbus.WithSeverity(evt, "warning")
+		evt.Payload = &pgswarmv1.Event_DeleteCluster{DeleteCluster: del}
+		if err := s.streams.PushEvent(*cfg.SatelliteID, evt); err != nil {
+			log.Warn().Err(err).Str("config_id", id.String()).Msg("failed to push delete event to satellite (may be offline)")
 		}
 	}
 
@@ -204,7 +208,8 @@ func (s *RESTServer) switchoverCluster(c *fiber.Ctx) error {
 	}
 
 	var body struct {
-		TargetPod string `json:"target_pod"`
+		TargetPod   string `json:"target_pod"`
+		Interactive bool   `json:"interactive"`
 	}
 	if err := c.BodyParser(&body); err != nil || body.TargetPod == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "target_pod is required"})
@@ -219,25 +224,118 @@ func (s *RESTServer) switchoverCluster(c *fiber.Ctx) error {
 	}
 
 	operationID := uuid.New().String()
+	satelliteID := cfg.SatelliteID.String()
 	req := &pgswarmv1.SwitchoverRequest{
 		ClusterName: cfg.Name,
 		Namespace:   cfg.Namespace,
 		TargetPod:   body.TargetPod,
 		OperationId: operationID,
+		Interactive: body.Interactive,
 	}
 
 	if s.opsTracker != nil {
-		s.opsTracker.Start(operationID, cfg.Name, "", body.TargetPod)
+		s.opsTracker.Start(operationID, cfg.Name, "", body.TargetPod, satelliteID, body.Interactive)
 	}
 
-	if err := s.streams.PushSwitchover(*cfg.SatelliteID, req); err != nil {
-		log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to send switchover request")
+	evt := eventbus.NewEvent("switchover.requested", cfg.Name, cfg.Namespace, "central")
+	eventbus.WithOperationID(evt, operationID)
+	eventbus.WithData(evt, "target_pod", body.TargetPod)
+	evt.Payload = &pgswarmv1.Event_SwitchoverRequest{SwitchoverRequest: req}
+
+	if err := s.streams.PushEvent(*cfg.SatelliteID, evt); err != nil {
+		log.Error().Err(err).Str("cluster", cfg.Name).Msg("failed to send switchover event")
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	log.Info().Str("cluster", cfg.Name).Str("target", body.TargetPod).Str("operation_id", operationID).Msg("switchover request sent")
+	log.Info().Str("cluster", cfg.Name).Str("target", body.TargetPod).Str("operation_id", operationID).Bool("interactive", body.Interactive).Msg("switchover request sent")
 	auditLog(c, "cluster.switchover", "cluster", id.String(), cfg.Name, "target_pod="+body.TargetPod)
 	return c.JSON(fiber.Map{"status": "switchover initiated", "target_pod": body.TargetPod, "operation_id": operationID})
+}
+
+// switchoverContinue signals the satellite to execute the next switchover step.
+// Called by the dashboard after the user reviews the result of the current step.
+func (s *RESTServer) switchoverContinue(c *fiber.Ctx) error {
+	clusterID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+	_ = clusterID
+
+	var body struct {
+		OperationID string `json:"operation_id"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.OperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "operation_id is required"})
+	}
+
+	if s.opsTracker == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "ops tracker unavailable"})
+	}
+	op, ok := s.opsTracker.GetOp(body.OperationID)
+	if !ok {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "operation not found"})
+	}
+	if !op.WaitingForUser {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "operation is not waiting for user input"})
+	}
+
+	satID, err := uuid.Parse(op.SatelliteID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "invalid satellite id in operation"})
+	}
+
+	evt := eventbus.NewEvent("switchover.step.execute", op.ClusterName, "", "central")
+	eventbus.WithOperationID(evt, body.OperationID)
+
+	if err := s.streams.PushEvent(satID, evt); err != nil {
+		log.Error().Err(err).Str("operation_id", body.OperationID).Msg("failed to send switchover continue event")
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	s.opsTracker.ClearWaitingForUser(body.OperationID)
+	log.Info().Str("operation_id", body.OperationID).Int32("step", op.CurrentStep).Msg("switchover continue sent")
+	return c.JSON(fiber.Map{"status": "proceeding"})
+}
+
+// switchoverAbort signals the satellite to abort an in-progress interactive switchover.
+func (s *RESTServer) switchoverAbort(c *fiber.Ctx) error {
+	clusterID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+	_ = clusterID
+
+	var body struct {
+		OperationID string `json:"operation_id"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.OperationID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "operation_id is required"})
+	}
+
+	if s.opsTracker == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "ops tracker unavailable"})
+	}
+	op, ok := s.opsTracker.GetOp(body.OperationID)
+	if !ok {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "operation not found"})
+	}
+
+	satID, err := uuid.Parse(op.SatelliteID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "invalid satellite id in operation"})
+	}
+
+	evt := eventbus.NewEvent("switchover.abort", op.ClusterName, "", "central")
+	eventbus.WithOperationID(evt, body.OperationID)
+
+	if err := s.streams.PushEvent(satID, evt); err != nil {
+		log.Error().Err(err).Str("operation_id", body.OperationID).Msg("failed to send switchover abort event")
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	s.opsTracker.ClearWaitingForUser(body.OperationID)
+	log.Info().Str("operation_id", body.OperationID).Msg("switchover abort sent")
+	return c.JSON(fiber.Map{"status": "aborting"})
 }
 
 func (s *RESTServer) clusterProfileDiff(c *fiber.Ctx) error {
@@ -289,16 +387,16 @@ func (s *RESTServer) clusterProfileDiff(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"cluster_name":            cfg.Name,
-		"profile_name":           profile.Name,
+		"profile_name":            profile.Name,
 		"applied_profile_version": cfg.AppliedProfileVersion,
 		"latest_profile_version":  latestVersion,
-		"reload_changes":         diff.ReloadChanges,
-		"sequential_changes":     diff.SequentialChanges,
-		"full_restart_changes":   diff.FullRestartChanges,
-		"immutable_errors":       diff.ImmutableErrors,
-		"scale_up":               diff.ScaleUp,
-		"scale_down":             diff.ScaleDown,
-		"apply_strategy":         diff.ApplyStrategy(),
+		"reload_changes":          diff.ReloadChanges,
+		"sequential_changes":      diff.SequentialChanges,
+		"full_restart_changes":    diff.FullRestartChanges,
+		"immutable_errors":        diff.ImmutableErrors,
+		"scale_up":                diff.ScaleUp,
+		"scale_down":              diff.ScaleDown,
+		"apply_strategy":          diff.ApplyStrategy(),
 	})
 }
 
@@ -480,11 +578,21 @@ func (s *RESTServer) pushConfigToSatellite(cfg *models.ClusterConfig) {
 		return
 	}
 
-	if err := s.streams.PushConfig(*cfg.SatelliteID, protoConfig); err != nil {
+	// Determine event type: create (version 1) vs update (version > 1)
+	evtType := "cluster.update"
+	if protoConfig.ConfigVersion <= 1 {
+		evtType = "cluster.create"
+	}
+
+	evt := eventbus.NewEvent(evtType, protoConfig.ClusterName, protoConfig.Namespace, "central")
+	evt.Payload = &pgswarmv1.Event_ClusterConfig{ClusterConfig: protoConfig}
+
+	if err := s.streams.PushEvent(*cfg.SatelliteID, evt); err != nil {
 		log.Error().Err(err).
 			Str("satellite_id", cfg.SatelliteID.String()).
 			Str("config_id", cfg.ID.String()).
-			Msg("failed to push config to satellite")
+			Str("event_type", evtType).
+			Msg("failed to push config event to satellite")
 	}
 }
 
@@ -562,11 +670,11 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig, enc *cry
 		}
 	}
 
-	if spec.Failover != nil && spec.Failover.Enabled {
-		protoConfig.Failover = &pgswarmv1.FailoverSpec{
+	if spec.Sentinel != nil && spec.Sentinel.Enabled {
+		protoConfig.Sentinel = &pgswarmv1.SentinelSpec{
 			Enabled:                    true,
-			HealthCheckIntervalSeconds: spec.Failover.HealthCheckIntervalSeconds,
-			SidecarImage:               spec.Failover.SidecarImage,
+			HealthCheckIntervalSeconds: spec.Sentinel.HealthCheckIntervalSeconds,
+			SidecarImage:               spec.Sentinel.SidecarImage,
 		}
 	}
 
@@ -579,29 +687,35 @@ func buildProtoClusterConfig(st store.Store, cfg *models.ClusterConfig, enc *cry
 		}
 	}
 
-	// Resolve recovery rules from profile's recovery_rule_set_id
+	// Resolve event handlers from profile's event_rule_set_id
 	if cfg.ProfileID != nil {
-		if p, err := st.GetProfile(context.Background(), *cfg.ProfileID); err == nil && p.RecoveryRuleSetID != nil {
-			if rs, err := st.GetRecoveryRuleSet(context.Background(), *p.RecoveryRuleSetID); err == nil && rs.Config != nil {
-				var rules []struct {
-					Name            string `json:"name"`
-					Pattern         string `json:"pattern"`
-					Severity        string `json:"severity"`
-					Action          string `json:"action"`
-					ExecCommand     string `json:"exec_command"`
-					CooldownSeconds int32  `json:"cooldown_seconds"`
-					Enabled         bool   `json:"enabled"`
-					Category        string `json:"category"`
+		if p, err := st.GetProfile(context.Background(), *cfg.ProfileID); err == nil && p.EventRuleSetID != nil {
+			if handlers, err := st.ListRuleSetHandlers(context.Background(), *p.EventRuleSetID); err == nil {
+				for _, h := range handlers {
+					if !h.Enabled {
+						continue
+					}
+					// We need the full rule details — fetch them
 				}
-				if err := json.Unmarshal(rs.Config, &rules); err == nil {
-					for _, r := range rules {
+				// Get all rules to build a map
+				if allRules, err := st.ListEventRules(context.Background()); err == nil {
+					ruleMap := make(map[uuid.UUID]*models.EventRule, len(allRules))
+					for _, r := range allRules {
+						ruleMap[r.ID] = r
+					}
+					for _, h := range handlers {
+						if !h.Enabled {
+							continue
+						}
+						r := ruleMap[h.EventRuleID]
+						if r == nil || !r.Enabled {
+							continue
+						}
 						protoConfig.RecoveryRules = append(protoConfig.RecoveryRules, &pgswarmv1.RecoveryRule{
 							Name:            r.Name,
 							Pattern:         r.Pattern,
 							Severity:        r.Severity,
-							Action:          r.Action,
-							ExecCommand:     r.ExecCommand,
-							CooldownSeconds: r.CooldownSeconds,
+							CooldownSeconds: int32(r.CooldownSeconds),
 							Enabled:         r.Enabled,
 							Category:        r.Category,
 						})

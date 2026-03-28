@@ -4,7 +4,7 @@
 
 ### Sidecar streaming connector
 
-- Bidirectional gRPC streaming between failover sidecars and satellite agent (`internal/satellite/sidecar/`, `internal/failover/connector.go`).
+- Bidirectional gRPC streaming between sentinel sidecars and satellite agent (`internal/satellite/sidecar/`, `internal/sentinel/connector.go`).
 - Persistent connection with exponential backoff and automatic reconnection.
 - Command protocol: fence, checkpoint, promote, unfence, status. Each command returns a typed `CommandResult`.
 - Sidecar identity exchange and heartbeat keep-alive.
@@ -17,13 +17,13 @@
 - `FencePrimaryWithOpts` supports configurable drain timeout.
 - WebSocket progress broadcasting via ops tracker — dashboard receives real-time step updates.
 
-### Log watcher and recovery rules
+### Log watcher and event rules
 
-- `internal/failover/logwatcher.go`: Real-time PG log monitoring via K8s log API.
+- `internal/sentinel/logwatcher.go`: Real-time PG log monitoring via K8s log API.
 - 40+ recovery patterns across 9 categories: data corruption, OOM, WAL issues, replication failures, configuration errors, connection issues, storage, tablespace, and extension problems.
 - Action types: restart, rewind, rebasebackup, event, exec. Configurable cooldown, deduplication, and action mutex.
-- Recovery rule sets: central CRUD (`/api/v1/recovery-rule-sets`) with dashboard editor and pattern sandbox.
-- Recovery rules attached to cluster configs via `recovery_rule_set` field.
+- Event rule sets: central CRUD (`/api/v1/event-rule-sets`) with dashboard editor and pattern sandbox.
+- Event rules attached to cluster configs via `event_rule_set` field.
 
 ### Backup profiles and inventory
 
@@ -49,9 +49,9 @@
 - **Satellite Logs page**: Terminal-style log viewer with SSE streaming, server-side level dropdown, client-side level filter, auto-scroll toggle, clear button.
 - **Cluster Detail page**: Full-page cluster view with tabs (Instances, Backups, Events), separated from the Clusters list page.
 - **SwitchoverProgressModal**: 9-step visualization with PONR indicator, real-time WebSocket updates.
-- **RecoveryRulesTab**: Recovery rule set management in Admin page, inline rule editing, pattern sandbox.
+- **EventRulesTab**: Event rule set management in Admin page, inline rule editing, pattern sandbox.
 - **MiniHeader**: Compact header for full-page routes (SatelliteLogs, ClusterDetail).
-- **Admin page**: Expanded from 1 tab (PG Versions) to 4 tabs (Storage Tiers, Image Variants, PG Versions, Recovery Rules).
+- **Admin page**: Expanded from 1 tab (PG Versions) to 4 tabs (Storage Tiers, Image Variants, PG Versions, Event Rules).
 
 ### Satellite log streaming and dynamic log levels
 
@@ -74,7 +74,7 @@
 - Added `shared_preload_libraries = 'pg_stat_statements'` and `pg_stat_statements.track = all` to mandatory params, with `CREATE EXTENSION` in the primary init script.
 - Added `recovery_target_timeline = 'latest'` and `wal_keep_size = '512MB'` to mandatory params for reliable timeline following after failover.
 
-### Failover sidecar
+### Sentinel sidecar
 
 - WAL receiver health monitoring: the sidecar checks `pg_stat_wal_receiver` each tick and triggers recovery if streaming is down beyond a 30-second grace period.
 - Timeline divergence detection via `pg_control_checkpoint()` and WAL history file checks — skips the grace period for fatal divergence.
@@ -117,7 +117,7 @@ Full codebase review across all 28 Go files. Fixed 12 issues, added ~100 doc com
 
 #### Known issues (deferred)
 
-- Connection string injection in failover-sidecar `main.go` (password in libpq string)
+- Connection string injection in sentinel-sidecar `main.go` (password in libpq string)
 - `CheckApproval` token regeneration race in registry
 - Non-atomic satellite approve (token set + state update not transactional)
 - `resource.MustParse` panics on malformed config input (needs validation layer)
@@ -150,7 +150,7 @@ Full codebase review across all 28 Go files. Fixed 12 issues, added ~100 doc com
 ### Planned switchover
 
 - Central-initiated switchover via `POST /clusters/:id/switchover`: verifies target pod exists and is a caught-up replica, runs CHECKPOINT on the current primary, fences old primary, transfers leader lease, promotes target via `pg_promote()`.
-- Old primary's failover sidecar detects the lease change and auto-demotes on next tick.
+- Old primary's sentinel sidecar detects the lease change and auto-demotes on next tick.
 
 ### Cluster pause/resume
 
@@ -181,7 +181,7 @@ Full codebase review across all 28 Go files. Fixed 12 issues, added ~100 doc com
 
 ### Failover monitor testing
 
-- Added `internal/failover/monitor_test.go`: split-brain detection, lease acquisition, lease error handling.
+- Added `internal/sentinel/monitor_test.go`: split-brain detection, lease acquisition, lease error handling.
 - Added `internal/satellite/health/monitor_test.go`.
 
 ---

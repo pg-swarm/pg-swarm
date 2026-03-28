@@ -7,17 +7,17 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 	"k8s.io/client-go/kubernetes"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 )
 
-// SidecarCommander can send commands to failover sidecars.
+// SidecarCommander can send commands to sentinel sidecars.
 type SidecarCommander interface {
 	SendCommandAndWait(ctx context.Context, namespace, podName string, cmd *pgswarmv1.SidecarCommand) (*pgswarmv1.CommandResult, error)
 }
@@ -30,9 +30,9 @@ type StreamSender interface {
 // Operator materializes ClusterConfig messages as running PostgreSQL HA clusters.
 type Operator struct {
 	client               kubernetes.Interface
-	k8sClusterName       string // used in config-storage ConfigMap naming
-	defaultNamespace     string // fallback when ClusterConfig.Namespace is empty
-	defaultFailoverImage string // fallback failover sidecar image
+	k8sClusterName       string           // used in config-storage ConfigMap naming
+	defaultNamespace     string           // fallback when ClusterConfig.Namespace is empty
+	defaultSentinelImage string           // fallback sentinel sidecar image
 	sidecarCmdr          SidecarCommander // optional, for sending sidecar commands
 	streamSender         StreamSender     // optional, for reporting status to central
 	mu                   sync.RWMutex
@@ -53,18 +53,18 @@ func (o *Operator) SetStreamSender(sender StreamSender) {
 // New creates a new Operator backed by the given Kubernetes client.
 // k8sClusterName is used for config-storage ConfigMap naming (pg-swarm-<k8s>-<pg>).
 // defaultNamespace is used when a ClusterConfig has no namespace set.
-func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultFailoverImage string) *Operator {
+func New(client kubernetes.Interface, k8sClusterName, defaultNamespace, defaultSentinelImage string) *Operator {
 	if defaultNamespace == "" {
 		defaultNamespace = "default"
 	}
-	if defaultFailoverImage == "" {
-		defaultFailoverImage = "ghcr.io/pg-swarm/pg-swarm-failover:latest"
+	if defaultSentinelImage == "" {
+		defaultSentinelImage = "ghcr.io/pg-swarm/pg-swarm-sentinel:latest"
 	}
 	return &Operator{
 		client:               client,
 		k8sClusterName:       k8sClusterName,
 		defaultNamespace:     defaultNamespace,
-		defaultFailoverImage: defaultFailoverImage,
+		defaultSentinelImage: defaultSentinelImage,
 		desired:              make(map[string]*pgswarmv1.ClusterConfig),
 		applied:              make(map[string]int64),
 	}
@@ -299,9 +299,9 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 		log.Warn().Err(err).Str("resource", "secret/"+secretName).Msg("delete failed")
 	}
 
-	// Delete failover RBAC resources
-	log.Trace().Msg("HandleDelete deleting failover RBAC")
-	foName := failoverServiceAccountName(name)
+	// Delete sentinel RBAC resources
+	log.Trace().Msg("HandleDelete deleting sentinel RBAC")
+	foName := sentinelServiceAccountName(name)
 	if err := o.client.RbacV1().RoleBindings(ns).Delete(ctx, foName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "rolebinding/"+foName).Msg("delete failed")
 	}
@@ -311,8 +311,8 @@ func (o *Operator) HandleDelete(del *pgswarmv1.DeleteCluster) error {
 	if err := o.client.CoreV1().ServiceAccounts(ns).Delete(ctx, foName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "serviceaccount/"+foName).Msg("delete failed")
 	}
-	// Delete failover leader lease
-	leaseName := failoverLeaseName(name)
+	// Delete sentinel leader lease
+	leaseName := sentinelLeaseName(name)
 	if err := o.client.CoordinationV1().Leases(ns).Delete(ctx, leaseName, metav1.DeleteOptions{}); err != nil {
 		log.Warn().Err(err).Str("resource", "lease/"+leaseName).Msg("delete failed")
 	}
@@ -445,8 +445,8 @@ func (o *Operator) buildConfigStore(cfg *pgswarmv1.ClusterConfig) *corev1.Config
 // replicationSensitiveParams lists pg_params keys where a mismatch between
 // primary and replica during a rolling update can break replication.
 var replicationSensitiveParams = map[string]bool{
-	"wal_level":            true,
-	"max_wal_senders":      true,
+	"wal_level":             true,
+	"max_wal_senders":       true,
 	"max_replication_slots": true,
 }
 
@@ -597,8 +597,8 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		return fmt.Errorf("configmap: %w", err)
 	}
 
-	// 4b. Recovery rules ConfigMap (for failover sidecar)
-	if failoverEnabled(cfg) {
+	// 4b. Recovery rules ConfigMap (for sentinel sidecar)
+	if sentinelEnabled(cfg) {
 		log.Trace().Msg("reconcile: ensuring recovery-rules configmap")
 		rrCM := buildRecoveryRulesConfigMap(cfg)
 		if err := createOrUpdateConfigMap(ctx, o.client, rrCM); err != nil {
@@ -637,23 +637,23 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		}
 	}
 
-	// 6. Failover RBAC (ServiceAccount, Role, RoleBinding)
-	log.Trace().Bool("failover_enabled", failoverEnabled(cfg)).Msg("reconcile: checking failover RBAC")
-	if failoverEnabled(cfg) {
-		if err := createOrUpdateServiceAccount(ctx, o.client, buildFailoverServiceAccount(cfg)); err != nil {
-			return fmt.Errorf("failover serviceaccount: %w", err)
+	// 6. Sentinel RBAC (ServiceAccount, Role, RoleBinding)
+	log.Trace().Bool("sentinel_enabled", sentinelEnabled(cfg)).Msg("reconcile: checking sentinel RBAC")
+	if sentinelEnabled(cfg) {
+		if err := createOrUpdateServiceAccount(ctx, o.client, buildSentinelServiceAccount(cfg)); err != nil {
+			return fmt.Errorf("sentinel serviceaccount: %w", err)
 		}
-		if err := createOrUpdateRole(ctx, o.client, buildFailoverRole(cfg)); err != nil {
-			return fmt.Errorf("failover role: %w", err)
+		if err := createOrUpdateRole(ctx, o.client, buildSentinelRole(cfg)); err != nil {
+			return fmt.Errorf("sentinel role: %w", err)
 		}
-		if err := createOrUpdateRoleBinding(ctx, o.client, buildFailoverRoleBinding(cfg)); err != nil {
-			return fmt.Errorf("failover rolebinding: %w", err)
+		if err := createOrUpdateRoleBinding(ctx, o.client, buildSentinelRoleBinding(cfg)); err != nil {
+			return fmt.Errorf("sentinel rolebinding: %w", err)
 		}
 	}
 
 	// 7. StatefulSet
 	log.Trace().Msg("reconcile: ensuring statefulset")
-	sts := buildStatefulSet(cfg, secret.Name, o.defaultFailoverImage)
+	sts := buildStatefulSet(cfg, secret.Name, o.defaultSentinelImage)
 	if err := createOrUpdateStatefulSet(ctx, o.client, sts); err != nil {
 		return fmt.Errorf("statefulset: %w", err)
 	}
@@ -670,9 +670,9 @@ func (o *Operator) reconcile(cfg *pgswarmv1.ClusterConfig) error {
 		log.Warn().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to label pods (will retry on next reconcile)")
 	}
 
-	// When failover is disabled, no sidecar will label pods later — we must
+	// When sentinel is disabled, no sidecar will label pods later — we must
 	// wait for pods to appear and label them ourselves.
-	if !failoverEnabled(cfg) {
+	if !sentinelEnabled(cfg) {
 		go o.ensurePodLabels(cfg.Namespace, cfg.ClusterName, cfg.Replicas)
 	}
 
@@ -794,7 +794,7 @@ func (o *Operator) reconcileDrift(ctx context.Context) {
 }
 
 // ensurePodLabels polls until all expected pods have a role label.
-// Used when failover is disabled and no sidecar will label them.
+// Used when sentinel is disabled and no sidecar will label them.
 func (o *Operator) ensurePodLabels(namespace, clusterName string, replicas int32) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

@@ -9,8 +9,8 @@ Each PostgreSQL pod has three concurrent actors:
 | Component | Container | Role |
 |-----------|-----------|------|
 | **Wrapper** (`pg-wrapper.sh`) | `postgres` | Keeps container alive, starts/restarts PG, runs recovery (rewind, basebackup) |
-| **Sidecar** (`monitor.go`) | `failover-sidecar` | Manages leader lease, detects failures, promotes replicas, labels pods |
-| **Log Watcher** (`logwatcher.go`) | `failover-sidecar` | Matches PG log patterns, triggers recovery actions |
+| **Sidecar** (`monitor.go`) | `sentinel-sidecar` | Manages leader lease, detects failures, promotes replicas, labels pods |
+| **Log Watcher** (`logwatcher.go`) | `sentinel-sidecar` | Matches PG log patterns, triggers recovery actions |
 
 They coordinate through **marker files** on a shared volume, **K8s labels**, and a **K8s Lease**.
 
@@ -234,7 +234,53 @@ checkWalReceiver()
 
 ## Wrapper State Machine
 
-### Main Loop Decision Tree
+There are two wrapper variants. The operator selects the appropriate one at deploy time based on whether the sentinel sidecar is enabled.
+
+### Sentinel-Enabled Wrapper (pg-wrapper.sh)
+
+Recovery decisions are made by the sentinel sidecar. The wrapper executes actions requested via marker files and standby.signal. No `pg_resetwal`, no 30s yields, no fatal error scanning.
+
+```
+while true:
+ │
+ ├─ CRASH-LOOP HANDLER (3+ fast crashes)
+ │   ├─ replica → pg_basebackup
+ │   └─ primary → log + sleep 15s (sentinel yields lease)
+ │
+ ├─ TIMELINE RECOVERY (pg_swarm_recover)
+ │   if standby.signal + PG_VERSION exist:
+ │     compare timelines → pg_rewind
+ │     on failure → write basebackup marker + return
+ │
+ ├─ BASEBACKUP MARKER CHECK
+ │   if .pg-swarm-needs-basebackup exists:
+ │     → pg_swarm_rebasebackup() (12 retries, 60s)
+ │     → aborts if sentinel removes marker (deadlock breaker)
+ │     → continue
+ │
+ ├─ CORRUPT PGDATA (no PG_VERSION)
+ │   ├─ previously initialized → write marker → pg_basebackup
+ │   └─ first boot → clean up → initdb
+ │
+ ├─ WAL_LEVEL=MINIMAL (replica only)
+ │   → pg_basebackup
+ │
+ ├─ START PG
+ │   docker-entrypoint.sh postgres
+ │   write sentinel if first start
+ │   wait for PG exit
+ │
+ ├─ K8S SHUTDOWN? → exit 0
+ │
+ └─ CRASH TRACKING
+     if PG ran < 30s → crash_count++
+     else → crash_count = 0
+     sleep 2
+```
+
+### Standalone Wrapper (pg-wrapper-standalone.sh)
+
+Used when the sentinel sidecar is disabled. Full self-contained recovery with `pg_resetwal`, 30s failover yields, and fatal error scanning.
 
 ```
 while true:
@@ -250,15 +296,12 @@ while true:
  ├─ BASEBACKUP MARKER CHECK
  │   if .pg-swarm-needs-basebackup exists:
  │     → pg_swarm_rebasebackup() (12 retries, 60s)
- │     → aborts if sidecar removes marker mid-loop
  │     → continue
  │
  ├─ PRIMARY EMPTY PGDATA + SENTINEL
  │   if ordinal==0 AND PGDATA empty AND sentinel exists:
  │     → sleep 30s (yield for failover)
- │     → remove sentinel
  │     → pg_basebackup from new primary
- │     → continue
  │
  ├─ CORRUPT PGDATA (no PG_VERSION)
  │   ├─ replica → pg_basebackup

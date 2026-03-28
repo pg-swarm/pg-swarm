@@ -22,6 +22,9 @@ var pgInitScript string
 //go:embed scripts/pg-wrapper.sh
 var pgWrapperScript string
 
+//go:embed scripts/pg-wrapper-standalone.sh
+var pgWrapperStandaloneScript string
+
 const pgDataPath = "/var/lib/postgresql/data/pgdata"
 
 // podSecurityContext returns the PodSecurityContext for all PG pods.
@@ -97,7 +100,7 @@ func buildClusterStatusConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap
 }
 
 // buildStatefulSet creates the StatefulSet for the PostgreSQL cluster.
-func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) *appsv1.StatefulSet {
+func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultSentinelImage string) *appsv1.StatefulSet {
 	selLabels := selectorLabels(cfg.ClusterName)
 	allLabels := clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector)
 	headlessSvc := resourceName(cfg.ClusterName, "headless")
@@ -164,13 +167,13 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverI
 		sts.Spec.VolumeClaimTemplates = append(sts.Spec.VolumeClaimTemplates, buildWalVCT(cfg))
 	}
 
-	// Failover sidecar
-	if failoverEnabled(cfg) {
+	// Sentinel sidecar
+	if sentinelEnabled(cfg) {
 		sts.Spec.Template.Spec.Containers = append(
 			sts.Spec.Template.Spec.Containers,
-			buildFailoverSidecar(cfg, secretName, defaultFailoverImage),
+			buildSentinelSidecar(cfg, secretName, defaultSentinelImage),
 		)
-		sts.Spec.Template.Spec.ServiceAccountName = failoverServiceAccountName(cfg.ClusterName)
+		sts.Spec.Template.Spec.ServiceAccountName = sentinelServiceAccountName(cfg.ClusterName)
 		// Recovery rules ConfigMap volume
 		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "recovery-rules",
@@ -327,13 +330,20 @@ func buildInitContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 }
 
 // buildMainContainer creates the main postgres container with a restart-loop wrapper script.
+// When sentinel is enabled, uses a slim wrapper that delegates recovery decisions to the
+// sidecar. When disabled, uses a standalone wrapper with full self-contained recovery logic.
 func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.Container {
 	rwSvc := resourceName(cfg.ClusterName, "rw")
 	primaryHost := fmt.Sprintf("%s.%s.svc.cluster.local", rwSvc, cfg.Namespace)
 
+	wrapperScript := pgWrapperScript
+	if !sentinelEnabled(cfg) {
+		wrapperScript = pgWrapperStandaloneScript
+	}
+
 	startupScript := strings.NewReplacer(
 		"{{PRIMARY_HOST}}", primaryHost,
-	).Replace(pgWrapperScript)
+	).Replace(wrapperScript)
 
 	c := corev1.Container{
 		Name:    "postgres",
@@ -460,13 +470,13 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 	return c
 }
 
-// buildFailoverSidecar creates the failover sidecar container for leader election and promotion.
-func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailoverImage string) corev1.Container {
-	image := cfg.Failover.SidecarImage
+// buildSentinelSidecar creates the sentinel sidecar container for leader election and promotion.
+func buildSentinelSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultSentinelImage string) corev1.Container {
+	image := cfg.Sentinel.SidecarImage
 	if image == "" {
-		image = defaultFailoverImage
+		image = defaultSentinelImage
 	}
-	interval := cfg.Failover.HealthCheckIntervalSeconds
+	interval := cfg.Sentinel.HealthCheckIntervalSeconds
 	if interval <= 0 {
 		interval = 1
 	}
@@ -474,7 +484,7 @@ func buildFailoverSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultFailo
 	primaryHostDNS := fmt.Sprintf("%s.%s.svc.cluster.local", resourceName(cfg.ClusterName, "rw"), cfg.Namespace)
 
 	return corev1.Container{
-		Name:            "failover",
+		Name:            "sentinel",
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Env: []corev1.EnvVar{
@@ -558,8 +568,8 @@ func configHash(cfg *pgswarmv1.ClusterConfig) string {
 	if cfg.Postgres != nil {
 		fmt.Fprintf(h, "pg:%s:%s\n", cfg.Postgres.Version, cfg.Postgres.Image)
 	}
-	if cfg.Failover != nil {
-		fmt.Fprintf(h, "fo:%v:%s\n", cfg.Failover.Enabled, cfg.Failover.SidecarImage)
+	if cfg.Sentinel != nil {
+		fmt.Fprintf(h, "fo:%v:%s\n", cfg.Sentinel.Enabled, cfg.Sentinel.SidecarImage)
 	}
 	// NOTE: ClusterDatabases are intentionally NOT included in the hash.
 	// Database changes are handled via sidecar SQL commands + pg_reload_conf()

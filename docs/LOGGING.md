@@ -13,7 +13,7 @@ pg-swarm uses **zerolog** (v1.34.0) with 453 structured log statements across 22
 - Log capture hook (`internal/satellite/logcapture/hook.go`) streams satellite logs to central
 - Log buffer with per-satellite ring buffer (1000 entries) and SSE fan-out
 - Dynamic log level: `POST /api/v1/satellites/:id/log-level` changes satellite level at runtime
-- Component tagging on failover-sidecar (`Str("component", "failover-sidecar")`)
+- Component tagging on sentinel-sidecar (`Str("component", "sentinel-sidecar")`)
 
 ### What is missing
 
@@ -23,7 +23,7 @@ pg-swarm uses **zerolog** (v1.34.0) with 453 structured log statements across 22
 4. **No audit trail** -- mutations (create cluster, approve satellite, trigger switchover) are not tracked
 5. **No cross-service trace propagation** -- a switchover initiated from the dashboard cannot be traced through central -> satellite -> sidecar
 6. **Central lacks LOG_LEVEL support** -- only satellite respects the `LOG_LEVEL` env var
-7. **Inconsistent component tagging** -- only failover-sidecar tags its logger
+7. **Inconsistent component tagging** -- only sentinel-sidecar tags its logger
 
 ---
 
@@ -44,11 +44,11 @@ Satellite Agent (per edge K8s cluster)
   |-- Operator          ---> K8s resource management
   |-- Health Monitor    ---> PostgreSQL health polling
   |-- Stream Connector  ---> Persistent connection to central
-  |-- Sidecar Server    ---> gRPC for failover sidecars
+  |-- Sidecar Server    ---> gRPC for sentinel sidecars
   |-- Log Capture Hook  ---> Intercepts zerolog events, streams to central
   |
   v  (bidirectional gRPC stream)
-Failover Sidecar (per PostgreSQL pod)
+Sentinel Sidecar (per PostgreSQL pod)
   |-- Monitor           ---> Leader election, health checks
   |-- Log Watcher       ---> PostgreSQL log pattern matching
   |-- Connector         ---> Stream to satellite for remote commands
@@ -141,7 +141,7 @@ Add to all three binaries' logger initialization:
 |--------|--------------|-------------------|
 | Central (`cmd/central/main.go`) | `"central"` | Add (currently missing) |
 | Satellite (`cmd/satellite/main.go`) | `"satellite"` | Already exists |
-| Failover Sidecar (`cmd/failover-sidecar/main.go`) | `"failover-sidecar"` | Add |
+| Sentinel Sidecar (`cmd/sentinel-sidecar/main.go`) | `"sentinel-sidecar"` | Add |
 
 Central example:
 ```go
@@ -364,7 +364,7 @@ func auditLog(c *fiber.Ctx, action, resourceType, resourceID, resourceName, deta
 | `POST/PUT/DELETE /postgres-versions/*` | `pg_version.create/update/delete` |
 | `POST /postgres-versions/:id/default` | `pg_version.set_default` |
 | `POST/DELETE /postgres-variants/*` | `pg_variant.create/delete` |
-| `POST/PUT/DELETE /recovery-rule-sets/*` | `recovery_rule_set.create/update/delete` |
+| `POST/PUT/DELETE /event-rule-sets/*` | `event_rule_set.create/update/delete` |
 | `POST/DELETE /pg-param-classifications/*` | `pg_param.upsert/delete` |
 | `POST /clusters/:id/databases` | `cluster_database.create` |
 | `PUT /clusters/:id/databases/:dbid` | `cluster_database.update` |
@@ -403,7 +403,7 @@ A user clicks "Switchover" in the dashboard. This triggers:
 1. REST `POST /clusters/:id/switchover` (central)
 2. `StreamManager.PushSwitchover()` sends `CentralMessage` to satellite via gRPC stream
 3. Satellite's `OnSwitchover` callback runs switchover steps
-4. Satellite sends `SidecarCommand` (fence, promote, unfence) to failover sidecar
+4. Satellite sends `SidecarCommand` (fence, promote, unfence) to sentinel sidecar
 5. Satellite sends `SwitchoverProgress` and `SwitchoverResult` back to central
 6. Central broadcasts progress to dashboard via WebSocket
 
@@ -450,7 +450,7 @@ Satellite operator runs switchover steps
   | All logs include: Str("trace_id", "abc-123")
   | SidecarCommand { ..., trace_id: "abc-123" }
   v
-Failover sidecar executes fence/promote/unfence
+Sentinel sidecar executes fence/promote/unfence
   | All logs include: Str("trace_id", "abc-123")
   | Returns CommandResult
   v
@@ -587,7 +587,7 @@ REST request and response bodies are not logged because:
 | `internal/central/server/middleware.go` | NEW - HTTP request logging + audit helpers |
 | `cmd/central/main.go` | MODIFY - LOG_LEVEL + component tag |
 | `cmd/satellite/main.go` | MODIFY - Component tag |
-| `cmd/failover-sidecar/main.go` | MODIFY - LOG_LEVEL support |
+| `cmd/sentinel-sidecar/main.go` | MODIFY - LOG_LEVEL support |
 | `internal/satellite/logcapture/level.go` | MODIFY - Delegate to shared loglevel |
 | `internal/central/server/rest.go` | MODIFY - Register middleware in setupRoutes |
 

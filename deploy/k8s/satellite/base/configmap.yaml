@@ -13,5 +13,5 @@ data:
   REGION: "local"
   # Default namespace for deploying PostgreSQL clusters when not specified in the cluster config.
   DEPLOY_NAMESPACE: "default"
-  # Default failover sidecar image used when the cluster config does not specify one.
-  DEFAULT_FAILOVER_IMAGE: "ghcr.io/pg-swarm/pg-swarm-failover:latest"
+  # Default sentinel sidecar image used when the cluster config does not specify one.
+  DEFAULT_SENTINEL_IMAGE: "ghcr.io/pg-swarm/pg-swarm-sentinel:latest"

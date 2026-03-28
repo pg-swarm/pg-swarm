@@ -58,6 +58,9 @@ else
     done
     PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup \
         -h "$PRIMARY_HOST" -U repl_user -D "$PGDATA" -R -Xs -P
+    # pg_basebackup -R writes primary_conninfo without a password; fix it now.
+    sed -i '/^primary_conninfo/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
+    echo "primary_conninfo = 'host=$PRIMARY_HOST port=5432 user=repl_user password=$REPLICATION_PASSWORD application_name=$POD_NAME'" >> "$PGDATA/postgresql.auto.conf"
     cp /etc/pg-config/postgresql.conf "$PGDATA/postgresql.conf"
     cp /etc/pg-config/pg_hba.conf "$PGDATA/pg_hba.conf"{{REPLICA_RESTORE}}{{WAL_SYMLINK}}
 fi

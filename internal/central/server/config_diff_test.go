@@ -162,9 +162,9 @@ func TestClassifyChanges_HbaRulesReload(t *testing.T) {
 	}
 }
 
-func TestClassifyChanges_FailoverToggle(t *testing.T) {
-	old := &models.ClusterSpec{Failover: &models.FailoverSpec{Enabled: false}}
-	new := &models.ClusterSpec{Failover: &models.FailoverSpec{Enabled: true}}
+func TestClassifyChanges_SentinelToggle(t *testing.T) {
+	old := &models.ClusterSpec{Sentinel: &models.SentinelSpec{Enabled: false}}
+	new := &models.ClusterSpec{Sentinel: &models.SentinelSpec{Enabled: true}}
 	diff := classifyChanges(old, new, nil)
 	if diff.ApplyStrategy() != "sequential_restart" {
 		t.Errorf("expected sequential_restart, got %s", diff.ApplyStrategy())

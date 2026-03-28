@@ -49,12 +49,16 @@
       <a href="#config-management" class="docs-link">Configuration Management</a>
       <a href="#cluster-databases" class="docs-link">Cluster Databases</a>
       <a href="#deployment-rules" class="docs-link">Deployment Rules</a>
-      <a href="#failover-sidecar" class="docs-link">Failover Sidecar</a>
+      <a href="#sentinel-sidecar" class="docs-link">Sentinel Sidecar</a>
       <a href="#sidecar-streaming" class="docs-link">Sidecar Streaming</a>
       <a href="#log-watcher" class="docs-link">Log Watcher</a>
       <a href="#recovery-rules" class="docs-link">Recovery Rules</a>
       <a href="#storage-tiers" class="docs-link">Storage Tiers</a>
       <a href="#grpc-streaming" class="docs-link">gRPC Streaming</a>
+      <a href="#eventbus" class="docs-link">EventBus</a>
+      <a href="#event-types" class="docs-link">Event Types</a>
+      <a href="#event-driven-lifecycle" class="docs-link">Event-Driven Lifecycle</a>
+      <a href="#agent-autonomy" class="docs-link">Agent Autonomy</a>
 
       <h4>PostgreSQL Internals</h4>
       <a href="#wal" class="docs-link">Write-Ahead Log (WAL)</a>
@@ -82,7 +86,7 @@
 
     <article class="concept" data-reveal id="central">
       <h3>Central Control Plane</h3>
-      <p>PG-Swarm consists of three binaries: <strong>central</strong> (<code>cmd/central</code>), <strong>satellite</strong> (<code>cmd/satellite</code>), and <strong>failover sidecar</strong> (<code>cmd/failover-sidecar</code>). The central server is the brain of the system, exposing three interfaces:</p>
+      <p>PG-Swarm consists of three binaries: <strong>central</strong> (<code>cmd/central</code>), <strong>satellite</strong> (<code>cmd/satellite</code>), and <strong>sentinel sidecar</strong> (<code>cmd/sentinel-sidecar</code>). The central server is the brain of the system, exposing three interfaces:</p>
       <ul>
         <li><strong>gRPC server (:9090)</strong> — accepts persistent bidirectional streams from satellites. Pushes cluster configurations, receives health reports, backup statuses, and event notifications.</li>
         <li><strong>REST API (:8080)</strong> — 60+ endpoints for managing satellites, cluster profiles, deployment rules, backup profiles, recovery rule sets, storage tiers, image variants, and restore operations. WebSocket endpoint for real-time state push. Used by the dashboard and any external tooling.</li>
@@ -147,11 +151,11 @@
       <p><strong>How it works:</strong></p>
       <ol>
         <li>An operator creates a database entry for a cluster via the dashboard or API, specifying the database name, owner role, and optional IP subnet access restrictions.</li>
-        <li>PG-Swarm sends a command to the failover sidecar on the primary pod.</li>
+        <li>PG-Swarm sends a command to the sentinel sidecar on the primary pod.</li>
         <li>The sidecar executes <code>CREATE ROLE</code> and <code>CREATE DATABASE</code> directly against the local PostgreSQL instance.</li>
         <li>If per-database IP subnet access control is specified, the sidecar generates HBA rules for that database and runs <code>pg_reload_conf()</code> to apply them.</li>
       </ol>
-      <p><strong>Zero pod restart:</strong> The entire process — role creation, database creation, and HBA rule application — happens live without any pod restarts. The failover sidecar handles the SQL commands, and <code>pg_reload_conf()</code> applies HBA changes immediately.</p>
+      <p><strong>Zero pod restart:</strong> The entire process — role creation, database creation, and HBA rule application — happens live without any pod restarts. The sentinel sidecar handles the SQL commands, and <code>pg_reload_conf()</code> applies HBA changes immediately.</p>
     </article>
 
     <article class="concept" data-reveal id="deployment-rules">
@@ -165,9 +169,9 @@ Namespace: "databases"</code></pre>
       <p>This is how PG-Swarm scales to hundreds of edge sites — you define the intent once, and the system fans it out.</p>
     </article>
 
-    <article class="concept" data-reveal id="failover-sidecar">
-      <h3>Failover Sidecar</h3>
-      <p>The failover sidecar (<code>cmd/failover-sidecar</code>) runs as a container alongside PostgreSQL in every pod of the StatefulSet. It handles:</p>
+    <article class="concept" data-reveal id="sentinel-sidecar">
+      <h3>Sentinel Sidecar</h3>
+      <p>The sentinel sidecar (<code>cmd/sentinel-sidecar</code>) runs as a container alongside PostgreSQL in every pod of the StatefulSet. It handles:</p>
       <ul>
         <li><strong>Leader election</strong> via Kubernetes Leases. The primary pod holds the lease and renews it every few seconds. If the primary dies, the lease expires after 15 seconds.</li>
         <li><strong>Promotion</strong>: the first replica to acquire the expired lease calls <code>pg_promote()</code> and relabels its pod as <code>pg-swarm.io/role=primary</code>.</li>
@@ -181,7 +185,7 @@ Namespace: "databases"</code></pre>
 
     <article class="concept" data-reveal id="sidecar-streaming">
       <h3>Sidecar Streaming</h3>
-      <p>Each failover sidecar maintains a <strong>bidirectional gRPC stream</strong> to the satellite agent running on the same edge cluster. This enables the satellite to dispatch commands directly to specific pods during switchover and other operations.</p>
+      <p>Each sentinel sidecar maintains a <strong>bidirectional gRPC stream</strong> to the satellite agent running on the same edge cluster. This enables the satellite to dispatch commands directly to specific pods during switchover and other operations.</p>
       <p><strong>How it works:</strong></p>
       <ol>
         <li>On startup, the sidecar connects to the satellite's <code>SidecarStreamService</code> and sends a <code>SidecarIdentity</code> message with its pod name, cluster name, and namespace.</li>
@@ -195,7 +199,7 @@ Namespace: "databases"</code></pre>
 
     <article class="concept" data-reveal id="log-watcher">
       <h3>Log Watcher</h3>
-      <p>The log watcher (<code>internal/failover/logwatcher.go</code>) monitors PostgreSQL's log output in real-time via the Kubernetes log API. It matches log lines against <strong>40+ recovery patterns</strong> across 9 categories and triggers automated recovery actions.</p>
+      <p>The log watcher (<code>internal/sentinel/logwatcher.go</code>) monitors PostgreSQL's log output in real-time via the Kubernetes log API. It matches log lines against <strong>40+ recovery patterns</strong> across 9 categories and triggers automated recovery actions.</p>
       <p><strong>Pattern categories:</strong></p>
       <ul>
         <li><strong>Data corruption</strong> — checksum failures, invalid page headers &rarr; re-basebackup</li>
@@ -249,6 +253,105 @@ Namespace: "databases"</code></pre>
         <li><code>ConfigAck</code> — confirms config was applied</li>
       </ul>
       <p>Satellites initiate the connection outward, making PG-Swarm work behind NAT, firewalls, and VPNs without any inbound port requirements.</p>
+    </article>
+
+    <article class="concept" data-reveal id="eventbus">
+      <h3>EventBus</h3>
+      <p>Each satellite runs a local <strong>publish-subscribe event bus</strong> (<code>internal/satellite/eventbus/bus.go</code>) that decouples the components managing PostgreSQL clusters. Instead of direct method calls between handlers, everything communicates via named events.</p>
+      <p><strong>Subscription types:</strong></p>
+      <ul>
+        <li><strong>Exact-match</strong> — subscribe to a specific event type: <code>cluster.create</code>, <code>switchover.requested</code></li>
+        <li><strong>Prefix</strong> — subscribe to a namespace of events: <code>instance.*</code> matches <code>instance.pg_down</code>, <code>instance.pg_up</code>, etc.</li>
+        <li><strong>Wildcard</strong> — subscribe to all events: <code>*</code></li>
+      </ul>
+      <p><strong>Central forwarding:</strong> The EventBus automatically forwards every event to central over the gRPC stream — unless the event's <code>source</code> field is <code>"central"</code>. This prevents echo loops: when central pushes an event to a satellite, the satellite's EventBus routes it locally but does not send it back.</p>
+      <p><strong>Handlers subscribed to the bus:</strong></p>
+      <ul>
+        <li><code>LifecycleHandler</code> — handles <code>cluster.*</code> events for StatefulSet reconciliation</li>
+        <li><code>SwitchoverHandler</code> — handles <code>switchover.requested</code> and <code>switchover.step.execute</code></li>
+        <li><code>HealthMonitor</code> — receives <code>switchover.requested</code> to boost polling frequency</li>
+        <li>The gRPC stream connector — forwards non-central events to central</li>
+      </ul>
+    </article>
+
+    <article class="concept" data-reveal id="event-types">
+      <h3>Event Types &amp; Payloads</h3>
+      <p>Events are defined in the protobuf schema (<code>api/proto/v1/config.proto</code>) as a rich message type with both generic fields and a typed <code>oneof payload</code>:</p>
+      <pre><code>message Event {
+  string id;           // UUID
+  string type;         // "cluster.create", "switchover.step", etc.
+  string cluster_name;
+  string namespace;
+  string pod_name;
+  string severity;     // info, warning, error, critical
+  map&lt;string, string&gt; data;
+  Timestamp timestamp;
+  string source;       // "central", "satellite", "sidecar", "k8s-watch"
+  string operation_id; // correlates multi-step operations
+
+  oneof payload {
+    ClusterConfig cluster_config;
+    SwitchoverRequest switchover_request;
+    ClusterHealthReport health_report;
+    DeleteCluster delete_cluster;
+  }
+}</code></pre>
+      <p>The <code>operation_id</code> field is critical for multi-step operations: all nine steps of a switchover share the same <code>operation_id</code>, letting the dashboard's OpsTracker correlate progress events and display them as a unified workflow.</p>
+      <p><strong>Key event types by category:</strong></p>
+      <table class="concept-table">
+        <thead><tr><th>Event Type</th><th>Source</th><th>Handler</th></tr></thead>
+        <tbody>
+          <tr><td><code>cluster.create</code> / <code>cluster.update</code></td><td>central</td><td>LifecycleHandler → Operator.HandleConfig</td></tr>
+          <tr><td><code>cluster.delete</code></td><td>central</td><td>LifecycleHandler → Operator.HandleDelete</td></tr>
+          <tr><td><code>cluster.pause</code> / <code>cluster.unpause</code></td><td>central</td><td>LifecycleHandler → sets paused flag</td></tr>
+          <tr><td><code>config.applied</code> / <code>config.rejected</code></td><td>satellite</td><td>central audit log + WebSocket broadcast</td></tr>
+          <tr><td><code>switchover.requested</code></td><td>central</td><td>SwitchoverHandler (satellite)</td></tr>
+          <tr><td><code>switchover.step</code></td><td>satellite</td><td>central OpsTracker + WebSocket broadcast</td></tr>
+          <tr><td><code>switchover.step.execute</code></td><td>central</td><td>SwitchoverHandler (interactive mode gate)</td></tr>
+          <tr><td><code>switchover.completed</code> / <code>switchover.failed</code></td><td>satellite</td><td>central OpsTracker marks done</td></tr>
+          <tr><td><code>health.report</code></td><td>satellite</td><td>central UpsertClusterHealth</td></tr>
+          <tr><td><code>instance.pg_down</code></td><td>sidecar/sentinel</td><td>satellite EventBus, forwarded to central</td></tr>
+          <tr><td><code>log.recovery.*</code> / <code>log.wal.*</code></td><td>sidecar log watcher</td><td>satellite recovery handler</td></tr>
+          <tr><td><code>cluster.state_changed</code></td><td>satellite / k8s-watch</td><td>central UpdateClusterHealth</td></tr>
+          <tr><td><code>database.created</code></td><td>satellite</td><td>central audit log</td></tr>
+        </tbody>
+      </table>
+    </article>
+
+    <article class="concept" data-reveal id="event-driven-lifecycle">
+      <h3>Event-Driven Lifecycle</h3>
+      <p>Every cluster state change in PG-Swarm is modeled as a named event flowing through the satellite's EventBus. No component calls another directly — they publish events and react to events.</p>
+      <p><strong>Cluster creation:</strong></p>
+      <ol>
+        <li>An admin creates a profile and deployment rule in the dashboard.</li>
+        <li>Central sends a <code>ClusterConfig</code> payload as a <code>cluster.create</code> event over the gRPC stream.</li>
+        <li>The satellite's EventBus routes the event to the <code>LifecycleHandler</code>.</li>
+        <li><code>LifecycleHandler</code> calls <code>Operator.HandleConfig()</code>, which runs the 9-step Kubernetes reconcile loop.</li>
+        <li>On success, the satellite publishes <code>config.applied</code> back to central. On failure, <code>config.rejected</code>.</li>
+        <li>Central persists the event and notifies the dashboard via WebSocket.</li>
+      </ol>
+      <p><strong>Cluster pause:</strong> Central sends <code>cluster.pause</code>. The LifecycleHandler sets <code>paused=true</code> in the config and emits <code>cluster.paused</code>. Paused clusters are skipped during Operator reconcile loops. Unpause reverses the flag.</p>
+      <p><strong>Interactive switchover:</strong> The switchover handler supports two modes. In interactive mode, it executes pre-PONR steps one at a time and pauses, waiting for a <code>switchover.step.execute</code> event from the user via the dashboard before crossing the point of no return. In automatic mode, all nine steps execute sequentially without pausing. Both modes emit a <code>switchover.step</code> event per step (with the shared <code>operation_id</code>), followed by <code>switchover.completed</code> or <code>switchover.failed</code>.</p>
+      <p><strong>Config versioning and per-cluster approval:</strong> When a profile is updated, central sends the new <code>cluster.update</code> event only after the operator approves the change per-cluster. This gives teams control over staged rollouts — a profile change does not automatically propagate to all clusters.</p>
+    </article>
+
+    <article class="concept" data-reveal id="agent-autonomy">
+      <h3>Agent Autonomy</h3>
+      <p>PG-Swarm is built on the principle that agents must be able to act locally without relying on the central control plane. This is essential for edge deployments where the central connection may be slow or temporarily unavailable.</p>
+      <p><strong>Satellite autonomy:</strong></p>
+      <ul>
+        <li>Satellites <strong>self-register</strong> with central on first run, then poll for approval. Once approved, they operate indefinitely with only a heartbeat connection to central.</li>
+        <li>If the gRPC stream drops, the satellite reconnects with exponential backoff (max 30 seconds) but continues operating all existing clusters locally.</li>
+        <li>The satellite's local EventBus dispatches all cluster operations — create, update, delete, pause, switchover — independently of central.</li>
+        <li>The satellite identity (ID + auth token) is stored in a K8s Secret (<code>pg-swarm-satellite-identity</code>) so it survives pod restarts without re-registration.</li>
+      </ul>
+      <p><strong>Sentinel sidecar autonomy:</strong></p>
+      <ul>
+        <li>The sentinel sidecar handles <strong>automatic failover entirely locally</strong>. When the primary's K8s Lease expires, replica sidecars compete to acquire it via optimistic locking (Kubernetes <code>resourceVersion</code>). The winner calls <code>pg_promote()</code> and relabels its pod — no central round-trip involved.</li>
+        <li>The log watcher runs independently, matching PG log lines against recovery patterns and applying actions (restart, rewind, rebasebackup) with its own cooldown tracking. It does not need central to function.</li>
+        <li>The health monitor polls each PostgreSQL instance every 30 seconds (boosted to 2 seconds during active switchover operations) and publishes health reports to the EventBus regardless of central connectivity.</li>
+      </ul>
+      <p><strong>EventBus as the nervous system:</strong> The EventBus is what enables this autonomy. Components don't call each other — they publish facts (<em>"this happened"</em>) and react to facts. The LifecycleHandler doesn't know about the SwitchoverHandler. The health monitor doesn't know about the operator. Each handler subscribes to the events it cares about and acts independently. Central becomes an observer and command source, not a required intermediary for local decisions.</p>
     </article>
 
     <h2 class="docs-group-title" data-reveal id="pg-internals-group">PostgreSQL Internals</h2>

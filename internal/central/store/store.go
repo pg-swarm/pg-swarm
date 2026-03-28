@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
@@ -90,12 +91,33 @@ type Store interface {
 	ListEvents(ctx context.Context, limit int) ([]*models.Event, error)
 	ListEventsByCluster(ctx context.Context, satelliteID uuid.UUID, clusterName string, limit int) ([]*models.Event, error)
 
-	// Recovery Rule Sets
-	CreateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error
-	ListRecoveryRuleSets(ctx context.Context) ([]*models.RecoveryRuleSet, error)
-	GetRecoveryRuleSet(ctx context.Context, id uuid.UUID) (*models.RecoveryRuleSet, error)
-	UpdateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error
-	DeleteRecoveryRuleSet(ctx context.Context, id uuid.UUID) error
+	// Event Rule Sets
+	CreateEventRuleSet(ctx context.Context, rs *models.EventRuleSet) error
+	ListEventRuleSets(ctx context.Context) ([]*models.EventRuleSet, error)
+	GetEventRuleSet(ctx context.Context, id uuid.UUID) (*models.EventRuleSet, error)
+	UpdateEventRuleSet(ctx context.Context, rs *models.EventRuleSet) error
+	DeleteEventRuleSet(ctx context.Context, id uuid.UUID) error
+	AddHandlerToRuleSet(ctx context.Context, ruleSetID, handlerID uuid.UUID) error
+	RemoveHandlerFromRuleSet(ctx context.Context, ruleSetID, handlerID uuid.UUID) error
+	ListRuleSetHandlers(ctx context.Context, ruleSetID uuid.UUID) ([]*models.EventHandlerDetail, error)
+
+	// Event Rules (global)
+	CreateEventRule(ctx context.Context, r *models.EventRule) error
+	ListEventRules(ctx context.Context) ([]*models.EventRule, error)
+	UpdateEventRule(ctx context.Context, r *models.EventRule) error
+	DeleteEventRule(ctx context.Context, id uuid.UUID) error
+
+	// Event Actions (global)
+	CreateEventAction(ctx context.Context, a *models.EventAction) error
+	ListEventActions(ctx context.Context) ([]*models.EventAction, error)
+	UpdateEventAction(ctx context.Context, a *models.EventAction) error
+	DeleteEventAction(ctx context.Context, id uuid.UUID) error
+
+	// Event Handlers (global)
+	CreateEventHandler(ctx context.Context, h *models.EventHandler) error
+	ListEventHandlers(ctx context.Context) ([]*models.EventHandlerDetail, error)
+	UpdateEventHandler(ctx context.Context, h *models.EventHandler) error
+	DeleteEventHandler(ctx context.Context, id uuid.UUID) error
 
 	// Backup Stores
 	CreateBackupStore(ctx context.Context, bs *models.BackupStore) error
@@ -133,4 +155,9 @@ type Store interface {
 	ListPgParamClassifications(ctx context.Context) ([]*models.PgParamClassification, error)
 	UpsertPgParamClassification(ctx context.Context, p *models.PgParamClassification) error
 	DeletePgParamClassification(ctx context.Context, name string) error
+
+	// Cluster Events (event-driven architecture)
+	CreateClusterEvent(ctx context.Context, event *models.ClusterEvent) error
+	ListClusterEvents(ctx context.Context, satelliteID uuid.UUID, clusterName string, limit int) ([]*models.ClusterEvent, error)
+	PruneClusterEvents(ctx context.Context, olderThan time.Time) (int64, error)
 }

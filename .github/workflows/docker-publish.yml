@@ -24,8 +24,8 @@ jobs:
             dockerfile: deploy/docker/Dockerfile.central
           - image: satellite
             dockerfile: deploy/docker/Dockerfile.satellite
-          - image: failover
-            dockerfile: deploy/docker/Dockerfile.failover-sidecar
+          - image: sentinel
+            dockerfile: deploy/docker/Dockerfile.sentinel-sidecar
     steps:
       - uses: actions/checkout@v4
 

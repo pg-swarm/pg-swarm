@@ -95,7 +95,7 @@ type ClusterSpec struct {
 	PgParams           map[string]string `json:"pg_params,omitempty"`
 	HbaRules           []string          `json:"hba_rules,omitempty"`
 	Archive            *ArchiveSpec      `json:"archive,omitempty"`             // nil = archiving disabled
-	Failover           *FailoverSpec     `json:"failover,omitempty"`            // nil = failover disabled
+	Sentinel           *SentinelSpec     `json:"sentinel,omitempty"`            // nil = sentinel disabled
 	Backup             *BackupSpec       `json:"backup,omitempty"`              // nil = backups disabled
 	DeletionProtection bool              `json:"deletion_protection,omitempty"` // adds finalizer to PVCs
 }
@@ -137,7 +137,7 @@ type SecretRef struct {
 	Name string `json:"name"`
 }
 
-type FailoverSpec struct {
+type SentinelSpec struct {
 	Enabled                    bool   `json:"enabled"`
 	HealthCheckIntervalSeconds int32  `json:"health_check_interval_seconds,omitempty"`
 	SidecarImage               string `json:"sidecar_image,omitempty"`
@@ -175,14 +175,14 @@ func (c *ClusterConfig) ParseSpec() (*ClusterSpec, error) {
 }
 
 type ClusterProfile struct {
-	ID                uuid.UUID       `json:"id" db:"id"`
-	Name              string          `json:"name" db:"name"`
-	Description       string          `json:"description" db:"description"`
-	Config            json.RawMessage `json:"config" db:"config"`
-	InUse             bool            `json:"locked" db:"in_use"` // computed: true when referenced by clusters or rules
-	RecoveryRuleSetID *uuid.UUID      `json:"recovery_rule_set_id" db:"recovery_rule_set_id"`
-	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
+	ID             uuid.UUID       `json:"id" db:"id"`
+	Name           string          `json:"name" db:"name"`
+	Description    string          `json:"description" db:"description"`
+	Config         json.RawMessage `json:"config" db:"config"`
+	InUse          bool            `json:"locked" db:"in_use"` // computed: true when referenced by clusters or rules
+	EventRuleSetID *uuid.UUID      `json:"event_rule_set_id" db:"event_rule_set_id"`
+	CreatedAt      time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // ParseSpec deserializes the Config JSON into a ClusterSpec.
@@ -241,18 +241,76 @@ type Event struct {
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
 
-// ---------- Recovery Rule Sets ----------
+// ---------- Cluster Events (event-driven architecture) ----------
 
-// RecoveryRuleSet is a named collection of log-based recovery rules.
-// Rules are stored as a JSON array in the Config column.
-type RecoveryRuleSet struct {
+type ClusterEvent struct {
+	ID          uuid.UUID         `json:"id" db:"id"`
+	EventType   string            `json:"event_type" db:"event_type"`
+	ClusterName string            `json:"cluster_name" db:"cluster_name"`
+	Namespace   string            `json:"namespace" db:"namespace"`
+	PodName     string            `json:"pod_name" db:"pod_name"`
+	Severity    string            `json:"severity" db:"severity"`
+	Source      string            `json:"source" db:"source"`
+	SatelliteID uuid.UUID         `json:"satellite_id" db:"satellite_id"`
+	OperationID string            `json:"operation_id" db:"operation_id"`
+	Data        map[string]string `json:"data" db:"data"`
+	CreatedAt   time.Time         `json:"created_at" db:"created_at"`
+}
+
+// ---------- Event Rules Framework ----------
+
+// EventRuleSet is a named group of handlers, assigned to profiles/clusters.
+type EventRuleSet struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	Name        string    `json:"name" db:"name"`
+	Description string    `json:"description" db:"description"`
+	Builtin     bool      `json:"builtin" db:"builtin"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// EventRule is a global log pattern detection rule that emits a named event.
+type EventRule struct {
+	ID                     uuid.UUID `json:"id" db:"id"`
+	Name                   string    `json:"name" db:"name"`
+	Pattern                string    `json:"pattern" db:"pattern"`
+	Severity               string    `json:"severity" db:"severity"`
+	Category               string    `json:"category" db:"category"`
+	Enabled                bool      `json:"enabled" db:"enabled"`
+	Builtin                bool      `json:"builtin" db:"builtin"`
+	CooldownSeconds        int       `json:"cooldown_seconds" db:"cooldown_seconds"`
+	Threshold              int       `json:"threshold" db:"threshold"`
+	ThresholdWindowSeconds int       `json:"threshold_window_seconds" db:"threshold_window_seconds"`
+	CreatedAt              time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// EventAction is a global named action in the action library.
+type EventAction struct {
 	ID          uuid.UUID       `json:"id" db:"id"`
 	Name        string          `json:"name" db:"name"`
+	Type        string          `json:"type" db:"type"`
 	Description string          `json:"description" db:"description"`
-	Builtin     bool            `json:"builtin" db:"builtin"`
-	Config      json.RawMessage `json:"config" db:"config"` // JSON array of RecoveryRule
+	Config      json.RawMessage `json:"config" db:"config"`
 	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+}
+
+// EventHandler is a global binding of an event rule to an action.
+type EventHandler struct {
+	ID            uuid.UUID `json:"id" db:"id"`
+	EventRuleID   uuid.UUID `json:"event_rule_id" db:"event_rule_id"`
+	EventActionID uuid.UUID `json:"event_action_id" db:"event_action_id"`
+	Enabled       bool      `json:"enabled" db:"enabled"`
+	CreatedAt     time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// EventHandlerDetail is an EventHandler joined with its rule and action names.
+type EventHandlerDetail struct {
+	EventHandler
+	EventRuleName   string `json:"event_rule_name" db:"event_rule_name"`
+	EventActionName string `json:"event_action_name" db:"event_action_name"`
 }
 
 // ---------- Cluster Databases ----------
@@ -263,9 +321,9 @@ type ClusterDatabase struct {
 	ClusterID    uuid.UUID `json:"cluster_id" db:"cluster_id"`
 	DBName       string    `json:"db_name" db:"db_name"`
 	DBUser       string    `json:"db_user" db:"db_user"`
-	Password     []byte    `json:"-" db:"password"`                        // encrypted, never serialized to API
-	AllowedCIDRs []string  `json:"allowed_cidrs" db:"allowed_cidrs"`       // e.g. ["10.0.0.0/8"]
-	Status       string    `json:"status" db:"status"`                     // pending, created, failed
+	Password     []byte    `json:"-" db:"password"`                  // encrypted, never serialized to API
+	AllowedCIDRs []string  `json:"allowed_cidrs" db:"allowed_cidrs"` // e.g. ["10.0.0.0/8"]
+	Status       string    `json:"status" db:"status"`               // pending, created, failed
 	ErrorMessage string    `json:"error_message,omitempty" db:"error_message"`
 	CreatedAt    time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
@@ -312,8 +370,8 @@ type BackupSpec struct {
 // PhysicalBackupConfig defines base/incremental backup schedules and WAL archiving.
 type PhysicalBackupConfig struct {
 	Enabled               bool   `json:"enabled"`
-	BaseSchedule          string `json:"base_schedule"`          // 5-field cron
-	IncrementalSchedule   string `json:"incremental_schedule"`   // 5-field cron (optional)
+	BaseSchedule          string `json:"base_schedule"`        // 5-field cron
+	IncrementalSchedule   string `json:"incremental_schedule"` // 5-field cron (optional)
 	WalArchiveEnabled     bool   `json:"wal_archive_enabled"`
 	ArchiveTimeoutSeconds int32  `json:"archive_timeout_seconds"` // default 60
 }
@@ -341,8 +399,8 @@ type BackupStore struct {
 	Description    string          `json:"description" db:"description"`
 	StoreType      string          `json:"store_type" db:"store_type"` // "gcs" or "sftp"
 	Config         json.RawMessage `json:"config" db:"config"`
-	Credentials    []byte          `json:"-" db:"credentials"`                              // encrypted, never serialized
-	CredentialsSet map[string]bool `json:"credentials_set,omitempty" db:"-"`                // computed field
+	Credentials    []byte          `json:"-" db:"credentials"`               // encrypted, never serialized
+	CredentialsSet map[string]bool `json:"credentials_set,omitempty" db:"-"` // computed field
 	CreatedAt      time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at" db:"updated_at"`
 }

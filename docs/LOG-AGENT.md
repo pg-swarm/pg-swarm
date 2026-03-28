@@ -2,11 +2,11 @@
 
 ## Overview
 
-A rule-based log watcher in the failover sidecar that reads PostgreSQL container logs in real-time, matches patterns, and takes automated corrective action. Instead of waiting for PG to crash 3 times (crash-loop breaker) or for the sidecar's periodic health check to fire, the agent reacts on the **first log line** that indicates a problem.
+A rule-based log watcher in the sentinel sidecar that reads PostgreSQL container logs in real-time, matches patterns, and takes automated corrective action. Instead of waiting for PG to crash 3 times (crash-loop breaker) or for the sidecar's periodic health check to fire, the agent reacts on the **first log line** that indicates a problem.
 
 ## Where it lives
 
-**The failover sidecar** — not the satellite. It shares the pod, has `pods/exec` RBAC, has `rest.Config`, and runs a monitoring loop already. Latency is milliseconds, not the seconds a satellite gRPC round-trip would add.
+**The sentinel sidecar** — not the satellite. It shares the pod, has `pods/exec` RBAC, has `rest.Config`, and runs a monitoring loop already. Latency is milliseconds, not the seconds a satellite gRPC round-trip would add.
 
 ## How it reads logs
 
@@ -125,7 +125,7 @@ These require human attention or a full rebuild. The agent reports them and opti
 | # | Pattern | Action | Cooldown | Why |
 |---|---------|--------|----------|-----|
 | 40 | `LOG:.*started streaming WAL from primary` | `event` | 0 | Replication connected. Good signal — clear WAL receiver alerts. |
-| 41 | `FATAL:.*could not connect to the primary server` | `event` | 30s | Primary unreachable from replica. Failover sidecar handles this via lease logic. |
+| 41 | `FATAL:.*could not connect to the primary server` | `event` | 30s | Primary unreachable from replica. Sentinel sidecar handles this via lease logic. |
 | 42 | `LOG:.*replication terminated by primary server` | `event` | 60s | Primary disconnected us. Could be pg_ctl stop, config reload, or network. |
 | 43 | `FATAL:.*number of requested standby connections exceeds max_wal_senders` | `event` | 120s | Too many replicas. Need to increase max_wal_senders. |
 
@@ -283,7 +283,7 @@ PUT    /api/v1/clusters/:id/log-rules          Set cluster-level overrides
 
 ### How the sidecar receives rules
 
-The operator serializes `log_rules` from `ClusterConfig` into the failover sidecar's environment as a JSON-encoded env var:
+The operator serializes `log_rules` from `ClusterConfig` into the sentinel sidecar's environment as a JSON-encoded env var:
 
 ```go
 {Name: "LOG_RULES", Value: logRulesJSON}

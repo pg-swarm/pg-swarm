@@ -152,7 +152,7 @@ func scanProfile(row pgx.Row) (*models.ClusterProfile, error) {
 		&p.Description,
 		&p.Config,
 		&p.InUse,
-		&p.RecoveryRuleSetID,
+		&p.EventRuleSetID,
 		&p.CreatedAt,
 		&p.UpdatedAt,
 	)
@@ -695,9 +695,9 @@ func (s *PostgresStore) CreateProfile(ctx context.Context, p *models.ClusterProf
 	p.UpdatedAt = now
 
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO cluster_profiles (id, name, description, config, recovery_rule_set_id, created_at, updated_at)
+		`INSERT INTO cluster_profiles (id, name, description, config, event_rule_set_id, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		p.ID, p.Name, p.Description, p.Config, p.RecoveryRuleSetID, p.CreatedAt, p.UpdatedAt,
+		p.ID, p.Name, p.Description, p.Config, p.EventRuleSetID, p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create profile: %w", err)
@@ -711,7 +711,7 @@ func (s *PostgresStore) GetProfile(ctx context.Context, id uuid.UUID) (*models.C
 		`SELECT p.id, p.name, p.description, p.config,
 		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR
 		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS in_use,
-		        p.recovery_rule_set_id, p.created_at, p.updated_at
+		        p.event_rule_set_id, p.created_at, p.updated_at
 		 FROM cluster_profiles p WHERE p.id = $1`, id)
 	p, err := scanProfile(row)
 	if err != nil {
@@ -726,7 +726,7 @@ func (s *PostgresStore) ListProfiles(ctx context.Context) ([]*models.ClusterProf
 		`SELECT p.id, p.name, p.description, p.config,
 		        (EXISTS(SELECT 1 FROM deployment_rules r WHERE r.profile_id = p.id) OR
 		         EXISTS(SELECT 1 FROM cluster_configs c WHERE c.profile_id = p.id)) AS in_use,
-		        p.recovery_rule_set_id, p.created_at, p.updated_at
+		        p.event_rule_set_id, p.created_at, p.updated_at
 		 FROM cluster_profiles p ORDER BY p.created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list profiles: %w", err)
@@ -752,9 +752,9 @@ func (s *PostgresStore) UpdateProfile(ctx context.Context, p *models.ClusterProf
 	p.UpdatedAt = time.Now()
 
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, recovery_rule_set_id = $4, updated_at = $5
+		`UPDATE cluster_profiles SET name = $1, description = $2, config = $3, event_rule_set_id = $4, updated_at = $5
 		 WHERE id = $6`,
-		p.Name, p.Description, p.Config, p.RecoveryRuleSetID, p.UpdatedAt, p.ID,
+		p.Name, p.Description, p.Config, p.EventRuleSetID, p.UpdatedAt, p.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update profile: %w", err)
@@ -1267,91 +1267,340 @@ func (s *PostgresStore) ListEventsByCluster(ctx context.Context, satelliteID uui
 	return result, rows.Err()
 }
 
-// ── Recovery Rule Sets ──────────────────────────────────────────────────────
+// ── Event Rule Sets ─────────────────────────────────────────────────────────
 
-const recoveryRuleSetCols = `id, name, description, builtin, config, created_at, updated_at`
+const eventRuleSetCols = `id, name, description, builtin, created_at, updated_at`
 
-func scanRecoveryRuleSet(row pgx.Row) (*models.RecoveryRuleSet, error) {
-	var rs models.RecoveryRuleSet
-	err := row.Scan(&rs.ID, &rs.Name, &rs.Description, &rs.Builtin, &rs.Config, &rs.CreatedAt, &rs.UpdatedAt)
-	if err != nil {
-		return nil, err
-	}
-	if rs.Config == nil {
-		rs.Config = json.RawMessage("[]")
-	}
-	return &rs, nil
+func scanEventRuleSet(row pgx.Row) (*models.EventRuleSet, error) {
+	var rs models.EventRuleSet
+	err := row.Scan(&rs.ID, &rs.Name, &rs.Description, &rs.Builtin, &rs.CreatedAt, &rs.UpdatedAt)
+	return &rs, err
 }
 
-func (s *PostgresStore) CreateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error {
+func (s *PostgresStore) CreateEventRuleSet(ctx context.Context, rs *models.EventRuleSet) error {
 	if rs.ID == uuid.Nil {
 		rs.ID = uuid.New()
 	}
-	if rs.Config == nil {
-		rs.Config = json.RawMessage("[]")
-	}
 	now := time.Now()
-	rs.CreatedAt = now
-	rs.UpdatedAt = now
+	rs.CreatedAt, rs.UpdatedAt = now, now
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO recovery_rule_sets (id, name, description, builtin, config, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		rs.ID, rs.Name, rs.Description, rs.Builtin, rs.Config, rs.CreatedAt, rs.UpdatedAt,
+		`INSERT INTO event_rule_sets (id, name, description, builtin, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		rs.ID, rs.Name, rs.Description, rs.Builtin, rs.CreatedAt, rs.UpdatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("create recovery rule set: %w", err)
+		return fmt.Errorf("create event rule set: %w", err)
 	}
 	return nil
 }
 
-func (s *PostgresStore) ListRecoveryRuleSets(ctx context.Context) ([]*models.RecoveryRuleSet, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+recoveryRuleSetCols+` FROM recovery_rule_sets ORDER BY builtin DESC, created_at ASC`)
+func (s *PostgresStore) ListEventRuleSets(ctx context.Context) ([]*models.EventRuleSet, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+eventRuleSetCols+` FROM event_rule_sets ORDER BY builtin DESC, created_at ASC`)
 	if err != nil {
-		return nil, fmt.Errorf("list recovery rule sets: %w", err)
+		return nil, fmt.Errorf("list event rule sets: %w", err)
 	}
 	defer rows.Close()
-	var result []*models.RecoveryRuleSet
+	var result []*models.EventRuleSet
 	for rows.Next() {
-		rs, err := scanRecoveryRuleSet(rows)
+		rs, err := scanEventRuleSet(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan recovery rule set: %w", err)
+			return nil, fmt.Errorf("scan event rule set: %w", err)
 		}
 		result = append(result, rs)
 	}
 	return result, rows.Err()
 }
 
-func (s *PostgresStore) GetRecoveryRuleSet(ctx context.Context, id uuid.UUID) (*models.RecoveryRuleSet, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+recoveryRuleSetCols+` FROM recovery_rule_sets WHERE id = $1`, id)
-	return scanRecoveryRuleSet(row)
+func (s *PostgresStore) GetEventRuleSet(ctx context.Context, id uuid.UUID) (*models.EventRuleSet, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+eventRuleSetCols+` FROM event_rule_sets WHERE id = $1`, id)
+	return scanEventRuleSet(row)
 }
 
-func (s *PostgresStore) UpdateRecoveryRuleSet(ctx context.Context, rs *models.RecoveryRuleSet) error {
-	if rs.Config == nil {
-		rs.Config = json.RawMessage("[]")
-	}
+func (s *PostgresStore) UpdateEventRuleSet(ctx context.Context, rs *models.EventRuleSet) error {
 	rs.UpdatedAt = time.Now()
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE recovery_rule_sets SET name = $1, description = $2, config = $3, updated_at = $4
-		 WHERE id = $5`,
-		rs.Name, rs.Description, rs.Config, rs.UpdatedAt, rs.ID,
+		`UPDATE event_rule_sets SET name = $1, description = $2, updated_at = $3 WHERE id = $4`,
+		rs.Name, rs.Description, rs.UpdatedAt, rs.ID,
 	)
 	if err != nil {
-		return fmt.Errorf("update recovery rule set: %w", err)
+		return fmt.Errorf("update event rule set: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("recovery rule set %s not found", rs.ID)
+		return fmt.Errorf("event rule set %s not found", rs.ID)
 	}
 	return nil
 }
 
-func (s *PostgresStore) DeleteRecoveryRuleSet(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM recovery_rule_sets WHERE id = $1 AND builtin = false`, id)
+func (s *PostgresStore) DeleteEventRuleSet(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM event_rule_sets WHERE id = $1 AND builtin = false`, id)
 	if err != nil {
-		return fmt.Errorf("delete recovery rule set: %w", err)
+		return fmt.Errorf("delete event rule set: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("recovery rule set %s not found or is built-in", id)
+		return fmt.Errorf("event rule set %s not found or is built-in", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) AddHandlerToRuleSet(ctx context.Context, ruleSetID, handlerID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO event_rule_set_handlers (rule_set_id, handler_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		ruleSetID, handlerID,
+	)
+	return err
+}
+
+func (s *PostgresStore) RemoveHandlerFromRuleSet(ctx context.Context, ruleSetID, handlerID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM event_rule_set_handlers WHERE rule_set_id = $1 AND handler_id = $2`,
+		ruleSetID, handlerID,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListRuleSetHandlers(ctx context.Context, ruleSetID uuid.UUID) ([]*models.EventHandlerDetail, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT eh.id, eh.event_rule_id, eh.event_action_id, eh.enabled, eh.created_at, eh.updated_at,
+		       er.name AS event_rule_name, ea.name AS event_action_name
+		FROM event_rule_set_handlers ersh
+		JOIN event_handlers eh ON eh.id = ersh.handler_id
+		JOIN event_rules    er ON er.id = eh.event_rule_id
+		JOIN event_actions  ea ON ea.id = eh.event_action_id
+		WHERE ersh.rule_set_id = $1
+		ORDER BY er.name`, ruleSetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.EventHandlerDetail
+	for rows.Next() {
+		var d models.EventHandlerDetail
+		if err := rows.Scan(&d.ID, &d.EventRuleID, &d.EventActionID, &d.Enabled,
+			&d.CreatedAt, &d.UpdatedAt, &d.EventRuleName, &d.EventActionName); err != nil {
+			return nil, err
+		}
+		result = append(result, &d)
+	}
+	return result, rows.Err()
+}
+
+// ── Event Rules (global) ─────────────────────────────────────────────────────
+
+const eventRuleCols = `id, name, pattern, severity, category, enabled, builtin, cooldown_seconds, threshold, threshold_window_seconds, created_at, updated_at`
+
+func scanEventRule(row pgx.Row) (*models.EventRule, error) {
+	var r models.EventRule
+	err := row.Scan(&r.ID, &r.Name, &r.Pattern, &r.Severity, &r.Category, &r.Enabled, &r.Builtin,
+		&r.CooldownSeconds, &r.Threshold, &r.ThresholdWindowSeconds, &r.CreatedAt, &r.UpdatedAt)
+	return &r, err
+}
+
+func (s *PostgresStore) CreateEventRule(ctx context.Context, r *models.EventRule) error {
+	if r.ID == uuid.Nil {
+		r.ID = uuid.New()
+	}
+	now := time.Now()
+	r.CreatedAt, r.UpdatedAt = now, now
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO event_rules (id, name, pattern, severity, category, enabled, builtin, cooldown_seconds, threshold, threshold_window_seconds, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		r.ID, r.Name, r.Pattern, r.Severity, r.Category, r.Enabled, r.Builtin,
+		r.CooldownSeconds, r.Threshold, r.ThresholdWindowSeconds, r.CreatedAt, r.UpdatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListEventRules(ctx context.Context) ([]*models.EventRule, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+eventRuleCols+` FROM event_rules ORDER BY category, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.EventRule
+	for rows.Next() {
+		r, err := scanEventRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) UpdateEventRule(ctx context.Context, r *models.EventRule) error {
+	r.UpdatedAt = time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE event_rules SET name=$1, pattern=$2, severity=$3, category=$4, enabled=$5,
+		 cooldown_seconds=$6, threshold=$7, threshold_window_seconds=$8, updated_at=$9
+		 WHERE id=$10 AND builtin=false`,
+		r.Name, r.Pattern, r.Severity, r.Category, r.Enabled,
+		r.CooldownSeconds, r.Threshold, r.ThresholdWindowSeconds, r.UpdatedAt, r.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("event rule %s not found or is built-in", r.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteEventRule(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM event_rules WHERE id=$1 AND builtin=false`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("event rule %s not found or is built-in", id)
+	}
+	return nil
+}
+
+// ── Event Actions (global) ───────────────────────────────────────────────────
+
+const eventActionCols = `id, name, type, description, config, created_at, updated_at`
+
+func scanEventAction(row pgx.Row) (*models.EventAction, error) {
+	var a models.EventAction
+	err := row.Scan(&a.ID, &a.Name, &a.Type, &a.Description, &a.Config, &a.CreatedAt, &a.UpdatedAt)
+	if a.Config == nil {
+		a.Config = json.RawMessage("{}")
+	}
+	return &a, err
+}
+
+func (s *PostgresStore) CreateEventAction(ctx context.Context, a *models.EventAction) error {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.New()
+	}
+	if a.Config == nil {
+		a.Config = json.RawMessage("{}")
+	}
+	now := time.Now()
+	a.CreatedAt, a.UpdatedAt = now, now
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO event_actions (id, name, type, description, config, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		a.ID, a.Name, a.Type, a.Description, a.Config, a.CreatedAt, a.UpdatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListEventActions(ctx context.Context) ([]*models.EventAction, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+eventActionCols+` FROM event_actions ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.EventAction
+	for rows.Next() {
+		a, err := scanEventAction(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, a)
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) UpdateEventAction(ctx context.Context, a *models.EventAction) error {
+	if a.Config == nil {
+		a.Config = json.RawMessage("{}")
+	}
+	a.UpdatedAt = time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE event_actions SET name=$1, type=$2, description=$3, config=$4, updated_at=$5 WHERE id=$6`,
+		a.Name, a.Type, a.Description, a.Config, a.UpdatedAt, a.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("event action %s not found", a.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteEventAction(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM event_actions WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("event action %s not found", id)
+	}
+	return nil
+}
+
+// ── Event Handlers (global) ──────────────────────────────────────────────────
+
+func scanEventHandlerDetail(row pgx.Row) (*models.EventHandlerDetail, error) {
+	var d models.EventHandlerDetail
+	err := row.Scan(&d.ID, &d.EventRuleID, &d.EventActionID, &d.Enabled,
+		&d.CreatedAt, &d.UpdatedAt, &d.EventRuleName, &d.EventActionName)
+	return &d, err
+}
+
+const eventHandlerDetailQuery = `
+	SELECT eh.id, eh.event_rule_id, eh.event_action_id, eh.enabled, eh.created_at, eh.updated_at,
+	       er.name AS event_rule_name, ea.name AS event_action_name
+	FROM event_handlers eh
+	JOIN event_rules   er ON er.id = eh.event_rule_id
+	JOIN event_actions ea ON ea.id = eh.event_action_id`
+
+func (s *PostgresStore) CreateEventHandler(ctx context.Context, h *models.EventHandler) error {
+	if h.ID == uuid.Nil {
+		h.ID = uuid.New()
+	}
+	now := time.Now()
+	h.CreatedAt, h.UpdatedAt = now, now
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO event_handlers (id, event_rule_id, event_action_id, enabled, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		h.ID, h.EventRuleID, h.EventActionID, h.Enabled, h.CreatedAt, h.UpdatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListEventHandlers(ctx context.Context) ([]*models.EventHandlerDetail, error) {
+	rows, err := s.pool.Query(ctx, eventHandlerDetailQuery+` ORDER BY er.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.EventHandlerDetail
+	for rows.Next() {
+		d, err := scanEventHandlerDetail(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, d)
+	}
+	return result, rows.Err()
+}
+
+func (s *PostgresStore) UpdateEventHandler(ctx context.Context, h *models.EventHandler) error {
+	h.UpdatedAt = time.Now()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE event_handlers SET event_rule_id=$1, event_action_id=$2, enabled=$3, updated_at=$4 WHERE id=$5`,
+		h.EventRuleID, h.EventActionID, h.Enabled, h.UpdatedAt, h.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("event handler %s not found", h.ID)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteEventHandler(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM event_handlers WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("event handler %s not found", id)
 	}
 	return nil
 }
@@ -1865,6 +2114,86 @@ func (s *PostgresStore) UpdateRestoreOperation(ctx context.Context, ro *models.R
 		return fmt.Errorf("restore operation %s not found", ro.ID)
 	}
 	return nil
+}
+
+// ---------- Cluster Events (event-driven architecture) ----------
+
+func (s *PostgresStore) CreateClusterEvent(ctx context.Context, event *models.ClusterEvent) error {
+	if event.ID == uuid.Nil {
+		event.ID = uuid.New()
+	}
+	if event.Severity == "" {
+		event.Severity = "info"
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now()
+	}
+
+	dataJSON, err := json.Marshal(event.Data)
+	if err != nil {
+		return fmt.Errorf("marshal cluster event data: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO cluster_events
+			(id, event_type, cluster_name, namespace, pod_name, severity, source, satellite_id, operation_id, data, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		event.ID, event.EventType, event.ClusterName, event.Namespace,
+		event.PodName, event.Severity, event.Source, event.SatelliteID,
+		event.OperationID, dataJSON, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create cluster event: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListClusterEvents(ctx context.Context, satelliteID uuid.UUID, clusterName string, limit int) ([]*models.ClusterEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, event_type, cluster_name, namespace, pod_name, severity, source,
+			satellite_id, operation_id, data, created_at
+		 FROM cluster_events
+		 WHERE satellite_id = $1 AND cluster_name = $2
+		 ORDER BY created_at DESC
+		 LIMIT $3`,
+		satelliteID, clusterName, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list cluster events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []*models.ClusterEvent
+	for rows.Next() {
+		var e models.ClusterEvent
+		var dataJSON []byte
+		if err := rows.Scan(
+			&e.ID, &e.EventType, &e.ClusterName, &e.Namespace, &e.PodName,
+			&e.Severity, &e.Source, &e.SatelliteID, &e.OperationID,
+			&dataJSON, &e.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan cluster event: %w", err)
+		}
+		if len(dataJSON) > 0 {
+			_ = json.Unmarshal(dataJSON, &e.Data)
+		}
+		events = append(events, &e)
+	}
+	return events, nil
+}
+
+func (s *PostgresStore) PruneClusterEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	result, err := s.pool.Exec(ctx,
+		`DELETE FROM cluster_events WHERE created_at < $1`,
+		olderThan,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prune cluster events: %w", err)
+	}
+	return result.RowsAffected(), nil
 }
 
 // Compile-time check that PostgresStore implements Store.

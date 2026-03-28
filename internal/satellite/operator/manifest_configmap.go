@@ -41,10 +41,10 @@ var defaultPgParams = map[string]string{
 	"maintenance_work_mem": "128MB",
 	"huge_pages":           "try",
 	// WAL
-	"wal_buffers":            "16MB",
-	"min_wal_size":           "1GB",
-	"max_wal_size":           "4GB",
-	"checkpoint_timeout":     "15min",
+	"wal_buffers":                  "16MB",
+	"min_wal_size":                 "1GB",
+	"max_wal_size":                 "4GB",
+	"checkpoint_timeout":           "15min",
 	"checkpoint_completion_target": "0.9",
 	// Query Planner
 	"random_page_cost":          "1.1",
@@ -58,29 +58,29 @@ var defaultPgParams = map[string]string{
 	"wal_receiver_timeout":   "60s",
 	"wal_sender_timeout":     "60s",
 	// Logging
-	"log_min_duration_statement": "200",
-	"log_statement":              "none",
-	"log_line_prefix":            "'%m [%p] %q[user=%u,db=%d] '",
-	"log_checkpoints":            "on",
+	"log_min_duration_statement":  "200",
+	"log_statement":               "none",
+	"log_line_prefix":             "'%m [%p] %q[user=%u,db=%d] '",
+	"log_checkpoints":             "on",
 	"log_connections":             "off",
 	"log_disconnections":          "off",
 	"log_lock_waits":              "off",
 	"log_temp_files":              "-1",
 	"log_autovacuum_min_duration": "-1",
 	// Autovacuum
-	"autovacuum":                       "on",
-	"autovacuum_max_workers":           "3",
-	"autovacuum_naptime":               "1min",
-	"autovacuum_vacuum_threshold":      "50",
-	"autovacuum_vacuum_scale_factor":   "0.2",
-	"autovacuum_analyze_threshold":     "50",
-	"autovacuum_analyze_scale_factor":  "0.1",
+	"autovacuum":                      "on",
+	"autovacuum_max_workers":          "3",
+	"autovacuum_naptime":              "1min",
+	"autovacuum_vacuum_threshold":     "50",
+	"autovacuum_vacuum_scale_factor":  "0.2",
+	"autovacuum_analyze_threshold":    "50",
+	"autovacuum_analyze_scale_factor": "0.1",
 	// Client Defaults
-	"timezone":                              "'UTC'",
-	"statement_timeout":                     "0",
-	"idle_in_transaction_session_timeout":   "0",
-	"lock_timeout":                          "0",
-	"default_text_search_config":            "'pg_catalog.english'",
+	"timezone":                            "'UTC'",
+	"statement_timeout":                   "0",
+	"idle_in_transaction_session_timeout": "0",
+	"lock_timeout":                        "0",
+	"default_text_search_config":          "'pg_catalog.english'",
 }
 
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.
@@ -97,7 +97,7 @@ func recoveryRulesConfigMapName(clusterName string) string {
 }
 
 // buildRecoveryRulesConfigMap creates the ConfigMap containing recovery rules JSON
-// for the failover sidecar to watch and apply.
+// for the sentinel sidecar to watch and apply.
 func buildRecoveryRulesConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 	rulesJSON := "[]"
 	if len(cfg.RecoveryRules) > 0 {
@@ -152,7 +152,7 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 		},
 		Data: map[string]string{
 			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive),
-			"pg_hba.conf":    buildHbaConf(cfg),
+			"pg_hba.conf":     buildHbaConf(cfg),
 		},
 	}
 }

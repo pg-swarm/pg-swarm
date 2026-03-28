@@ -35,15 +35,15 @@ func TestProtoStateToModel(t *testing.T) {
 func TestProtoInstancesToJSON(t *testing.T) {
 	instances := []*pgswarmv1.InstanceHealth{
 		{
-			PodName:               "pg-0",
-			Role:                  pgswarmv1.InstanceRole_INSTANCE_ROLE_PRIMARY,
-			Ready:                 true,
-			ReplicationLagBytes:   1024,
-			ConnectionsUsed:       15,
-			ConnectionsMax:        100,
-			DiskUsedBytes:         1073741824,
-			TimelineId:            1,
-			PgStartTime:           timestamppb.Now(),
+			PodName:             "pg-0",
+			Role:                pgswarmv1.InstanceRole_INSTANCE_ROLE_PRIMARY,
+			Ready:               true,
+			ReplicationLagBytes: 1024,
+			ConnectionsUsed:     15,
+			ConnectionsMax:      100,
+			DiskUsedBytes:       1073741824,
+			TimelineId:          1,
+			PgStartTime:         timestamppb.Now(),
 		},
 		{
 			PodName:               "pg-1",

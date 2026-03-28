@@ -188,7 +188,7 @@ The backup sidecar is a container injected into each PostgreSQL pod by the satel
 ```
 Pod: <cluster>-N
 ├── postgres          (main PG container)
-├── failover-sidecar  (optional, leader election + promotion)
+├── sentinel-sidecar  (optional, leader election + promotion)
 └── backup-sidecar    (backup scheduling, WAL archiving, restore agent)
     Volumes:
     ├── /var/lib/postgresql/data  (shared PGDATA, from PVC)
@@ -917,7 +917,7 @@ Each implementation parses the config/credentials JSON in its constructor and ma
 
 #### 13.4.1 `cmd/backup-sidecar/main.go`
 
-Follows the same pattern as `cmd/failover-sidecar/main.go`: read env vars, construct config, run.
+Follows the same pattern as `cmd/sentinel-sidecar/main.go`: read env vars, construct config, run.
 
 ```go
 func main() {
@@ -1027,7 +1027,7 @@ func (s *Sidecar) Run(ctx context.Context) error
 
 **Run loop:**
 1. Initialize storage destination from config.
-2. Connect to satellite sidecar gRPC server (same pattern as failover sidecar connector).
+2. Connect to satellite sidecar gRPC server (same pattern as sentinel sidecar connector).
 3. Enter role detection loop (every 10 seconds):
    - Query `SELECT pg_is_in_recovery()` via local PG connection.
    - If role changed: deactivate old services, activate new.
@@ -1150,7 +1150,7 @@ Reports backup status through two channels:
 
 #### 13.5.9 gRPC Connector (`connector.go`)
 
-Connects to the satellite's sidecar gRPC server (`SidecarStreamService`) using the same bidirectional streaming pattern as the failover sidecar connector (`internal/failover/connector.go`).
+Connects to the satellite's sidecar gRPC server (`SidecarStreamService`) using the same bidirectional streaming pattern as the sentinel sidecar connector (`internal/sentinel/connector.go`).
 
 ```go
 type Connector struct {
@@ -1235,7 +1235,7 @@ func buildBackupSidecar(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
                 FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
             {Name: "CLUSTER_NAME", Value: cfg.ClusterName},
             {Name: "PRIMARY_HOST", Value: primaryHostDNS(cfg)},
-            // gRPC connection to satellite sidecar server (same as failover sidecar)
+            // gRPC connection to satellite sidecar server (same as sentinel sidecar)
             {Name: "SATELLITE_ADDR", Value: "pg-swarm-satellite.pgswarm-system.svc.cluster.local:9091"},
             {Name: "SIDECAR_STREAM_TOKEN", ValueFrom: secretKeyRef(secretName, "sidecar-stream-token")},
             // Passwords from cluster secret

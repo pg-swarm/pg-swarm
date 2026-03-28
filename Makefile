@@ -1,9 +1,9 @@
 .SILENT:
 .PHONY: proto dashboard dashboard-dev dashboard-mock build test test-integration lint clean manifests \
-        docker-build-central docker-build-satellite docker-build-failover docker-build-all \
-        docker-push-central docker-push-satellite docker-push-failover docker-push-all \
+        docker-build-central docker-build-satellite docker-build-sentinel docker-build-all \
+        docker-push-central docker-push-satellite docker-push-sentinel docker-push-all \
         docker-compose-up docker-compose-down \
-        minikube-build-central minikube-build-satellite minikube-build-failover minikube-build-all \
+        minikube-build-central minikube-build-satellite minikube-build-sentinel minikube-build-all \
         k8s-deploy-central k8s-deploy-central-minikube k8s-deploy-satellite k8s-deploy-satellite-minikube k8s-deploy-all \
         k8s-delete-central k8s-delete-satellite k8s-delete-all \
         k8s-status k8s-refresh-deploy help
@@ -38,10 +38,10 @@ dashboard-dev: ## Run React dashboard with hot-reload (proxies API to localhost:
 dashboard-mock: ## Run React dashboard with mock data (no backend needed)
 	cd dashboard && npm install && MOCK=true npm run dev
 
-build: proto dashboard ## Compile central, satellite, and failover-sidecar binaries
+build: proto dashboard ## Compile central, satellite, and sentinel-sidecar binaries
 	go build -o bin/central ./cmd/central
 	go build -o bin/satellite ./cmd/satellite
-	go build -o bin/failover-sidecar ./cmd/failover-sidecar
+	go build -o bin/sentinel-sidecar ./cmd/sentinel-sidecar
 
 clean: ## Remove compiled binaries and generated proto code
 	rm -rf bin/ api/gen/v1/*.go
@@ -75,12 +75,12 @@ docker-build-satellite: ## Build satellite image (multi-platform, no push)
 		-f $(DOCKERFILE_DIR)/Dockerfile.satellite \
 		-t $(DOCKER_REPO)/pg-swarm-satellite:$(IMAGE_TAG) .
 
-docker-build-failover: ## Build failover-sidecar image (multi-platform, no push)
+docker-build-sentinel: ## Build sentinel-sidecar image (multi-platform, no push)
 	docker buildx build --platform $(PLATFORMS) \
-		-f $(DOCKERFILE_DIR)/Dockerfile.failover-sidecar \
-		-t $(DOCKER_REPO)/pg-swarm-failover:$(IMAGE_TAG) .
+		-f $(DOCKERFILE_DIR)/Dockerfile.sentinel-sidecar \
+		-t $(DOCKER_REPO)/pg-swarm-sentinel:$(IMAGE_TAG) .
 
-docker-build-all: docker-build-central docker-build-satellite docker-build-failover ## Build all images (multi-platform, no push)
+docker-build-all: docker-build-central docker-build-satellite docker-build-sentinel ## Build all images (multi-platform, no push)
 
 docker-push-central: ## Build and push central image
 	docker buildx build --platform $(PLATFORMS) \
@@ -92,12 +92,12 @@ docker-push-satellite: ## Build and push satellite image
 		-f $(DOCKERFILE_DIR)/Dockerfile.satellite \
 		-t $(DOCKER_REPO)/pg-swarm-satellite:$(IMAGE_TAG) --push .
 
-docker-push-failover: ## Build and push failover-sidecar image
+docker-push-sentinel: ## Build and push sentinel-sidecar image
 	docker buildx build --platform $(PLATFORMS) \
-		-f $(DOCKERFILE_DIR)/Dockerfile.failover-sidecar \
-		-t $(DOCKER_REPO)/pg-swarm-failover:$(IMAGE_TAG) --push .
+		-f $(DOCKERFILE_DIR)/Dockerfile.sentinel-sidecar \
+		-t $(DOCKER_REPO)/pg-swarm-sentinel:$(IMAGE_TAG) --push .
 
-docker-push-all: docker-push-central docker-push-satellite docker-push-failover ## Build and push all images
+docker-push-all: docker-push-central docker-push-satellite docker-push-sentinel ## Build and push all images
 
 docker-compose-up: ## Build and start the full stack (postgres + central + satellite)
 	docker compose -f $(DOCKERFILE_DIR)/docker-compose.yml up --build -d
@@ -121,13 +121,13 @@ minikube-build-satellite: ## Build satellite image and load into minikube
 		-f $(DOCKERFILE_DIR)/Dockerfile.satellite \
 		-t $(DOCKER_REPO)/pg-swarm-satellite:$(IMAGE_TAG) --load .
 
-minikube-build-failover: ## Build failover-sidecar image and load into minikube
+minikube-build-sentinel: ## Build sentinel-sidecar image and load into minikube
 	eval $$(minikube docker-env) && \
 	docker buildx build --platform linux/$(MINIKUBE_ARCH) \
-		-f $(DOCKERFILE_DIR)/Dockerfile.failover-sidecar \
-		-t $(DOCKER_REPO)/pg-swarm-failover:$(IMAGE_TAG) --load .
+		-f $(DOCKERFILE_DIR)/Dockerfile.sentinel-sidecar \
+		-t $(DOCKER_REPO)/pg-swarm-sentinel:$(IMAGE_TAG) --load .
 
-minikube-build-all: minikube-build-central minikube-build-satellite minikube-build-failover ## Build all images and load into minikube
+minikube-build-all: minikube-build-central minikube-build-satellite minikube-build-sentinel ## Build all images and load into minikube
 
 # ── Kubernetes ───────────────────────────────────────────────────────────────
 

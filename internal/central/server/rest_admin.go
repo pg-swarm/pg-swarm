@@ -72,55 +72,53 @@ func (s *RESTServer) deleteStorageTier(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
-// ── Recovery Rule Sets ──────────────────────────────────────────────────────
+// ── Event Rule Sets ─────────────────────────────────────────────────────────
 
-func (s *RESTServer) listRecoveryRuleSets(c *fiber.Ctx) error {
-	sets, err := s.store.ListRecoveryRuleSets(c.Context())
+func (s *RESTServer) listEventRuleSets(c *fiber.Ctx) error {
+	sets, err := s.store.ListEventRuleSets(c.Context())
 	if err != nil {
-		log.Error().Err(err).Msg("failed to list recovery rule sets")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list recovery rule sets"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list event rule sets"})
 	}
 	if sets == nil {
-		sets = []*models.RecoveryRuleSet{}
+		sets = []*models.EventRuleSet{}
 	}
 	return c.JSON(sets)
 }
 
-func (s *RESTServer) createRecoveryRuleSet(c *fiber.Ctx) error {
-	var rs models.RecoveryRuleSet
+func (s *RESTServer) createEventRuleSet(c *fiber.Ctx) error {
+	var rs models.EventRuleSet
 	if err := c.BodyParser(&rs); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
 	}
 	if rs.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
 	}
-	rs.Builtin = false // users cannot create built-in rule sets
-	if err := s.store.CreateRecoveryRuleSet(c.Context(), &rs); err != nil {
-		log.Error().Err(err).Msg("failed to create recovery rule set")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create recovery rule set"})
+	rs.Builtin = false
+	if err := s.store.CreateEventRuleSet(c.Context(), &rs); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create event rule set"})
 	}
-	auditLog(c, "recovery_rule_set.create", "recovery_rule_set", rs.ID.String(), rs.Name, "")
+	auditLog(c, "event_rule_set.create", "event_rule_set", rs.ID.String(), rs.Name, "")
 	return c.Status(fiber.StatusCreated).JSON(rs)
 }
 
-func (s *RESTServer) getRecoveryRuleSet(c *fiber.Ctx) error {
+func (s *RESTServer) getEventRuleSet(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
 	}
-	rs, err := s.store.GetRecoveryRuleSet(c.Context(), id)
+	rs, err := s.store.GetEventRuleSet(c.Context(), id)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	return c.JSON(rs)
 }
 
-func (s *RESTServer) updateRecoveryRuleSet(c *fiber.Ctx) error {
+func (s *RESTServer) updateEventRuleSet(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
 	}
-	var rs models.RecoveryRuleSet
+	var rs models.EventRuleSet
 	if err := c.BodyParser(&rs); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
 	}
@@ -128,24 +126,232 @@ func (s *RESTServer) updateRecoveryRuleSet(c *fiber.Ctx) error {
 	if rs.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
 	}
-	if err := s.store.UpdateRecoveryRuleSet(c.Context(), &rs); err != nil {
-		log.Error().Err(err).Msg("failed to update recovery rule set")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update recovery rule set"})
+	if err := s.store.UpdateEventRuleSet(c.Context(), &rs); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update event rule set"})
 	}
-	auditLog(c, "recovery_rule_set.update", "recovery_rule_set", id.String(), rs.Name, "")
+	auditLog(c, "event_rule_set.update", "event_rule_set", id.String(), rs.Name, "")
 	return c.JSON(rs)
 }
 
-func (s *RESTServer) deleteRecoveryRuleSet(c *fiber.Ctx) error {
+func (s *RESTServer) deleteEventRuleSet(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
 	}
-	if err := s.store.DeleteRecoveryRuleSet(c.Context(), id); err != nil {
-		log.Error().Err(err).Msg("failed to delete recovery rule set")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete recovery rule set"})
+	if err := s.store.DeleteEventRuleSet(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete event rule set"})
 	}
-	auditLog(c, "recovery_rule_set.delete", "recovery_rule_set", id.String(), "", "")
+	auditLog(c, "event_rule_set.delete", "event_rule_set", id.String(), "", "")
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (s *RESTServer) listRuleSetHandlers(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	handlers, err := s.store.ListRuleSetHandlers(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list handlers"})
+	}
+	if handlers == nil {
+		handlers = []*models.EventHandlerDetail{}
+	}
+	return c.JSON(handlers)
+}
+
+func (s *RESTServer) addHandlerToRuleSet(c *fiber.Ctx) error {
+	ruleSetID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	var body struct {
+		HandlerID uuid.UUID `json:"handler_id"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.HandlerID == uuid.Nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "handler_id is required"})
+	}
+	if err := s.store.AddHandlerToRuleSet(c.Context(), ruleSetID, body.HandlerID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to add handler"})
+	}
+	return c.JSON(fiber.Map{"status": "added"})
+}
+
+func (s *RESTServer) removeHandlerFromRuleSet(c *fiber.Ctx) error {
+	ruleSetID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	handlerID, err := uuid.Parse(c.Params("hid"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid handler id"})
+	}
+	if err := s.store.RemoveHandlerFromRuleSet(c.Context(), ruleSetID, handlerID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to remove handler"})
+	}
+	return c.JSON(fiber.Map{"status": "removed"})
+}
+
+// ── Event Rules (global) ─────────────────────────────────────────────────────
+
+func (s *RESTServer) listEventRules(c *fiber.Ctx) error {
+	rules, err := s.store.ListEventRules(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list event rules"})
+	}
+	if rules == nil {
+		rules = []*models.EventRule{}
+	}
+	return c.JSON(rules)
+}
+
+func (s *RESTServer) createEventRule(c *fiber.Ctx) error {
+	var r models.EventRule
+	if err := c.BodyParser(&r); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if r.Name == "" || r.Pattern == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name and pattern are required"})
+	}
+	r.Builtin = false
+	if err := s.store.CreateEventRule(c.Context(), &r); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create event rule"})
+	}
+	return c.Status(fiber.StatusCreated).JSON(r)
+}
+
+func (s *RESTServer) updateEventRule(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	var r models.EventRule
+	if err := c.BodyParser(&r); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	r.ID = id
+	if err := s.store.UpdateEventRule(c.Context(), &r); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update event rule"})
+	}
+	return c.JSON(r)
+}
+
+func (s *RESTServer) deleteEventRule(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	if err := s.store.DeleteEventRule(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete event rule"})
+	}
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+// ── Event Actions (global) ───────────────────────────────────────────────────
+
+func (s *RESTServer) listEventActions(c *fiber.Ctx) error {
+	actions, err := s.store.ListEventActions(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list event actions"})
+	}
+	if actions == nil {
+		actions = []*models.EventAction{}
+	}
+	return c.JSON(actions)
+}
+
+func (s *RESTServer) createEventAction(c *fiber.Ctx) error {
+	var a models.EventAction
+	if err := c.BodyParser(&a); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if a.Name == "" || a.Type == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name and type are required"})
+	}
+	if err := s.store.CreateEventAction(c.Context(), &a); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create event action"})
+	}
+	return c.Status(fiber.StatusCreated).JSON(a)
+}
+
+func (s *RESTServer) updateEventAction(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	var a models.EventAction
+	if err := c.BodyParser(&a); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	a.ID = id
+	if err := s.store.UpdateEventAction(c.Context(), &a); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update event action"})
+	}
+	return c.JSON(a)
+}
+
+func (s *RESTServer) deleteEventAction(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	if err := s.store.DeleteEventAction(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete event action"})
+	}
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+// ── Event Handlers (global) ──────────────────────────────────────────────────
+
+func (s *RESTServer) listEventHandlers(c *fiber.Ctx) error {
+	handlers, err := s.store.ListEventHandlers(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list event handlers"})
+	}
+	if handlers == nil {
+		handlers = []*models.EventHandlerDetail{}
+	}
+	return c.JSON(handlers)
+}
+
+func (s *RESTServer) createEventHandler(c *fiber.Ctx) error {
+	var h models.EventHandler
+	if err := c.BodyParser(&h); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if h.EventRuleID == uuid.Nil || h.EventActionID == uuid.Nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "event_rule_id and event_action_id are required"})
+	}
+	if err := s.store.CreateEventHandler(c.Context(), &h); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create event handler"})
+	}
+	return c.Status(fiber.StatusCreated).JSON(h)
+}
+
+func (s *RESTServer) updateEventHandler(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	var h models.EventHandler
+	if err := c.BodyParser(&h); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	h.ID = id
+	if err := s.store.UpdateEventHandler(c.Context(), &h); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update event handler"})
+	}
+	return c.JSON(h)
+}
+
+func (s *RESTServer) deleteEventHandler(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+	}
+	if err := s.store.DeleteEventHandler(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete event handler"})
+	}
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 

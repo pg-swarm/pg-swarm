@@ -301,6 +301,10 @@ func (s *RESTServer) fanOutRulesForSatellite(ctx context.Context, satelliteID uu
 			DeploymentRuleID: &rule.ID,
 			Config:           resolvedConfig,
 		}
+		// Initialize applied_profile_version to avoid stale "update available"
+		if versions, err := s.store.ListConfigVersions(ctx, rule.ProfileID); err == nil && len(versions) > 0 {
+			cfg.AppliedProfileVersion = versions[0].Version
+		}
 		if err := s.store.CreateClusterConfig(ctx, cfg); err != nil {
 			log.Error().Err(err).
 				Str("rule_id", rule.ID.String()).

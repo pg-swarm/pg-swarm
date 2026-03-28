@@ -143,13 +143,13 @@ function emptySpec() {
     resources: { cpu_request: '250m', cpu_limit: '1000m', memory_request: '512Mi', memory_limit: '1Gi' },
     pg_params: { ...DEFAULT_PG_PARAMS },
     hba_rules: [...DEFAULT_HBA_RULES],
-    failover: { enabled: true, health_check_interval_seconds: 5 },
+    sentinel: { enabled: true, health_check_interval_seconds: 5 },
     backup: null,
   };
 }
 
 export default function Profiles() {
-  const { profiles, postgresVersions, postgresVariants, clusters, storageTiers, recoveryRuleSets, backupStores, refresh } = useData();
+  const { profiles, postgresVersions, postgresVariants, clusters, storageTiers, eventRuleSets, backupStores, refresh } = useData();
   const toast = useToast();
 
   useEffect(() => { document.title = 'Profiles - PG-Swarm'; }, []);
@@ -186,7 +186,7 @@ export default function Profiles() {
       id: profile.id,
       name: profile.name,
       description: profile.description,
-      recovery_rule_set_id: profile.recovery_rule_set_id || null,
+      event_rule_set_id: profile.event_rule_set_id || null,
       spec: merged,
       originalSpec: JSON.parse(JSON.stringify(merged)),
       isNew: false,
@@ -203,7 +203,7 @@ export default function Profiles() {
       name: editing.name,
       description: editing.description,
       config: editing.spec,
-      recovery_rule_set_id: editing.recovery_rule_set_id || null,
+      event_rule_set_id: editing.event_rule_set_id || null,
     };
     try {
       if (editing.isNew) {
@@ -257,7 +257,7 @@ export default function Profiles() {
   }
 
   if (editing) {
-    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} recoveryRuleSets={recoveryRuleSets} backupStores={backupStores} />;
+    return <ProfileForm state={editing} setState={setEditing} onSave={save} onCancel={() => setEditing(null)} postgresVersions={postgresVersions} postgresVariants={postgresVariants} storageTiers={storageTiers} eventRuleSets={eventRuleSets} backupStores={backupStores} />;
   }
 
   return (
@@ -319,12 +319,12 @@ export default function Profiles() {
                   {spec.replicas > 1
                     ? <span className="tag">{spec.replicas} replicas</span>
                     : <span className="tag">standalone</span>}
-                  {spec.failover?.enabled && <span className="tag">failover</span>}
+                  {spec.sentinel?.enabled && <span className="tag">failover</span>}
                   {spec.archive?.mode && <span className="tag">archive:{spec.archive.mode}</span>}
                   {Object.keys(spec.pg_params || {}).length > 0 && <span className="tag">{Object.keys(spec.pg_params).length} pg params</span>}
                   {(spec.hba_rules || []).length > 0 && <span className="tag">{spec.hba_rules.length} hba rules</span>}
-                  {p.recovery_rule_set_id && (() => {
-                    const rs = recoveryRuleSets.find(r => r.id === p.recovery_rule_set_id);
+                  {p.event_rule_set_id && (() => {
+                    const rs = eventRuleSets.find(r => r.id === p.event_rule_set_id);
                     return rs ? <span className="tag">recovery: {rs.name}</span> : null;
                   })()}
                 </div>
@@ -599,7 +599,7 @@ function cronToText(expr) {
 
 // ── Profile Form ────────────────────────────────────────────────────────────
 
-function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, recoveryRuleSets, backupStores }) {
+function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, postgresVariants, storageTiers, eventRuleSets, backupStores }) {
   const spec = state.spec;
   const [activeTab, setActiveTab] = useState('general');
   const [showConfirm, setShowConfirm] = useState(false);
@@ -783,16 +783,16 @@ function ProfileForm({ state, setState, onSave, onCancel, postgresVersions, post
               <div className="form-row">
                 <label>Failover</label>
                 <label className="toggle">
-                  <input type="checkbox" checked={spec.failover?.enabled || false} onChange={e => setSpec(s => ({ ...s, failover: { ...s.failover, enabled: e.target.checked } }))} />
+                  <input type="checkbox" checked={spec.sentinel?.enabled || false} onChange={e => setSpec(s => ({ ...s, sentinel: { ...s.sentinel, enabled: e.target.checked } }))} />
                   <span>Enabled</span>
                 </label>
               </div>
               <div className="form-row">
                 <label>Recovery RuleSet</label>
-                <select className="input" value={state.recovery_rule_set_id || ''} onChange={e => setState(prev => ({ ...prev, recovery_rule_set_id: e.target.value || null }))}>
+                <select className="input" value={state.event_rule_set_id || ''} onChange={e => setState(prev => ({ ...prev, event_rule_set_id: e.target.value || null }))}>
                   <option value="">None</option>
-                  {(recoveryRuleSets || []).map(rs => (
-                    <option key={rs.id} value={rs.id}>{rs.name} ({rs.rules?.length || 0} rules)</option>
+                  {(eventRuleSets || []).map(rs => (
+                    <option key={rs.id} value={rs.id}>{rs.name}</option>
                   ))}
                 </select>
               </div>
@@ -1076,8 +1076,8 @@ function computeSpecChanges(oldSpec, newSpec) {
   add('resources.memory_limit', oldSpec.resources?.memory_limit, newSpec.resources?.memory_limit);
 
   // Failover
-  add('failover.enabled', oldSpec.failover?.enabled, newSpec.failover?.enabled);
-  add('failover.health_check_interval_seconds', oldSpec.failover?.health_check_interval_seconds, newSpec.failover?.health_check_interval_seconds);
+  add('failover.enabled', oldSpec.sentinel?.enabled, newSpec.sentinel?.enabled);
+  add('failover.health_check_interval_seconds', oldSpec.sentinel?.health_check_interval_seconds, newSpec.sentinel?.health_check_interval_seconds);
 
   // PG Params
   const allKeys = new Set([...Object.keys(oldSpec.pg_params || {}), ...Object.keys(newSpec.pg_params || {})]);
@@ -1369,7 +1369,7 @@ function ConfirmReport({ state, spec, changedParams, onConfirm, onCancel, saving
                 <div className="report-grid">
                   <ReportRow label="Replicas" value={spec.replicas} />
                   <ReportRow label="PostgreSQL" value={`${spec.postgres.version} ${spec.postgres.variant || 'alpine'}${spec.postgres.registry ? ` (registry: ${spec.postgres.registry})` : ''}`} />
-                  <ReportRow label="Failover" value={spec.failover?.enabled ? 'Enabled' : 'Disabled'} />
+                  <ReportRow label="Sentinel" value={spec.sentinel?.enabled ? 'Enabled' : 'Disabled'} />
                 </div>
               </div>
 

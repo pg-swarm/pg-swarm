@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -36,7 +37,7 @@ func main() {
 		IdentitySecretName:      getEnv("IDENTITY_SECRET_NAME", "pg-swarm-satellite-identity"),
 		IdentitySecretNamespace: getEnv("IDENTITY_SECRET_NAMESPACE", "pgswarm-system"),
 		DeployNamespace:         getEnv("DEPLOY_NAMESPACE", "default"),
-		DefaultFailoverImage:    getEnv("DEFAULT_FAILOVER_IMAGE", "ghcr.io/pg-swarm/pg-swarm-failover:latest"),
+		DefaultSentinelImage:    getEnv("DEFAULT_SENTINEL_IMAGE", "ghcr.io/pg-swarm/pg-swarm-sentinel:latest"),
 		SidecarListenAddr:       getEnv("SIDECAR_LISTEN_ADDR", ":9091"),
 	}
 
@@ -50,6 +51,25 @@ func main() {
 	defer cancel()
 
 	log.Trace().Msg("signal context created")
+
+	// Start a minimal HTTP health server for K8s probes (no logging).
+	healthAddr := getEnv("HEALTH_ADDR", ":8081")
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		})
+		srv := &http.Server{Addr: healthAddr, Handler: mux}
+		go func() {
+			<-ctx.Done()
+			_ = srv.Close()
+		}()
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error().Err(err).Str("addr", healthAddr).Msg("health server failed")
+		}
+	}()
+	log.Info().Str("addr", healthAddr).Msg("health server started")
 
 	a := agent.New(cfg)
 	if err := a.Run(ctx); err != nil {

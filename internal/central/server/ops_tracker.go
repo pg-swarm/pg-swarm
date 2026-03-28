@@ -17,15 +17,19 @@ type SwitchoverStep struct {
 
 // SwitchoverOp tracks the state of an in-flight switchover operation.
 type SwitchoverOp struct {
-	OperationID string                    `json:"operation_id"`
-	ClusterName string                    `json:"cluster_name"`
-	PrimaryPod  string                    `json:"primary_pod"`
-	TargetPod   string                    `json:"target_pod"`
-	Done        bool                      `json:"done"`
-	Success     bool                      `json:"success"`
-	Error       string                    `json:"error,omitempty"`
-	Steps       map[int32]*SwitchoverStep `json:"steps"`
-	startedAt   time.Time
+	OperationID    string                    `json:"operation_id"`
+	ClusterName    string                    `json:"cluster_name"`
+	PrimaryPod     string                    `json:"primary_pod"`
+	TargetPod      string                    `json:"target_pod"`
+	Done           bool                      `json:"done"`
+	Success        bool                      `json:"success"`
+	Error          string                    `json:"error,omitempty"`
+	Steps          map[int32]*SwitchoverStep `json:"steps"`
+	Interactive    bool                      `json:"interactive,omitempty"`
+	WaitingForUser bool                      `json:"waiting_for_user,omitempty"`
+	CurrentStep    int32                     `json:"current_step,omitempty"`
+	SatelliteID    string                    `json:"satellite_id,omitempty"`
+	startedAt      time.Time
 }
 
 // OpsTracker manages in-memory state for active switchover operations.
@@ -44,7 +48,7 @@ func NewOpsTracker() *OpsTracker {
 }
 
 // Start registers a new switchover operation.
-func (t *OpsTracker) Start(operationID, clusterName, primaryPod, targetPod string) {
+func (t *OpsTracker) Start(operationID, clusterName, primaryPod, targetPod, satelliteID string, interactive bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.ops[operationID] = &SwitchoverOp{
@@ -52,6 +56,8 @@ func (t *OpsTracker) Start(operationID, clusterName, primaryPod, targetPod strin
 		ClusterName: clusterName,
 		PrimaryPod:  primaryPod,
 		TargetPod:   targetPod,
+		SatelliteID: satelliteID,
+		Interactive: interactive,
 		Steps:       make(map[int32]*SwitchoverStep),
 		startedAt:   time.Now(),
 	}
@@ -84,6 +90,36 @@ func (t *OpsTracker) SetPrimaryPod(operationID, podName string) {
 	}
 }
 
+// SetWaitingForUser marks the operation as waiting for user input on the given step.
+func (t *OpsTracker) SetWaitingForUser(operationID string, step int32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if op, ok := t.ops[operationID]; ok {
+		op.WaitingForUser = true
+		op.CurrentStep = step
+	}
+}
+
+// ClearWaitingForUser clears the waiting-for-user flag (user clicked Continue or Abort).
+func (t *OpsTracker) ClearWaitingForUser(operationID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if op, ok := t.ops[operationID]; ok {
+		op.WaitingForUser = false
+	}
+}
+
+// GetOp returns a copy of the operation with the given ID.
+func (t *OpsTracker) GetOp(operationID string) (SwitchoverOp, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	op, ok := t.ops[operationID]
+	if !ok {
+		return SwitchoverOp{}, false
+	}
+	return *op, true
+}
+
 // Complete marks a switchover operation as finished.
 func (t *OpsTracker) Complete(operationID string, success bool, errMsg string) {
 	t.mu.Lock()
@@ -95,6 +131,7 @@ func (t *OpsTracker) Complete(operationID string, success bool, errMsg string) {
 	op.Done = true
 	op.Success = success
 	op.Error = errMsg
+	op.WaitingForUser = false
 }
 
 // GetActiveOps returns a snapshot of all tracked operations.

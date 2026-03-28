@@ -27,6 +27,13 @@ type Server struct {
 	manager        *SidecarStreamManager
 	validateToken  TokenValidator
 	server         *grpc.Server
+	onSidecarEvent func(*pgswarmv1.Event) // forwards sidecar events to satellite EventBus
+}
+
+// SetOnSidecarEvent sets the callback for sidecar events received via the
+// event path. The satellite agent wires this to its EventBus.Publish.
+func (s *Server) SetOnSidecarEvent(fn func(*pgswarmv1.Event)) {
+	s.onSidecarEvent = fn
 }
 
 // NewServer creates a sidecar gRPC server.
@@ -112,6 +119,19 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[pgswarmv1.SidecarMessag
 				}
 			case *pgswarmv1.SidecarMessage_CommandResult:
 				sidecarStream.deliverResult(payload.CommandResult)
+			case *pgswarmv1.SidecarMessage_Event:
+				evt := payload.Event
+				log.Debug().
+					Str("pod", id.PodName).
+					Str("event_type", evt.GetType()).
+					Str("operation_id", evt.GetOperationId()).
+					Msg("sidecar event received")
+				// Route event results to pending command channels
+				sidecarStream.DeliverEventResult(evt)
+				// Forward sidecar events to the satellite's EventBus if wired
+				if s.onSidecarEvent != nil {
+					s.onSidecarEvent(evt)
+				}
 			}
 		}
 	}()

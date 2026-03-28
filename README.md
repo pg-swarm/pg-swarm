@@ -5,7 +5,7 @@
 
 Centralized management system for PostgreSQL High Availability clusters deployed across up to 500 edge Kubernetes clusters.
 
-A cloud-hosted **Central** control plane handles satellite registration, configuration distribution, and fleet-wide health monitoring. A lightweight **Satellite** agent runs on each edge cluster as a Kubernetes operator — constructing PG cluster manifests from JSON configs, performing health checks, and reporting metrics. A **Failover Sidecar** runs alongside each PG pod, managing leader election via Kubernetes Leases and performing automatic promotion, fencing, and demotion — with no central round-trip required.
+A cloud-hosted **Central** control plane handles satellite registration, configuration distribution, and fleet-wide health monitoring. A lightweight **Satellite** agent runs on each edge cluster as a Kubernetes operator — constructing PG cluster manifests from JSON configs, performing health checks, and reporting metrics. A **Sentinel Sidecar** runs alongside each PG pod, managing leader election via Kubernetes Leases and performing automatic promotion, fencing, and demotion — with no central round-trip required.
 
 No CRDs, no external operator frameworks. pg-swarm builds StatefulSets, Services, ConfigMaps, Secrets, and RBAC resources from scratch.
 
@@ -51,7 +51,7 @@ Provide a single pane of glass for managing hundreds of PostgreSQL HA clusters a
           | +--+ +--+ +--+|   |               |    |               |
           |  K8s Edge      |   |  K8s Edge     |    |  K8s Edge     |
           +----------------+   +---------------+    +---------------+
-                 FS = Failover Sidecar, BS = Backup Sidecar, PG = postgres
+                 FS = Sentinel Sidecar, BS = Backup Sidecar, PG = postgres
 ```
 
 ---
@@ -91,22 +91,22 @@ A single Go binary deployed per edge Kubernetes cluster. Maintains a persistent 
   | RO Service | `{name}-ro` | Routes to replicas via `pg-swarm.io/role=replica` selector |
   | ConfigMap | `{name}-config` | postgresql.conf + pg_hba.conf |
   | Secret | `{name}-secret` | Superuser, replication, and app DB passwords (create-only) |
-  | ServiceAccount + Role + RoleBinding | `{name}-failover` | RBAC for the failover sidecar |
+  | ServiceAccount + Role + RoleBinding | `{name}-failover` | RBAC for the sentinel sidecar |
 
-- **`internal/satellite/sidecar/`** — gRPC server for bidirectional streaming with failover sidecars (identity, heartbeat, command dispatch)
+- **`internal/satellite/sidecar/`** — gRPC server for bidirectional streaming with sentinel sidecars (identity, heartbeat, command dispatch)
 - **`internal/satellite/logcapture/`** — Log capture hook for zerolog, forwards entries to central via gRPC stream
 - **`internal/satellite/health/`** — 10-second collection loop per cluster: `pg_isready`, replication lag (bytes + seconds), connections, disk usage, WAL stats, per-database sizes and cache hit ratios, table stats, slow queries (`pg_stat_statements`)
 - **`internal/satellite/health/switchover.go`** — Satellite-controlled 9-step switchover orchestration with progress tracking: verify target, discover primary, check replica status, fence primary (with drain), checkpoint, transfer lease, promote, label pods, renew lease. WebSocket progress broadcasting via ops tracker.
 
-### Failover Sidecar (`cmd/failover-sidecar`)
+### Sentinel Sidecar (`cmd/sentinel-sidecar`)
 
 Runs as a container alongside each postgres pod in the StatefulSet. Operates autonomously — no dependency on the satellite or central for automatic failover.
 
-- **`internal/failover/monitor.go`** — Tick loop (1s default):
+- **`internal/sentinel/monitor.go`** — Tick loop (1s default):
   - **Primary path**: Acquire/renew Kubernetes Coordination Lease, label pod, detect split-brain (fence + demote)
   - **Replica path**: Label pod, monitor WAL receiver health, check primary reachability (TCP connect to RW service), detect timeline divergence, trigger `pg_rewind` / re-basebackup for recovery, attempt promotion if leader lease expires
-- **`internal/failover/logwatcher.go`** — Real-time PG log monitoring via K8s log API. 40+ recovery patterns across 9 categories (data corruption, OOM, WAL issues, replication failures, etc.). Action types: restart, rewind, rebasebackup, event, exec. Includes cooldown, deduplication, and action mutex.
-- **`internal/failover/connector.go`** — Bidirectional gRPC streaming to satellite. Persistent connection with exponential backoff. Command protocol: fence, checkpoint, promote, unfence, status.
+- **`internal/sentinel/logwatcher.go`** — Real-time PG log monitoring via K8s log API. 40+ recovery patterns across 9 categories (data corruption, OOM, WAL issues, replication failures, etc.). Action types: restart, rewind, rebasebackup, event, exec. Includes cooldown, deduplication, and action mutex.
+- **`internal/sentinel/connector.go`** — Bidirectional gRPC streaming to satellite. Persistent connection with exponential backoff. Command protocol: fence, checkpoint, promote, unfence, status.
 - **`internal/shared/pgfence/`** — SQL fencing (`ALTER SYSTEM SET default_transaction_read_only`, reload, kill client connections) and unfencing. `FencePrimaryWithOpts` supports configurable drain timeout. Idempotent and shared between sidecar and switchover handler.
 
 ### Backup Sidecar (`cmd/backup-sidecar`)
@@ -169,7 +169,7 @@ React 19 SPA built with Vite and JSX, embedded into the central binary via Go's 
 - Rich health monitoring: replication lag, connections, disk, WAL stats, per-database cache hit ratios, table stats, slow queries (`pg_stat_statements`)
 - Backup sidecar: role-aware (primary/replica), WAL archiving via HTTP, scheduled base/incremental/logical backups, SQLite metadata, retention
 - Backup profiles with central CRUD, attach/detach to cluster profiles, backup inventory browsing, restore operations
-- Sidecar streaming: bidirectional gRPC between failover sidecars and satellite for command dispatch (fence, checkpoint, promote, unfence, status)
+- Sidecar streaming: bidirectional gRPC between sentinel sidecars and satellite for command dispatch (fence, checkpoint, promote, unfence, status)
 - Log-based recovery: real-time PG log monitoring with 40+ recovery patterns in 9 categories, configurable actions (restart, rewind, rebasebackup, event, exec)
 - Recovery rule set management: central CRUD with dashboard editor, pattern sandbox
 - Satellite log streaming: real-time log forwarding to central with SSE fan-out, remote log level control
@@ -227,7 +227,7 @@ make k8s-status                # Show all pgswarm-system resources
 
 | Target | Description |
 |--------|-------------|
-| `make build` | Compile central, satellite, failover-sidecar, backup-sidecar binaries |
+| `make build` | Compile central, satellite, sentinel-sidecar, backup-sidecar binaries |
 | `make test` | Run unit tests |
 | `make test-integration` | Integration tests against minikube (requires real cluster) |
 | `make manifests` | Regenerate operator golden-file test YAMLs |
@@ -256,9 +256,9 @@ make k8s-status                # Show all pgswarm-system resources
 | `CENTRAL_ADDR` | `localhost:9090` | Central gRPC address |
 | `K8S_CLUSTER_NAME` | *(required)* | Kubernetes cluster identifier |
 | `REGION` | `""` | Geographic region label |
-| `DEFAULT_FAILOVER_IMAGE` | `ghcr.io/pg-swarm/pg-swarm-failover:latest` | Failover sidecar image |
+| `DEFAULT_SENTINEL_IMAGE` | `ghcr.io/pg-swarm/pg-swarm-sentinel:latest` | Sentinel sidecar image |
 
-### Failover Sidecar
+### Sentinel Sidecar
 
 | Environment Variable | Source | Description |
 |---------------------|--------|-------------|
@@ -295,7 +295,7 @@ pg-swarm/
 ├── cmd/
 │   ├── central/main.go              # Central control plane
 │   ├── satellite/main.go            # Satellite agent
-│   ├── failover-sidecar/main.go     # Failover sidecar
+│   ├── sentinel-sidecar/main.go     # Sentinel sidecar
 │   └── backup-sidecar/main.go       # Backup sidecar
 ├── api/
 │   ├── proto/v1/                    # Protobuf definitions

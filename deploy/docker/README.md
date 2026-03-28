@@ -8,7 +8,7 @@ Local development and single-host deployment using Docker and Docker Compose.
 |------|-------------|
 | `Dockerfile.central` | Multi-stage build for the central control plane |
 | `Dockerfile.satellite` | Multi-stage build for the satellite agent |
-| `Dockerfile.failover-sidecar` | Multi-stage build for the failover sidecar |
+| `Dockerfile.sentinel-sidecar` | Multi-stage build for the sentinel sidecar |
 | `docker-compose.yml` | Full stack: PostgreSQL + central + satellite |
 
 ## Dockerfiles

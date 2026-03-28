@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/pg-swarm/pg-swarm/internal/satellite/eventbus"
 	"github.com/rs/zerolog/log"
 )
 
@@ -69,6 +70,17 @@ func (s *RESTServer) approveSatellite(c *fiber.Ctx) error {
 		s.streams.Remove(*replacedID)
 	}
 	auditLog(c, "satellite.approve", "satellite", id.String(), body.Name, "")
+
+	// Look up satellite for event data
+	if sat, err := s.store.GetSatellite(c.Context(), id); err == nil {
+		emitCentralEvent(c.Context(), s.store, "satellite.approved", id, "info", map[string]string{
+			"satellite_id": id.String(),
+			"hostname":     sat.Hostname,
+			"k8s_cluster":  sat.K8sClusterName,
+			"name":         body.Name,
+		})
+	}
+
 	return c.JSON(result)
 }
 
@@ -97,7 +109,9 @@ func (s *RESTServer) refreshStorageClasses(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "stream manager not available"})
 	}
 
-	if err := s.streams.RequestStorageClasses(id); err != nil {
+	evt := eventbus.NewEvent("satellite.storage_classes_requested", "", "", "central")
+	eventbus.WithData(evt, "satellite_id", id.String())
+	if err := s.streams.PushEvent(id, evt); err != nil {
 		log.Error().Err(err).Str("satellite_id", id.String()).Msg("failed to request storage classes")
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -174,7 +188,10 @@ func (s *RESTServer) setSatelliteLogLevel(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "stream manager not available"})
 	}
 
-	if err := s.streams.PushSetLogLevel(id, body.Level); err != nil {
+	evt := eventbus.NewEvent("satellite.set_log_level", "", "", "central")
+	eventbus.WithData(evt, "satellite_id", id.String())
+	eventbus.WithData(evt, "level", body.Level)
+	if err := s.streams.PushEvent(id, evt); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 

@@ -170,8 +170,17 @@ func (h *WSHub) fetchState() map[string]interface{} {
 	if v, err := s.ListStorageTiers(ctx); err == nil {
 		state["storageTiers"] = v
 	}
-	if v, err := s.ListRecoveryRuleSets(ctx); err == nil {
-		state["recoveryRuleSets"] = v
+	if v, err := s.ListEventRuleSets(ctx); err == nil {
+		state["eventRuleSets"] = v
+	}
+	if v, err := s.ListEventRules(ctx); err == nil {
+		state["eventRules"] = v
+	}
+	if v, err := s.ListEventActions(ctx); err == nil {
+		state["eventActions"] = v
+	}
+	if v, err := s.ListEventHandlers(ctx); err == nil {
+		state["eventHandlers"] = v
 	}
 	if v, err := s.ListBackupStores(ctx); err == nil {
 		for _, bs := range v {

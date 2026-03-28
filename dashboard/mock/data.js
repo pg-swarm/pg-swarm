@@ -115,7 +115,7 @@ export const profiles = [
     id: PROFILE_IDS.prod,
     name: 'production-ha',
     locked: false,
-    recovery_rule_set_id: 'rs-prod-strict',
+    event_rule_set_id: 'rs-prod-strict',
     config: JSON.stringify({
       postgres: { version: '17', image: 'postgres:17-alpine' },
       storage: { size: '50Gi', storage_class: 'tier:fast' },
@@ -133,7 +133,7 @@ export const profiles = [
     id: PROFILE_IDS.staging,
     name: 'staging',
     locked: false,
-    recovery_rule_set_id: 'rs-default',
+    event_rule_set_id: 'rs-default',
     config: JSON.stringify({
       postgres: { version: '17', image: 'postgres:17-alpine' },
       storage: { size: '20Gi' },
@@ -849,78 +849,117 @@ export const pgParamClassifications = [
   { name: 'wal_sender_timeout', restart_mode: 'reload', description: 'Maximum time for WAL sender to wait for replication', pg_context: 'sighup', created_at: ago(86400 * 30), updated_at: ago(86400 * 30) },
 ];
 
-// --- Recovery Rule Sets ---------------------------------------------------
+// --- Event Rules Framework -----------------------------------------------
 
-const BUILTIN_RULES = [
-  { name: 'stale-wal-recovery', pattern: 'invalid record length at .* expected at least \\d+, got 0', severity: 'critical', action: 'restart', cooldown_seconds: 60, category: 'WAL & Checkpoint', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'checkpoint-missing', pattern: 'could not locate a valid checkpoint record', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 120, category: 'WAL & Checkpoint', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'wal-read-error', pattern: 'could not read WAL at .* invalid record length', severity: 'critical', action: 'restart', cooldown_seconds: 60, category: 'WAL & Checkpoint', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'wal-size-mismatch', pattern: 'WAL file .* has size \\d+, should be \\d+', severity: 'critical', action: 'restart', cooldown_seconds: 60, category: 'WAL & Checkpoint', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'wal-prevlink-corrupt', pattern: 'record with incorrect prev-link', severity: 'critical', action: 'restart', cooldown_seconds: 60, category: 'WAL & Checkpoint', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'timeline-not-in-history', pattern: 'requested starting point .* is not in this server.s history', severity: 'critical', action: 'rewind', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'ahead-of-flush', pattern: 'requested starting point .* is ahead of the WAL flush position', severity: 'critical', action: 'rewind', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'timeline-not-child', pattern: 'requested timeline \\d+ is not a child of this server.s history', severity: 'critical', action: 'rewind', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'timeline-fork', pattern: 'new timeline \\d+ is not a child of database system timeline \\d+', severity: 'critical', action: 'rewind', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'wal-stream-timeline', pattern: 'could not receive data from WAL stream:.*timeline', severity: 'critical', action: 'rewind', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'page-corruption', pattern: 'invalid page in block \\d+ of relation', severity: 'critical', action: 'event', cooldown_seconds: 300, category: 'Corruption', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'read-block-error', pattern: 'could not read block \\d+ in file', severity: 'critical', action: 'event', cooldown_seconds: 300, category: 'Corruption', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'disk-full', pattern: 'could not write to file.*No space left on device', severity: 'critical', action: 'event', cooldown_seconds: 60, category: 'Corruption', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'fsync-error', pattern: 'could not fsync file', severity: 'critical', action: 'event', cooldown_seconds: 60, category: 'Corruption', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'too-many-clients', pattern: 'FATAL:.*sorry, too many clients already', severity: 'error', action: 'event', cooldown_seconds: 30, category: 'Connections', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'reserved-slots-full', pattern: 'FATAL:.*remaining connection slots are reserved', severity: 'error', action: 'event', cooldown_seconds: 30, category: 'Connections', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'out-of-memory', pattern: 'ERROR:.*out of memory', severity: 'error', action: 'event', cooldown_seconds: 30, category: 'Connections', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'shared-memory', pattern: 'out of shared memory', severity: 'error', action: 'event', cooldown_seconds: 60, category: 'Connections', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'slot-invalidated', pattern: 'replication slot .* has been invalidated', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 300, category: 'Replication Slots', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'wal-removed', pattern: 'requested WAL segment .* has already been removed', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 300, category: 'Replication Slots', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'slot-missing', pattern: 'replication slot .* does not exist', severity: 'warning', action: 'event', cooldown_seconds: 120, category: 'Replication Slots', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'walsender-timeout', pattern: 'terminating walsender process due to replication timeout', severity: 'warning', action: 'event', cooldown_seconds: 60, category: 'Replication Slots', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'recovery-conflict', pattern: 'canceling statement due to conflict with recovery', severity: 'info', action: 'event', cooldown_seconds: 30, category: 'Replication Slots', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'auth-failure', pattern: 'FATAL:.*password authentication failed for user', severity: 'warning', action: 'event', cooldown_seconds: 30, category: 'Authentication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'hba-rejection', pattern: 'FATAL:.*no pg_hba.conf entry for', severity: 'warning', action: 'event', cooldown_seconds: 30, category: 'Authentication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'stale-backup-label', pattern: 'FATAL:.*could not open file.*backup_label', severity: 'error', action: 'restart', cooldown_seconds: 60, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'filenode-map-missing', pattern: 'could not open file.*pg_filenode\\.map', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 120, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'wal-level-minimal', pattern: 'WAL was generated with .wal_level=minimal., cannot continue recovering', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 120, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'wal-dir-missing', pattern: 'FATAL:.*could not open directory.*pg_wal', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 120, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'version-mismatch', pattern: 'database files are incompatible with server', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 300, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'catalog-corruption', pattern: 'cache lookup failed for (relation|type|function|operator)', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 300, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'tablespace-missing', pattern: 'could not open tablespace directory', severity: 'critical', action: 'rebasebackup', cooldown_seconds: 120, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'recovery-complete', pattern: 'consistent recovery state reached', severity: 'info', action: 'event', cooldown_seconds: 0, category: 'Recovery', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'streaming-started', pattern: 'started streaming WAL from primary', severity: 'info', action: 'event', cooldown_seconds: 0, category: 'Streaming', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'primary-unreachable', pattern: 'FATAL:.*could not connect to the primary server', severity: 'warning', action: 'event', cooldown_seconds: 30, category: 'Streaming', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'replication-terminated', pattern: 'replication terminated by primary server', severity: 'warning', action: 'event', cooldown_seconds: 60, category: 'Streaming', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'max-walsenders', pattern: 'FATAL:.*number of requested standby connections exceeds max_wal_senders', severity: 'error', action: 'event', cooldown_seconds: 120, category: 'Streaming', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
-  { name: 'archive-failed', pattern: 'archive command failed with exit code', severity: 'error', action: 'event', cooldown_seconds: 60, category: 'Archive', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+export const actionTypes = [
+  { name: 'restart', description: 'Restart the PostgreSQL process via the sentinel sidecar',   template: null, variables: [{ name: 'timeout_seconds', description: 'Seconds to wait before forcing kill (default 30)' }] },
+  { name: 'reload',  description: 'Reload PostgreSQL configuration without restart (pg_reload_conf)', template: null, variables: [] },
+  { name: 'rebuild', description: 'Rebuild the instance from primary using pg_basebackup — destructive', template: null, variables: [] },
+  { name: 'reboot',  description: 'Restart the container / pod', template: null, variables: [{ name: 'force', description: 'Force-kill the pod rather than graceful shutdown (default false)' }] },
+  { name: 'rewind',  description: 'Re-synchronize standby timeline using pg_rewind', template: 'pg_rewind --target-pgdata=$PGDATA --source-server="host=$PRIMARY_HOST port=$PRIMARY_PORT user=$REPLICATION_USER"', variables: [{ name: 'PRIMARY_HOST', description: 'Hostname of the primary' }, { name: 'PRIMARY_PORT', description: 'Port of the primary (default 5432)' }, { name: 'REPLICATION_USER', description: 'Replication user for pg_rewind connection' }] },
+  { name: 'exec',    description: 'Run a custom command inside the postgres container', template: null, variables: [{ name: 'command', description: 'Shell command to execute' }] },
 ];
 
-export const recoveryRuleSets = [
+// Global detection rules
+export const eventRules = [
+  { id: 'er-001', name: 'stale-wal-recovery',     pattern: 'invalid record length at .* expected at least \\d+, got 0',              severity: 'critical', cooldown_seconds: 60,  category: 'WAL & Checkpoint',     enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-002', name: 'checkpoint-missing',     pattern: 'could not locate a valid checkpoint record',                               severity: 'critical', cooldown_seconds: 120, category: 'WAL & Checkpoint',     enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-003', name: 'wal-read-error',         pattern: 'could not read WAL at .* invalid record length',                          severity: 'critical', cooldown_seconds: 60,  category: 'WAL & Checkpoint',     enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-004', name: 'wal-size-mismatch',      pattern: 'WAL file .* has size \\d+, should be \\d+',                              severity: 'critical', cooldown_seconds: 60,  category: 'WAL & Checkpoint',     enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-005', name: 'wal-prevlink-corrupt',   pattern: 'record with incorrect prev-link',                                         severity: 'critical', cooldown_seconds: 60,  category: 'WAL & Checkpoint',     enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-006', name: 'timeline-not-in-history',pattern: 'requested starting point .* is not in this server.s history',            severity: 'critical', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-007', name: 'ahead-of-flush',         pattern: 'requested starting point .* is ahead of the WAL flush position',         severity: 'critical', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-008', name: 'timeline-not-child',     pattern: 'requested timeline \\d+ is not a child of this server.s history',        severity: 'critical', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-009', name: 'timeline-fork',          pattern: 'new timeline \\d+ is not a child of database system timeline \\d+',      severity: 'critical', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-010', name: 'wal-stream-timeline',    pattern: 'could not receive data from WAL stream:.*timeline',                       severity: 'critical', cooldown_seconds: 120, category: 'Timeline & Replication', enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-011', name: 'page-corruption',        pattern: 'invalid page in block \\d+ of relation',                                 severity: 'critical', cooldown_seconds: 300, category: 'Corruption',             enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-012', name: 'read-block-error',       pattern: 'could not read block \\d+ in file',                                      severity: 'critical', cooldown_seconds: 300, category: 'Corruption',             enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-013', name: 'disk-full',              pattern: 'could not write to file.*No space left on device',                        severity: 'critical', cooldown_seconds: 60,  category: 'Corruption',             enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-014', name: 'fsync-error',            pattern: 'could not fsync file',                                                    severity: 'critical', cooldown_seconds: 60,  category: 'Corruption',             enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-015', name: 'too-many-clients',       pattern: 'FATAL:.*sorry, too many clients already',                                severity: 'error',    cooldown_seconds: 30,  category: 'Connections',            enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-016', name: 'reserved-slots-full',    pattern: 'FATAL:.*remaining connection slots are reserved',                         severity: 'error',    cooldown_seconds: 30,  category: 'Connections',            enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-017', name: 'out-of-memory',          pattern: 'ERROR:.*out of memory',                                                   severity: 'error',    cooldown_seconds: 30,  category: 'Connections',            enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-018', name: 'shared-memory',          pattern: 'out of shared memory',                                                    severity: 'error',    cooldown_seconds: 60,  category: 'Connections',            enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-019', name: 'slot-invalidated',       pattern: 'replication slot .* has been invalidated',                               severity: 'critical', cooldown_seconds: 300, category: 'Replication Slots',      enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-020', name: 'wal-removed',            pattern: 'requested WAL segment .* has already been removed',                      severity: 'critical', cooldown_seconds: 300, category: 'Replication Slots',      enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-021', name: 'slot-missing',           pattern: 'replication slot .* does not exist',                                     severity: 'warning',  cooldown_seconds: 120, category: 'Replication Slots',      enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-022', name: 'walsender-timeout',      pattern: 'terminating walsender process due to replication timeout',               severity: 'warning',  cooldown_seconds: 60,  category: 'Replication Slots',      enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-023', name: 'recovery-conflict',      pattern: 'canceling statement due to conflict with recovery',                       severity: 'info',     cooldown_seconds: 30,  category: 'Replication Slots',      enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-024', name: 'auth-failure',           pattern: 'FATAL:.*password authentication failed for user',                         severity: 'warning',  cooldown_seconds: 30,  category: 'Authentication',         enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-025', name: 'hba-rejection',          pattern: 'FATAL:.*no pg_hba.conf entry for',                                       severity: 'warning',  cooldown_seconds: 30,  category: 'Authentication',         enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-026', name: 'stale-backup-label',     pattern: 'FATAL:.*could not open file.*backup_label',                              severity: 'error',    cooldown_seconds: 60,  category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-027', name: 'filenode-map-missing',   pattern: 'could not open file.*pg_filenode\\.map',                                 severity: 'critical', cooldown_seconds: 120, category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-028', name: 'wal-level-minimal',      pattern: 'WAL was generated with .wal_level=minimal., cannot continue recovering', severity: 'critical', cooldown_seconds: 120, category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-029', name: 'wal-dir-missing',        pattern: 'FATAL:.*could not open directory.*pg_wal',                               severity: 'critical', cooldown_seconds: 120, category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-030', name: 'version-mismatch',       pattern: 'database files are incompatible with server',                             severity: 'critical', cooldown_seconds: 300, category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-031', name: 'catalog-corruption',     pattern: 'cache lookup failed for (relation|type|function|operator)',               severity: 'critical', cooldown_seconds: 300, category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-032', name: 'tablespace-missing',     pattern: 'could not open tablespace directory',                                     severity: 'critical', cooldown_seconds: 120, category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-033', name: 'recovery-complete',      pattern: 'consistent recovery state reached',                                       severity: 'info',     cooldown_seconds: 0,   category: 'Recovery',               enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-034', name: 'streaming-started',      pattern: 'started streaming WAL from primary',                                      severity: 'info',     cooldown_seconds: 0,   category: 'Streaming',              enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-035', name: 'primary-unreachable',    pattern: 'FATAL:.*could not connect to the primary server',                         severity: 'warning',  cooldown_seconds: 30,  category: 'Streaming',              enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-036', name: 'replication-terminated', pattern: 'replication terminated by primary server',                                severity: 'warning',  cooldown_seconds: 60,  category: 'Streaming',              enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-037', name: 'max-walsenders',         pattern: 'FATAL:.*number of requested standby connections exceeds max_wal_senders', severity: 'error',   cooldown_seconds: 120, category: 'Streaming',              enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-038', name: 'archive-failed',         pattern: 'archive command failed with exit code',                                   severity: 'error',    cooldown_seconds: 60,  category: 'Archive',                enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+  { id: 'er-039', name: 'replication-hba-rejection', pattern: 'FATAL:.*no pg_hba.conf entry for.*replication connection',            severity: 'critical', cooldown_seconds: 30,  category: 'Streaming',              enabled: true, builtin: true, threshold: 1, threshold_window_seconds: 0 },
+];
+
+// Global action library
+export const eventActions = [
+  { id: 'ea-001', name: 'pg-restart', type: 'restart', description: 'Restart the PostgreSQL process via the sentinel sidecar', config: { timeout_seconds: 30 } },
+  { id: 'ea-002', name: 'pg-reload',  type: 'reload',  description: 'Reload PostgreSQL configuration without restart (pg_reload_conf)', config: {} },
+  { id: 'ea-003', name: 'pg-rebuild', type: 'rebuild', description: 'Rebuild the instance from primary — pg_basebackup (destructive)', config: {} },
+  { id: 'ea-004', name: 'pg-reboot',  type: 'reboot',  description: 'Restart the container / pod', config: { force: false } },
+  { id: 'ea-005', name: 'pg-rewind',  type: 'rewind',  description: 'Re-synchronize standby timeline using pg_rewind', config: { PRIMARY_HOST: 'primary', PRIMARY_PORT: '5432', REPLICATION_USER: 'replicator' } },
+];
+
+// Global event handlers (event → action bindings)
+export const eventHandlers = [
+  { id: 'eh-001', event_rule_id: 'er-001', event_action_id: 'ea-001', event_rule_name: 'stale-wal-recovery',      event_action_name: 'pg-restart', enabled: true },
+  { id: 'eh-002', event_rule_id: 'er-003', event_action_id: 'ea-001', event_rule_name: 'wal-read-error',          event_action_name: 'pg-restart', enabled: true },
+  { id: 'eh-003', event_rule_id: 'er-004', event_action_id: 'ea-001', event_rule_name: 'wal-size-mismatch',       event_action_name: 'pg-restart', enabled: true },
+  { id: 'eh-004', event_rule_id: 'er-005', event_action_id: 'ea-001', event_rule_name: 'wal-prevlink-corrupt',    event_action_name: 'pg-restart', enabled: true },
+  { id: 'eh-005', event_rule_id: 'er-026', event_action_id: 'ea-001', event_rule_name: 'stale-backup-label',      event_action_name: 'pg-restart', enabled: true },
+  { id: 'eh-006', event_rule_id: 'er-002', event_action_id: 'ea-003', event_rule_name: 'checkpoint-missing',      event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-007', event_rule_id: 'er-019', event_action_id: 'ea-003', event_rule_name: 'slot-invalidated',        event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-008', event_rule_id: 'er-020', event_action_id: 'ea-003', event_rule_name: 'wal-removed',             event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-009', event_rule_id: 'er-027', event_action_id: 'ea-003', event_rule_name: 'filenode-map-missing',    event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-010', event_rule_id: 'er-028', event_action_id: 'ea-003', event_rule_name: 'wal-level-minimal',       event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-011', event_rule_id: 'er-029', event_action_id: 'ea-003', event_rule_name: 'wal-dir-missing',         event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-012', event_rule_id: 'er-030', event_action_id: 'ea-003', event_rule_name: 'version-mismatch',        event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-013', event_rule_id: 'er-031', event_action_id: 'ea-003', event_rule_name: 'catalog-corruption',      event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-014', event_rule_id: 'er-032', event_action_id: 'ea-003', event_rule_name: 'tablespace-missing',      event_action_name: 'pg-rebuild', enabled: true },
+  { id: 'eh-015', event_rule_id: 'er-006', event_action_id: 'ea-005', event_rule_name: 'timeline-not-in-history', event_action_name: 'pg-rewind',  enabled: true },
+  { id: 'eh-016', event_rule_id: 'er-007', event_action_id: 'ea-005', event_rule_name: 'ahead-of-flush',          event_action_name: 'pg-rewind',  enabled: true },
+  { id: 'eh-017', event_rule_id: 'er-008', event_action_id: 'ea-005', event_rule_name: 'timeline-not-child',      event_action_name: 'pg-rewind',  enabled: true },
+  { id: 'eh-018', event_rule_id: 'er-009', event_action_id: 'ea-005', event_rule_name: 'timeline-fork',           event_action_name: 'pg-rewind',  enabled: true },
+  { id: 'eh-019', event_rule_id: 'er-010', event_action_id: 'ea-005', event_rule_name: 'wal-stream-timeline',     event_action_name: 'pg-rewind',  enabled: true },
+];
+
+// Rule sets (named groups of handlers)
+export const eventRuleSets = [
   {
     id: 'rs-default',
     name: 'Default',
-    description: 'Built-in recovery rules for PostgreSQL HA clusters — all 38 rules enabled',
+    description: 'Built-in rule set — all 19 handlers enabled',
     builtin: true,
-    rules: BUILTIN_RULES.map(r => ({ ...r })),
     created_at: ago(86400 * 60),
     updated_at: ago(86400 * 2),
   },
   {
     id: 'rs-prod-strict',
     name: 'production-strict',
-    description: 'Aggressive auto-recovery: page corruption triggers rebasebackup instead of event-only',
+    description: 'All default handlers plus rebuild on corruption events',
     builtin: false,
-    rules: [
-      ...BUILTIN_RULES.map(r => {
-        if (r.name === 'page-corruption') return { ...r, action: 'rebasebackup', builtin: false };
-        if (r.name === 'read-block-error') return { ...r, action: 'rebasebackup', builtin: false };
-        if (r.name === 'recovery-conflict') return { ...r, enabled: false, builtin: false };
-        return { ...r, builtin: false };
-      }),
-      { name: 'deadlock-alert', pattern: 'deadlock detected', severity: 'warning', action: 'event', cooldown_seconds: 30, category: 'Custom', enabled: true, builtin: false, threshold: 1, threshold_window_seconds: 0 },
-      { name: 'long-lock-wait', pattern: 'process \\d+ still waiting for .* lock on', severity: 'warning', action: 'event', cooldown_seconds: 60, category: 'Custom', enabled: true, builtin: false, threshold: 3, threshold_window_seconds: 120 },
-    ],
     created_at: ago(86400 * 10),
     updated_at: ago(86400),
   },
 ];
+
+// Which handlers belong to each rule set
+export const ruleSetHandlers = {
+  'rs-default':     ['eh-001','eh-002','eh-003','eh-004','eh-005','eh-006','eh-007','eh-008','eh-009','eh-010','eh-011','eh-012','eh-013','eh-014','eh-015','eh-016','eh-017','eh-018','eh-019'],
+  'rs-prod-strict': ['eh-001','eh-002','eh-003','eh-004','eh-005','eh-006','eh-007','eh-008','eh-009','eh-010','eh-011','eh-012','eh-013','eh-014','eh-015','eh-016','eh-017','eh-018','eh-019'],
+};
 
 // --- Satellite logs -------------------------------------------------------
 
