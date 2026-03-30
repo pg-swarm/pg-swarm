@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +117,12 @@ func (s *GRPCServer) handleEvent(ctx context.Context, satID uuid.UUID, evt *pgsw
 				Str("version", data["config_version"]).
 				Msg("config rejected by satellite")
 		}
+
+	case evtType == "backup.status":
+		s.handleBackupStatusEvent(ctx, satID, evt, data)
+
+	case evtType == "restore.status":
+		s.handleRestoreStatusEvent(ctx, satID, evt, data)
 	}
 
 	// 3. Notify dashboard for all events
@@ -319,6 +326,105 @@ func (s *GRPCServer) handleDatabaseEvent(ctx context.Context, satID uuid.UUID, e
 		Str("status", status).
 		Msg("database status from event")
 	_ = errMsg // TODO: update cluster database status in store when wired
+}
+
+// handleBackupStatusEvent persists a backup status report from a sidecar.
+func (s *GRPCServer) handleBackupStatusEvent(ctx context.Context, satID uuid.UUID, evt *pgswarmv1.Event, data map[string]string) {
+	status := data["status"]
+	backupType := data["backup_type"]
+	sizeBytes, _ := strconv.ParseInt(data["size_bytes"], 10, 64)
+	startedAt := time.Now()
+	if evt.GetTimestamp() != nil {
+		startedAt = evt.GetTimestamp().AsTime()
+	}
+
+	bi := &models.BackupInventory{
+		ID:           uuid.New(),
+		SatelliteID:  satID,
+		ClusterName:  evt.GetClusterName(),
+		BackupType:   backupType,
+		Status:       status,
+		StartedAt:    startedAt,
+		SizeBytes:    sizeBytes,
+		BackupPath:   data["backup_path"],
+		PgVersion:    data["pg_version"],
+		WalStartLSN:  data["wal_start_lsn"],
+		WalEndLSN:    data["wal_end_lsn"],
+		ErrorMessage: data["error_message"],
+		CreatedAt:    time.Now(),
+	}
+	if status == "completed" || status == "failed" {
+		now := time.Now()
+		bi.CompletedAt = &now
+	}
+	if dbsJSON := data["databases"]; dbsJSON != "" {
+		var dbs []string
+		if json.Unmarshal([]byte(dbsJSON), &dbs) == nil {
+			bi.Databases = dbs
+		}
+	}
+
+	if err := s.store.CreateBackupInventory(ctx, bi); err != nil {
+		log.Error().Err(err).Str("satellite_id", satID.String()).Str("cluster", evt.GetClusterName()).Msg("failed to store backup inventory")
+	} else {
+		log.Info().Str("satellite_id", satID.String()).Str("cluster", evt.GetClusterName()).
+			Str("type", backupType).Str("status", status).Msg("backup status stored")
+	}
+}
+
+// handleRestoreStatusEvent persists a restore status report from a sidecar.
+func (s *GRPCServer) handleRestoreStatusEvent(ctx context.Context, satID uuid.UUID, evt *pgswarmv1.Event, data map[string]string) {
+	restoreID := data["restore_id"]
+	if restoreID == "" {
+		log.Warn().Str("satellite_id", satID.String()).Msg("restore.status event missing restore_id")
+		return
+	}
+
+	rid, err := uuid.Parse(restoreID)
+	if err != nil {
+		log.Warn().Str("restore_id", restoreID).Msg("restore.status event has invalid restore_id")
+		return
+	}
+
+	ro, err := s.store.GetRestoreOperation(ctx, rid)
+	if err != nil {
+		// Record may not exist if the trigger was fired by an older central version
+		// or the create failed transiently. Upsert a minimal record so the status
+		// is at least visible in the list.
+		log.Warn().Err(err).Str("restore_id", restoreID).Msg("restore operation not found — creating from status event")
+		status := data["status"]
+		now := time.Now()
+		ro = &models.RestoreOperation{
+			ID:             rid,
+			SatelliteID:    satID,
+			ClusterName:    evt.GetClusterName(),
+			RestoreType:    data["restore_type"],
+			TargetDatabase: data["restore_target_database"],
+			Status:         status,
+			ErrorMessage:   data["error_message"],
+			CreatedAt:      now,
+		}
+		if status == "completed" || status == "failed" {
+			ro.CompletedAt = &now
+		}
+		if err := s.store.CreateRestoreOperation(ctx, ro); err != nil {
+			log.Error().Err(err).Str("restore_id", restoreID).Msg("failed to upsert restore operation from status event")
+		}
+		return
+	}
+
+	ro.Status = data["status"]
+	ro.ErrorMessage = data["error_message"]
+	if ro.Status == "completed" || ro.Status == "failed" {
+		now := time.Now()
+		ro.CompletedAt = &now
+	}
+
+	if err := s.store.UpdateRestoreOperation(ctx, ro); err != nil {
+		log.Error().Err(err).Str("restore_id", restoreID).Msg("failed to update restore operation")
+	} else {
+		log.Info().Str("restore_id", restoreID).Str("status", ro.Status).Msg("restore status updated")
+	}
 }
 
 // mapStateString converts a ClusterState proto enum string to the model state.

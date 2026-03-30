@@ -173,6 +173,79 @@ func (c *CentralClient) CreateClusterDatabase(clusterID string, body map[string]
 	return &result, c.postExpect(fmt.Sprintf("/clusters/%s/databases", clusterID), body, http.StatusCreated, &result)
 }
 
+// --- Backup/Restore types ---
+
+type BackupInventoryItem struct {
+	ID          string `json:"id"`
+	ClusterName string `json:"cluster_name"`
+	BackupType  string `json:"backup_type"`
+	Status      string `json:"status"`
+	BackupPath  string `json:"backup_path"`
+	SizeBytes   int64  `json:"size_bytes"`
+	PGVersion   string `json:"pg_version"`
+	ErrorMsg    string `json:"error_message"`
+	StartedAt   string `json:"started_at"`
+}
+
+type TriggerBackupResponse struct {
+	Status      string `json:"status"`
+	BackupType  string `json:"backup_type"`
+	OperationID string `json:"operation_id"`
+}
+
+type TriggerRestoreResponse struct {
+	Status      string `json:"status"`
+	RestoreID   string `json:"restore_id"`
+	OperationID string `json:"operation_id"`
+}
+
+// --- Backup/Restore API methods ---
+
+func (c *CentralClient) ListBackups(clusterID string, limit int) ([]BackupInventoryItem, error) {
+	var result []BackupInventoryItem
+	return result, c.get(fmt.Sprintf("/clusters/%s/backups?limit=%d", clusterID, limit), &result)
+}
+
+func (c *CentralClient) TriggerBackup(clusterID, backupType string) (*TriggerBackupResponse, error) {
+	var result TriggerBackupResponse
+	return &result, c.post(fmt.Sprintf("/clusters/%s/trigger-backup", clusterID),
+		map[string]string{"backup_type": backupType}, &result)
+}
+
+func (c *CentralClient) TriggerRestore(clusterID string, body map[string]interface{}) (*TriggerRestoreResponse, error) {
+	var result TriggerRestoreResponse
+	return &result, c.post(fmt.Sprintf("/clusters/%s/restore", clusterID), body, &result)
+}
+
+type RestoreOperation struct {
+	ID             string `json:"id"`
+	ClusterName    string `json:"cluster_name"`
+	RestoreType    string `json:"restore_type"`
+	Status         string `json:"status"`
+	TargetDatabase string `json:"target_database"`
+	ErrorMessage   string `json:"error_message"`
+}
+
+func (c *CentralClient) ListRestoreOperations(clusterID string) ([]RestoreOperation, error) {
+	var result []RestoreOperation
+	return result, c.get(fmt.Sprintf("/clusters/%s/restores", clusterID), &result)
+}
+
+type BackupStore struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	StoreType string `json:"store_type"`
+}
+
+func (c *CentralClient) CreateBackupStore(body map[string]interface{}) (*BackupStore, error) {
+	var result BackupStore
+	return &result, c.postExpect("/backup-stores", body, http.StatusCreated, &result)
+}
+
+func (c *CentralClient) UpdateCluster(id string, body map[string]interface{}) error {
+	return c.put(fmt.Sprintf("/clusters/%s", id), body)
+}
+
 func (c *CentralClient) IsReady() bool {
 	resp, err := c.HTTPClient.Get(c.BaseURL + "/api/v1/satellites")
 	if err != nil {

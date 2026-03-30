@@ -48,7 +48,7 @@ func buildSentinelRole(cfg *pgswarmv1.ClusterConfig) *rbacv1.Role {
 			{
 				APIGroups: []string{""},
 				Resources: []string{"pods"},
-				Verbs:     []string{"get", "patch"},
+				Verbs:     []string{"get", "list", "patch"},
 			},
 			{
 				APIGroups: []string{""},

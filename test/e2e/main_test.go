@@ -62,6 +62,21 @@ type E2ESuite struct {
 	clusterID   string
 	deployed    bool
 	rowsBefore  int
+
+	// lastBackupPath is set by Test_50 and used by Test_52 to restore.
+	lastBackupPath string
+}
+
+// SetupTest runs before every individual test and inserts a 60-second delay
+// so the cluster has time to stabilise between tests.
+func (s *E2ESuite) SetupTest() {
+	name := s.T().Name()
+	// Skip the delay for the very first test and for setup-phase tests.
+	if name == "TestE2E/Test_01_WaitForSatelliteRegistration" {
+		return
+	}
+	s.T().Log("inter-test stabilisation delay: 60s")
+	time.Sleep(60 * time.Second)
 }
 
 func TestE2E(t *testing.T) {

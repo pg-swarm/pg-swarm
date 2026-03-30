@@ -846,6 +846,27 @@ func buildBackupConfig(st store.Store, enc *crypto.Encryptor, backup *models.Bac
 			}
 		}
 		dest.Sftp = sftp
+
+	case "s3":
+		var cfg models.S3StoreConfig
+		if storeConfig != nil {
+			_ = json.Unmarshal(storeConfig, &cfg)
+		}
+		s3dest := &pgswarmv1.S3Destination{
+			Bucket:         cfg.Bucket,
+			Region:         cfg.Region,
+			PathPrefix:     cfg.PathPrefix,
+			Endpoint:       cfg.Endpoint,
+			ForcePathStyle: cfg.ForcePathStyle,
+		}
+		if plainCreds != nil {
+			var creds models.S3Credentials
+			if json.Unmarshal(plainCreds, &creds) == nil {
+				s3dest.AccessKeyId = creds.AccessKeyID
+				s3dest.SecretAccessKey = creds.SecretAccessKey
+			}
+		}
+		dest.S3 = s3dest
 	}
 
 	bc.Destination = dest
@@ -1021,4 +1042,38 @@ func (s *RESTServer) deleteClusterDatabase(c *fiber.Ctx) error {
 	log.Info().Str("db_id", dbID.String()).Msg("cluster database deleted")
 	auditLog(c, "cluster_database.delete", "cluster_database", dbID.String(), "", "cluster_id="+clusterID.String())
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// setSidecarLogLevel sends a log-level change command to all sentinel sidecars in a cluster.
+func (s *RESTServer) setSidecarLogLevel(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid cluster id"})
+	}
+
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.Level == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "level is required (trace, debug, info, warn, error)"})
+	}
+
+	cfg, err := s.store.GetClusterConfig(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "cluster not found"})
+	}
+	if cfg.SatelliteID == nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "cluster has no satellite"})
+	}
+
+	evt := eventbus.NewEvent("sidecar.set_log_level", cfg.Name, cfg.Namespace, "central")
+	eventbus.WithData(evt, "level", body.Level)
+
+	if err := s.streams.PushEvent(*cfg.SatelliteID, evt); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().Str("cluster", cfg.Name).Str("level", body.Level).Msg("sidecar log level change sent")
+	auditLog(c, "sidecar.set_log_level", "cluster", id.String(), cfg.Name, "level="+body.Level)
+	return c.JSON(fiber.Map{"status": "level change sent", "level": body.Level})
 }

@@ -39,9 +39,20 @@ message BackupRetention {
 }
 
 message BackupDestination {
-  string          type = 1;  // "gcs" or "sftp"
+  string          type = 1;  // "gcs", "sftp", or "s3"
   GCSDestination  gcs  = 2;
   SFTPDestination sftp = 3;
+  S3Destination   s3   = 4;
+}
+
+message S3Destination {
+  string bucket            = 1;
+  string region            = 2;
+  string path_prefix       = 3;
+  string access_key_id     = 4;  // decrypted credential
+  string secret_access_key = 5;  // decrypted credential
+  string endpoint          = 6;  // optional: custom endpoint for S3-compatible stores (e.g. MinIO)
+  bool   force_path_style  = 7;  // required for MinIO / path-style buckets
 }
 
 message GCSDestination {

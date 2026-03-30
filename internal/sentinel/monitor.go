@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 
+	"github.com/pg-swarm/pg-swarm/internal/sentinel/backup"
 	"github.com/pg-swarm/pg-swarm/internal/shared/pgfence"
 )
 
@@ -111,6 +112,10 @@ type Monitor struct {
 	// eventEmitter sends log-rule detection events to the satellite.
 	// Set via SetEventEmitter before Run.
 	eventEmitter EventEmitter
+
+	// backupManager coordinates backup/restore operations.
+	// Set via SetBackupManager before Run.
+	backupManager *backup.Manager
 }
 
 // NewMonitor creates a new sentinel monitor.
@@ -133,6 +138,11 @@ func (m *Monitor) SetEventEmitter(e EventEmitter) {
 	m.eventEmitter = e
 }
 
+// SetBackupManager sets the backup manager. Must be called before Run.
+func (m *Monitor) SetBackupManager(bm *backup.Manager) {
+	m.backupManager = bm
+}
+
 // Run starts the monitoring loop. It blocks until the context is cancelled.
 func (m *Monitor) Run(ctx context.Context) error {
 	log.Info().
@@ -145,6 +155,11 @@ func (m *Monitor) Run(ctx context.Context) error {
 	if m.cfg.RecoveryRulesPath != "" {
 		lw := NewLogWatcher(m.client, m.eventEmitter, m.cfg.RecoveryRulesPath, m.cfg.PodName, m.cfg.Namespace, m.cfg.ClusterName)
 		go lw.Run(ctx)
+	}
+
+	// Start backup manager (non-blocking)
+	if m.backupManager != nil {
+		go m.backupManager.Run(ctx)
 	}
 
 	ticker := time.NewTicker(m.cfg.Interval)
@@ -272,6 +287,12 @@ func (m *Monitor) tick(ctx context.Context) {
 
 	m.wasConnected = true
 	m.wasPrimary = !isInRecovery
+
+	// Notify backup manager of current role
+	if m.backupManager != nil {
+		m.backupManager.SetRole(!isInRecovery)
+	}
+
 	if !isInRecovery {
 		m.handlePrimary(ctx, conn)
 	} else {

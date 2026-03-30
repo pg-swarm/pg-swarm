@@ -30,6 +30,10 @@ make dashboard         # Build React dashboard
 - **REST API uses GoFiber v2**, not chi (DESIGN.md is outdated on this).
 - **Web dashboard is JSX** (React + Vite), not TypeScript as DESIGN.md states.
 - **Satellite identity is stored in a K8s Secret**, not a file on disk.
+- **Backup package is a subpackage of sentinel** (`internal/sentinel/backup`), not a top-level `internal/backup`. The old `internal/backup/` directory has been removed.
+- **Backup circular import avoided** via interfaces: `backup.EventEmitter` (implemented by `*SidecarConnector`), `backup.PodConfig` struct, and `ExecFunc`/`ExecOutputFunc` function types. Sentinel exports `ExecInPod`/`ExecInPodOutput` wrappers for `main.go` to pass in.
+- **Backup config is embedded in trigger events**: Both `backup.trigger` and `restore.requested` events carry a `backup_config` JSON field so sidecars that reconnected after a `config_update` can still execute without a fresh config push.
+- **Restore status upsert**: `handleRestoreStatusEvent` in `events.go` upserts the `RestoreOperation` record if not found (guards against transient create failures or old-central races).
 
 ## Key Paths
 
@@ -41,6 +45,8 @@ make dashboard         # Build React dashboard
 - `internal/satellite/logcapture/` — Satellite log capture and forwarding
 - `internal/satellite/operator/tombstone.go` — Cluster deletion markers
 - `internal/sentinel/` — Failover monitor (leader lease, pg_promote, log watcher, sidecar connector)
+- `internal/sentinel/backup/` — Backup subpackage: `Manager`, `Executor`, `Scheduler`, `WALArchiver`, retention logic, storage drivers
+- `internal/sentinel/backup/storage/` — Pluggable storage backends (GCS, SFTP, S3)
 - `internal/sentinel/logwatcher.go` — Real-time PG log monitoring (40+ recovery patterns)
 - `internal/sentinel/connector.go` — Bidirectional gRPC streaming to satellite
 - `internal/shared/models/` — Shared Go types

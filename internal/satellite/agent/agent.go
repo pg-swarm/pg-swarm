@@ -170,6 +170,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	lrh.Register()
 	log.Info().Msg("log rule handler registered on event bus")
 
+	// 4c. Backup handler: routes backup.* and restore.* events to sidecars
+	bh := eventbus.NewBackupHandler(a.streamManager, a.eventBus, a.connector)
+	bh.Register()
+	log.Info().Msg("backup handler registered on event bus")
+
 	// 5. Register event handlers for satellite-level events
 	if a.k8sClient != nil {
 		a.eventBus.Subscribe("satellite.storage_classes_requested", "storage-classes", func(ctx context.Context, evt *pgswarmv1.Event) error {
@@ -296,6 +301,12 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.healthMon = health.New(a.k8sClient, a.operator, 30*time.Second)
 		mon := a.healthMon
 		mon.SetOnHealth(func(report *pgswarmv1.ClusterHealthReport) {
+			// Update sidecar stream role info so the backup handler can prefer replicas.
+			for _, inst := range report.Instances {
+				a.streamManager.UpdateRole(a.config.DeployNamespace, inst.PodName,
+					inst.Role == pgswarmv1.InstanceRole_INSTANCE_ROLE_PRIMARY)
+			}
+
 			evt := eventbus.NewEvent("health.report", report.ClusterName, "", "satellite")
 			eventbus.WithData(evt, "state", report.State.String())
 			eventbus.WithData(evt, "instance_count", fmt.Sprintf("%d", len(report.Instances)))

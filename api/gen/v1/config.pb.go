@@ -1244,7 +1244,7 @@ type ClusterConfig struct {
 	Paused             bool               `protobuf:"varint,16,opt,name=paused,proto3" json:"paused,omitempty"`                                                                                                             // when true, RW service is removed (read-only mode)
 	DeletionProtection bool               `protobuf:"varint,17,opt,name=deletion_protection,json=deletionProtection,proto3" json:"deletion_protection,omitempty"`                                                           // when true, PVCs get a finalizer to prevent accidental deletion
 	Backups            *BackupConfig      `protobuf:"bytes,18,opt,name=backups,proto3" json:"backups,omitempty"`                                                                                                            // backup sidecar configuration (resolved from profile + store)
-	RecoveryRules      []*RecoveryRule    `protobuf:"bytes,19,rep,name=recovery_rules,json=recoveryRules,proto3" json:"recovery_rules,omitempty"`                                                                           // log-based recovery rules for failover sidecar
+	RecoveryRules      []*RecoveryRule    `protobuf:"bytes,19,rep,name=recovery_rules,json=recoveryRules,proto3" json:"recovery_rules,omitempty"`                                                                           // log-based recovery rules for sentinel sidecar
 	ClusterDatabases   []*ClusterDatabase `protobuf:"bytes,21,rep,name=cluster_databases,json=clusterDatabases,proto3" json:"cluster_databases,omitempty"`                                                                  // dynamically managed databases at cluster level
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache

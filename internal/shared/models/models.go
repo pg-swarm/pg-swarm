@@ -430,6 +430,21 @@ type SFTPCredentials struct {
 	PrivateKey string `json:"private_key,omitempty"`
 }
 
+// S3StoreConfig holds non-secret S3 configuration.
+type S3StoreConfig struct {
+	Bucket         string `json:"bucket"`
+	Region         string `json:"region"`
+	PathPrefix     string `json:"path_prefix"`
+	Endpoint       string `json:"endpoint,omitempty"`        // custom endpoint for S3-compatible stores
+	ForcePathStyle bool   `json:"force_path_style,omitempty"` // required for MinIO
+}
+
+// S3Credentials holds the secret fields for S3 access.
+type S3Credentials struct {
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+}
+
 // ValidateBackupStore validates a backup store for creation/update.
 func ValidateBackupStore(s *BackupStore) error {
 	if s.Name == "" {

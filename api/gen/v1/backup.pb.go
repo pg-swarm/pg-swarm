@@ -307,9 +307,10 @@ func (x *BackupRetention) GetLogicalBackupCount() int32 {
 
 type BackupDestination struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"` // "gcs" or "sftp"
+	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"` // "gcs", "sftp", or "s3"
 	Gcs           *GCSDestination        `protobuf:"bytes,2,opt,name=gcs,proto3" json:"gcs,omitempty"`
 	Sftp          *SFTPDestination       `protobuf:"bytes,3,opt,name=sftp,proto3" json:"sftp,omitempty"`
+	S3            *S3Destination         `protobuf:"bytes,4,opt,name=s3,proto3" json:"s3,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -365,6 +366,105 @@ func (x *BackupDestination) GetSftp() *SFTPDestination {
 	return nil
 }
 
+func (x *BackupDestination) GetS3() *S3Destination {
+	if x != nil {
+		return x.S3
+	}
+	return nil
+}
+
+type S3Destination struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Bucket          string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
+	Region          string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
+	PathPrefix      string                 `protobuf:"bytes,3,opt,name=path_prefix,json=pathPrefix,proto3" json:"path_prefix,omitempty"`
+	AccessKeyId     string                 `protobuf:"bytes,4,opt,name=access_key_id,json=accessKeyId,proto3" json:"access_key_id,omitempty"`             // decrypted credential
+	SecretAccessKey string                 `protobuf:"bytes,5,opt,name=secret_access_key,json=secretAccessKey,proto3" json:"secret_access_key,omitempty"` // decrypted credential
+	Endpoint        string                 `protobuf:"bytes,6,opt,name=endpoint,proto3" json:"endpoint,omitempty"`                                        // optional: custom endpoint for S3-compatible stores (e.g. MinIO)
+	ForcePathStyle  bool                   `protobuf:"varint,7,opt,name=force_path_style,json=forcePathStyle,proto3" json:"force_path_style,omitempty"`   // required for MinIO / path-style buckets
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *S3Destination) Reset() {
+	*x = S3Destination{}
+	mi := &file_backup_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *S3Destination) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*S3Destination) ProtoMessage() {}
+
+func (x *S3Destination) ProtoReflect() protoreflect.Message {
+	mi := &file_backup_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use S3Destination.ProtoReflect.Descriptor instead.
+func (*S3Destination) Descriptor() ([]byte, []int) {
+	return file_backup_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *S3Destination) GetBucket() string {
+	if x != nil {
+		return x.Bucket
+	}
+	return ""
+}
+
+func (x *S3Destination) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *S3Destination) GetPathPrefix() string {
+	if x != nil {
+		return x.PathPrefix
+	}
+	return ""
+}
+
+func (x *S3Destination) GetAccessKeyId() string {
+	if x != nil {
+		return x.AccessKeyId
+	}
+	return ""
+}
+
+func (x *S3Destination) GetSecretAccessKey() string {
+	if x != nil {
+		return x.SecretAccessKey
+	}
+	return ""
+}
+
+func (x *S3Destination) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *S3Destination) GetForcePathStyle() bool {
+	if x != nil {
+		return x.ForcePathStyle
+	}
+	return false
+}
+
 type GCSDestination struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	Bucket             string                 `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
@@ -376,7 +476,7 @@ type GCSDestination struct {
 
 func (x *GCSDestination) Reset() {
 	*x = GCSDestination{}
-	mi := &file_backup_proto_msgTypes[5]
+	mi := &file_backup_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -388,7 +488,7 @@ func (x *GCSDestination) String() string {
 func (*GCSDestination) ProtoMessage() {}
 
 func (x *GCSDestination) ProtoReflect() protoreflect.Message {
-	mi := &file_backup_proto_msgTypes[5]
+	mi := &file_backup_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -401,7 +501,7 @@ func (x *GCSDestination) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GCSDestination.ProtoReflect.Descriptor instead.
 func (*GCSDestination) Descriptor() ([]byte, []int) {
-	return file_backup_proto_rawDescGZIP(), []int{5}
+	return file_backup_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GCSDestination) GetBucket() string {
@@ -439,7 +539,7 @@ type SFTPDestination struct {
 
 func (x *SFTPDestination) Reset() {
 	*x = SFTPDestination{}
-	mi := &file_backup_proto_msgTypes[6]
+	mi := &file_backup_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -451,7 +551,7 @@ func (x *SFTPDestination) String() string {
 func (*SFTPDestination) ProtoMessage() {}
 
 func (x *SFTPDestination) ProtoReflect() protoreflect.Message {
-	mi := &file_backup_proto_msgTypes[6]
+	mi := &file_backup_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -464,7 +564,7 @@ func (x *SFTPDestination) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SFTPDestination.ProtoReflect.Descriptor instead.
 func (*SFTPDestination) Descriptor() ([]byte, []int) {
-	return file_backup_proto_rawDescGZIP(), []int{6}
+	return file_backup_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SFTPDestination) GetHost() string {
@@ -530,7 +630,7 @@ type BackupStatusReport struct {
 
 func (x *BackupStatusReport) Reset() {
 	*x = BackupStatusReport{}
-	mi := &file_backup_proto_msgTypes[7]
+	mi := &file_backup_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -542,7 +642,7 @@ func (x *BackupStatusReport) String() string {
 func (*BackupStatusReport) ProtoMessage() {}
 
 func (x *BackupStatusReport) ProtoReflect() protoreflect.Message {
-	mi := &file_backup_proto_msgTypes[7]
+	mi := &file_backup_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -555,7 +655,7 @@ func (x *BackupStatusReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupStatusReport.ProtoReflect.Descriptor instead.
 func (*BackupStatusReport) Descriptor() ([]byte, []int) {
-	return file_backup_proto_rawDescGZIP(), []int{7}
+	return file_backup_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *BackupStatusReport) GetClusterName() string {
@@ -660,7 +760,7 @@ type RestoreCommand struct {
 
 func (x *RestoreCommand) Reset() {
 	*x = RestoreCommand{}
-	mi := &file_backup_proto_msgTypes[8]
+	mi := &file_backup_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -672,7 +772,7 @@ func (x *RestoreCommand) String() string {
 func (*RestoreCommand) ProtoMessage() {}
 
 func (x *RestoreCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_backup_proto_msgTypes[8]
+	mi := &file_backup_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -685,7 +785,7 @@ func (x *RestoreCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestoreCommand.ProtoReflect.Descriptor instead.
 func (*RestoreCommand) Descriptor() ([]byte, []int) {
-	return file_backup_proto_rawDescGZIP(), []int{8}
+	return file_backup_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RestoreCommand) GetClusterName() string {
@@ -765,7 +865,7 @@ type RestoreStatusReport struct {
 
 func (x *RestoreStatusReport) Reset() {
 	*x = RestoreStatusReport{}
-	mi := &file_backup_proto_msgTypes[9]
+	mi := &file_backup_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -777,7 +877,7 @@ func (x *RestoreStatusReport) String() string {
 func (*RestoreStatusReport) ProtoMessage() {}
 
 func (x *RestoreStatusReport) ProtoReflect() protoreflect.Message {
-	mi := &file_backup_proto_msgTypes[9]
+	mi := &file_backup_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -790,7 +890,7 @@ func (x *RestoreStatusReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestoreStatusReport.ProtoReflect.Descriptor instead.
 func (*RestoreStatusReport) Descriptor() ([]byte, []int) {
-	return file_backup_proto_rawDescGZIP(), []int{9}
+	return file_backup_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RestoreStatusReport) GetRestoreId() string {
@@ -840,7 +940,7 @@ type BackupTrigger struct {
 
 func (x *BackupTrigger) Reset() {
 	*x = BackupTrigger{}
-	mi := &file_backup_proto_msgTypes[10]
+	mi := &file_backup_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -852,7 +952,7 @@ func (x *BackupTrigger) String() string {
 func (*BackupTrigger) ProtoMessage() {}
 
 func (x *BackupTrigger) ProtoReflect() protoreflect.Message {
-	mi := &file_backup_proto_msgTypes[10]
+	mi := &file_backup_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -865,7 +965,7 @@ func (x *BackupTrigger) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupTrigger.ProtoReflect.Descriptor instead.
 func (*BackupTrigger) Descriptor() ([]byte, []int) {
-	return file_backup_proto_rawDescGZIP(), []int{10}
+	return file_backup_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *BackupTrigger) GetClusterName() string {
@@ -915,11 +1015,21 @@ const file_backup_proto_rawDesc = "" +
 	"\x11base_backup_count\x18\x01 \x01(\x05R\x0fbaseBackupCount\x128\n" +
 	"\x18incremental_backup_count\x18\x02 \x01(\x05R\x16incrementalBackupCount\x12,\n" +
 	"\x12wal_retention_days\x18\x03 \x01(\x05R\x10walRetentionDays\x120\n" +
-	"\x14logical_backup_count\x18\x04 \x01(\x05R\x12logicalBackupCount\"\x86\x01\n" +
+	"\x14logical_backup_count\x18\x04 \x01(\x05R\x12logicalBackupCount\"\xb1\x01\n" +
 	"\x11BackupDestination\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12,\n" +
 	"\x03gcs\x18\x02 \x01(\v2\x1a.pgswarm.v1.GCSDestinationR\x03gcs\x12/\n" +
-	"\x04sftp\x18\x03 \x01(\v2\x1b.pgswarm.v1.SFTPDestinationR\x04sftp\"{\n" +
+	"\x04sftp\x18\x03 \x01(\v2\x1b.pgswarm.v1.SFTPDestinationR\x04sftp\x12)\n" +
+	"\x02s3\x18\x04 \x01(\v2\x19.pgswarm.v1.S3DestinationR\x02s3\"\xf6\x01\n" +
+	"\rS3Destination\x12\x16\n" +
+	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1f\n" +
+	"\vpath_prefix\x18\x03 \x01(\tR\n" +
+	"pathPrefix\x12\"\n" +
+	"\raccess_key_id\x18\x04 \x01(\tR\vaccessKeyId\x12*\n" +
+	"\x11secret_access_key\x18\x05 \x01(\tR\x0fsecretAccessKey\x12\x1a\n" +
+	"\bendpoint\x18\x06 \x01(\tR\bendpoint\x12(\n" +
+	"\x10force_path_style\x18\a \x01(\bR\x0eforcePathStyle\"{\n" +
 	"\x0eGCSDestination\x12\x16\n" +
 	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x1f\n" +
 	"\vpath_prefix\x18\x02 \x01(\tR\n" +
@@ -990,36 +1100,38 @@ func file_backup_proto_rawDescGZIP() []byte {
 	return file_backup_proto_rawDescData
 }
 
-var file_backup_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_backup_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_backup_proto_goTypes = []any{
 	(*BackupConfig)(nil),          // 0: pgswarm.v1.BackupConfig
 	(*PhysicalBackupConfig)(nil),  // 1: pgswarm.v1.PhysicalBackupConfig
 	(*LogicalBackupConfig)(nil),   // 2: pgswarm.v1.LogicalBackupConfig
 	(*BackupRetention)(nil),       // 3: pgswarm.v1.BackupRetention
 	(*BackupDestination)(nil),     // 4: pgswarm.v1.BackupDestination
-	(*GCSDestination)(nil),        // 5: pgswarm.v1.GCSDestination
-	(*SFTPDestination)(nil),       // 6: pgswarm.v1.SFTPDestination
-	(*BackupStatusReport)(nil),    // 7: pgswarm.v1.BackupStatusReport
-	(*RestoreCommand)(nil),        // 8: pgswarm.v1.RestoreCommand
-	(*RestoreStatusReport)(nil),   // 9: pgswarm.v1.RestoreStatusReport
-	(*BackupTrigger)(nil),         // 10: pgswarm.v1.BackupTrigger
-	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
+	(*S3Destination)(nil),         // 5: pgswarm.v1.S3Destination
+	(*GCSDestination)(nil),        // 6: pgswarm.v1.GCSDestination
+	(*SFTPDestination)(nil),       // 7: pgswarm.v1.SFTPDestination
+	(*BackupStatusReport)(nil),    // 8: pgswarm.v1.BackupStatusReport
+	(*RestoreCommand)(nil),        // 9: pgswarm.v1.RestoreCommand
+	(*RestoreStatusReport)(nil),   // 10: pgswarm.v1.RestoreStatusReport
+	(*BackupTrigger)(nil),         // 11: pgswarm.v1.BackupTrigger
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 }
 var file_backup_proto_depIdxs = []int32{
 	1,  // 0: pgswarm.v1.BackupConfig.physical:type_name -> pgswarm.v1.PhysicalBackupConfig
 	2,  // 1: pgswarm.v1.BackupConfig.logical:type_name -> pgswarm.v1.LogicalBackupConfig
 	3,  // 2: pgswarm.v1.BackupConfig.retention:type_name -> pgswarm.v1.BackupRetention
 	4,  // 3: pgswarm.v1.BackupConfig.destination:type_name -> pgswarm.v1.BackupDestination
-	5,  // 4: pgswarm.v1.BackupDestination.gcs:type_name -> pgswarm.v1.GCSDestination
-	6,  // 5: pgswarm.v1.BackupDestination.sftp:type_name -> pgswarm.v1.SFTPDestination
-	11, // 6: pgswarm.v1.BackupStatusReport.started_at:type_name -> google.protobuf.Timestamp
-	11, // 7: pgswarm.v1.BackupStatusReport.completed_at:type_name -> google.protobuf.Timestamp
-	11, // 8: pgswarm.v1.RestoreCommand.target_time:type_name -> google.protobuf.Timestamp
-	9,  // [9:9] is the sub-list for method output_type
-	9,  // [9:9] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	6,  // 4: pgswarm.v1.BackupDestination.gcs:type_name -> pgswarm.v1.GCSDestination
+	7,  // 5: pgswarm.v1.BackupDestination.sftp:type_name -> pgswarm.v1.SFTPDestination
+	5,  // 6: pgswarm.v1.BackupDestination.s3:type_name -> pgswarm.v1.S3Destination
+	12, // 7: pgswarm.v1.BackupStatusReport.started_at:type_name -> google.protobuf.Timestamp
+	12, // 8: pgswarm.v1.BackupStatusReport.completed_at:type_name -> google.protobuf.Timestamp
+	12, // 9: pgswarm.v1.RestoreCommand.target_time:type_name -> google.protobuf.Timestamp
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_backup_proto_init() }
@@ -1033,7 +1145,7 @@ func file_backup_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_backup_proto_rawDesc), len(file_backup_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
