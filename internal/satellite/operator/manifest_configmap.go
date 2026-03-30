@@ -151,7 +151,7 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 			Labels:    clusterLabels(cfg.ClusterName, cfg.ProfileName, cfg.LabelSelector),
 		},
 		Data: map[string]string{
-			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive),
+			"postgresql.conf": buildPostgresConf(cfg.PgParams, cfg.Archive, cfg.Backups),
 			"pg_hba.conf":     buildHbaConf(cfg),
 		},
 	}
@@ -160,9 +160,10 @@ func buildConfigMap(cfg *pgswarmv1.ClusterConfig) *corev1.ConfigMap {
 // buildPostgresConf generates the postgresql.conf content by layering:
 // 1. Production defaults (lowest priority)
 // 2. Archive settings
+// 2b. Backup-based WAL archiving settings
 // 3. User/profile pg_params (override defaults)
 // 4. Mandatory HA params (highest priority, cannot be overridden)
-func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec) string {
+func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveSpec, backups *pgswarmv1.BackupConfig) string {
 	merged := make(map[string]string, len(defaultPgParams)+len(mandatoryPgParams)+len(userParams)+4)
 
 	// 1. Production defaults (lowest priority)
@@ -181,6 +182,20 @@ func buildPostgresConf(userParams map[string]string, archive *pgswarmv1.ArchiveS
 		merged["archive_command"] = fmt.Sprintf("'%s'", archive.ArchiveCommand)
 	} else {
 		merged["archive_mode"] = "off"
+	}
+
+	// 2b. Backup-based WAL archiving (copies WAL files to staging dir for sentinel upload)
+	if backups != nil && backups.Physical != nil && backups.Physical.WalArchiveEnabled {
+		merged["archive_mode"] = "on"
+		merged["archive_command"] = "'cp %p /wal-staging/%f'"
+		timeout := backups.Physical.ArchiveTimeoutSeconds
+		if timeout <= 0 {
+			timeout = 60
+		}
+		merged["archive_timeout"] = fmt.Sprintf("%d", timeout)
+		if backups.Physical.IncrementalSchedule != "" {
+			merged["summarize_wal"] = "on"
+		}
 	}
 
 	// 3. User/profile params override defaults

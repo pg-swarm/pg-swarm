@@ -175,6 +175,15 @@ func (s *RESTServer) setupRoutes() {
 	api.Put("/clusters/:id/databases/:dbid", s.updateClusterDatabase)
 	api.Delete("/clusters/:id/databases/:dbid", s.deleteClusterDatabase)
 
+	// Backup & Restore
+	api.Get("/clusters/:id/backups", s.listBackupInventory)
+	api.Post("/clusters/:id/trigger-backup", s.triggerBackup)
+	api.Get("/clusters/:id/restores", s.listRestoreOperations)
+	api.Post("/clusters/:id/restore", s.triggerRestore)
+
+	// Sidecar management
+	api.Post("/clusters/:id/sidecar-log-level", s.setSidecarLogLevel)
+
 	// Deployment Rules
 	api.Get("/deployment-rules", s.listDeploymentRules)
 	api.Post("/deployment-rules", s.createDeploymentRule)

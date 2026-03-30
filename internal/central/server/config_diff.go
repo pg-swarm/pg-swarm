@@ -152,6 +152,9 @@ func classifyChanges(old, new *models.ClusterSpec, classifications ParamClassifi
 		})
 	}
 
+	// backup (reload — config is pushed via event stream, no pod restart needed)
+	diffBackup(diff, old.Backup, new.Backup)
+
 	// replicas
 	if old.Replicas != new.Replicas {
 		if new.Replicas > old.Replicas {
@@ -287,6 +290,125 @@ func diffSentinel(diff *ConfigDiff, old, new *models.SentinelSpec) {
 	}
 }
 
+func diffBackup(diff *ConfigDiff, old, new *models.BackupSpec) {
+	if old == nil && new == nil {
+		return
+	}
+	o := backupOrEmpty(old)
+	n := backupOrEmpty(new)
+
+	// store_id
+	oldStore := ""
+	newStore := ""
+	if o.StoreID != nil {
+		oldStore = o.StoreID.String()
+	}
+	if n.StoreID != nil {
+		newStore = n.StoreID.String()
+	}
+	if oldStore != newStore {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.store_id", OldValue: oldStore, NewValue: newStore,
+		})
+	}
+
+	// physical
+	diffPhysicalBackup(diff, o.Physical, n.Physical)
+
+	// logical
+	diffLogicalBackup(diff, o.Logical, n.Logical)
+
+	// retention
+	diffBackupRetention(diff, o.Retention, n.Retention)
+}
+
+func diffPhysicalBackup(diff *ConfigDiff, old, new *models.PhysicalBackupConfig) {
+	if old == nil && new == nil {
+		return
+	}
+	o := physicalOrEmpty(old)
+	n := physicalOrEmpty(new)
+
+	if o.Enabled != n.Enabled {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.physical.enabled", OldValue: fmt.Sprintf("%v", o.Enabled), NewValue: fmt.Sprintf("%v", n.Enabled),
+		})
+	}
+	if o.BaseSchedule != n.BaseSchedule {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.physical.base_schedule", OldValue: o.BaseSchedule, NewValue: n.BaseSchedule,
+		})
+	}
+	if o.IncrementalSchedule != n.IncrementalSchedule {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.physical.incremental_schedule", OldValue: o.IncrementalSchedule, NewValue: n.IncrementalSchedule,
+		})
+	}
+	if o.WalArchiveEnabled != n.WalArchiveEnabled {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.physical.wal_archive_enabled", OldValue: fmt.Sprintf("%v", o.WalArchiveEnabled), NewValue: fmt.Sprintf("%v", n.WalArchiveEnabled),
+		})
+	}
+	if o.ArchiveTimeoutSeconds != n.ArchiveTimeoutSeconds {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path:     "backup.physical.archive_timeout_seconds",
+			OldValue: fmt.Sprintf("%d", o.ArchiveTimeoutSeconds),
+			NewValue: fmt.Sprintf("%d", n.ArchiveTimeoutSeconds),
+		})
+	}
+}
+
+func diffLogicalBackup(diff *ConfigDiff, old, new *models.LogicalBackupConfig) {
+	if old == nil && new == nil {
+		return
+	}
+	o := logicalOrEmpty(old)
+	n := logicalOrEmpty(new)
+
+	if o.Enabled != n.Enabled {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.logical.enabled", OldValue: fmt.Sprintf("%v", o.Enabled), NewValue: fmt.Sprintf("%v", n.Enabled),
+		})
+	}
+	if o.Schedule != n.Schedule {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.logical.schedule", OldValue: o.Schedule, NewValue: n.Schedule,
+		})
+	}
+	if !stringSliceEqual(o.Databases, n.Databases) {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path:     "backup.logical.databases",
+			OldValue: strings.Join(o.Databases, ", "),
+			NewValue: strings.Join(n.Databases, ", "),
+		})
+	}
+	if o.Format != n.Format {
+		diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+			Path: "backup.logical.format", OldValue: o.Format, NewValue: n.Format,
+		})
+	}
+}
+
+func diffBackupRetention(diff *ConfigDiff, old, new *models.BackupRetention) {
+	if old == nil && new == nil {
+		return
+	}
+	o := retentionOrEmpty(old)
+	n := retentionOrEmpty(new)
+
+	check := func(field string, oldVal, newVal int) {
+		if oldVal != newVal {
+			diff.ReloadChanges = append(diff.ReloadChanges, ParamChange{
+				Path: "backup.retention." + field, OldValue: fmt.Sprintf("%d", oldVal), NewValue: fmt.Sprintf("%d", newVal),
+			})
+		}
+	}
+	check("base_backup_count", o.BaseBackupCount, n.BaseBackupCount)
+	check("incremental_backup_count", o.IncrementalBackupCount, n.IncrementalBackupCount)
+	check("logical_backup_count", o.LogicalBackupCount, n.LogicalBackupCount)
+	check("wal_retention_days", o.WalRetentionDays, n.WalRetentionDays)
+}
+
 // --- helpers ---
 
 func archiveOrEmpty(a *models.ArchiveSpec) models.ArchiveSpec {
@@ -301,6 +423,34 @@ func sentinelOrEmpty(f *models.SentinelSpec) models.SentinelSpec {
 		return models.SentinelSpec{}
 	}
 	return *f
+}
+
+func backupOrEmpty(b *models.BackupSpec) models.BackupSpec {
+	if b == nil {
+		return models.BackupSpec{}
+	}
+	return *b
+}
+
+func physicalOrEmpty(p *models.PhysicalBackupConfig) models.PhysicalBackupConfig {
+	if p == nil {
+		return models.PhysicalBackupConfig{}
+	}
+	return *p
+}
+
+func logicalOrEmpty(l *models.LogicalBackupConfig) models.LogicalBackupConfig {
+	if l == nil {
+		return models.LogicalBackupConfig{}
+	}
+	return *l
+}
+
+func retentionOrEmpty(r *models.BackupRetention) models.BackupRetention {
+	if r == nil {
+		return models.BackupRetention{}
+	}
+	return *r
 }
 
 func mergeMapKeys(a, b map[string]string) []string {

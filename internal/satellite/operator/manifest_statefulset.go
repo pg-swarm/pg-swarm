@@ -51,6 +51,11 @@ func walStorageEnabled(cfg *pgswarmv1.ClusterConfig) bool {
 	return cfg.WalStorage != nil && cfg.WalStorage.Size != ""
 }
 
+// backupWalArchiveEnabled returns true if backup-based WAL archiving is configured.
+func backupWalArchiveEnabled(cfg *pgswarmv1.ClusterConfig) bool {
+	return cfg.Backups != nil && cfg.Backups.Physical != nil && cfg.Backups.Physical.WalArchiveEnabled
+}
+
 // buildWalVCT creates the PersistentVolumeClaim template for the dedicated WAL volume.
 func buildWalVCT(cfg *pgswarmv1.ClusterConfig) corev1.PersistentVolumeClaim {
 	objMeta := metav1.ObjectMeta{
@@ -197,6 +202,16 @@ func buildStatefulSet(cfg *pgswarmv1.ClusterConfig, secretName, defaultSentinelI
 					SecretName: cfg.Archive.CredentialsSecret.Name,
 					Optional:   &optional,
 				},
+			},
+		})
+	}
+
+	// WAL staging emptyDir for backup WAL archiving (shared between postgres + sentinel)
+	if backupWalArchiveEnabled(cfg) {
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, corev1.Volume{
+			Name: "wal-staging",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		})
 	}
@@ -444,6 +459,14 @@ func buildMainContainer(cfg *pgswarmv1.ClusterConfig, secretName string) corev1.
 		})
 	}
 
+	// WAL staging volume for backup-based archiving
+	if backupWalArchiveEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "wal-staging",
+			MountPath: "/wal-staging",
+		})
+	}
+
 	// Custom archive mode with credentials: mount secret as env vars AND as a volume
 	// (so file-based credentials like GOOGLE_APPLICATION_CREDENTIALS can be used).
 	if archiveEnabled(cfg) && cfg.Archive.Mode == "custom" && cfg.Archive.CredentialsSecret != nil {
@@ -483,7 +506,7 @@ func buildSentinelSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultSenti
 
 	primaryHostDNS := fmt.Sprintf("%s.%s.svc.cluster.local", resourceName(cfg.ClusterName, "rw"), cfg.Namespace)
 
-	return corev1.Container{
+	c := corev1.Container{
 		Name:            "sentinel",
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
@@ -540,6 +563,16 @@ func buildSentinelSidecar(cfg *pgswarmv1.ClusterConfig, secretName, defaultSenti
 			{Name: "recovery-rules", MountPath: "/etc/recovery-rules", ReadOnly: true},
 		},
 	}
+
+	// WAL staging volume for backup-based archiving
+	if backupWalArchiveEnabled(cfg) {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "wal-staging",
+			MountPath: "/wal-staging",
+		})
+	}
+
+	return c
 }
 
 // configHash computes a short hash of the config-affecting fields in a ClusterConfig.
@@ -570,6 +603,9 @@ func configHash(cfg *pgswarmv1.ClusterConfig) string {
 	}
 	if cfg.Sentinel != nil {
 		fmt.Fprintf(h, "fo:%v:%s\n", cfg.Sentinel.Enabled, cfg.Sentinel.SidecarImage)
+	}
+	if cfg.Backups != nil && cfg.Backups.Physical != nil {
+		fmt.Fprintf(h, "bkp:%v:%d\n", cfg.Backups.Physical.WalArchiveEnabled, cfg.Backups.Physical.ArchiveTimeoutSeconds)
 	}
 	// NOTE: ClusterDatabases are intentionally NOT included in the hash.
 	// Database changes are handled via sidecar SQL commands + pg_reload_conf()

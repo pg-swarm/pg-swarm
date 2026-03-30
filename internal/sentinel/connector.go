@@ -12,11 +12,14 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
+	"github.com/pg-swarm/pg-swarm/internal/sentinel/backup"
+	"github.com/pg-swarm/pg-swarm/internal/shared/loglevel"
 	"github.com/pg-swarm/pg-swarm/internal/shared/pgfence"
 )
 
@@ -32,6 +35,15 @@ type SidecarConnector struct {
 	// K8s exec capability for restart/rewind/rebuild commands
 	k8sClient  kubernetes.Interface
 	restConfig *rest.Config
+
+	// backupManager handles backup/restore operations (set via SetBackupManager).
+	backupManager *backup.Manager
+}
+
+// SetBackupManager wires the backup manager into the connector so it can
+// handle backup-related event commands. Must be called before Run.
+func (c *SidecarConnector) SetBackupManager(bm *backup.Manager) {
+	c.backupManager = bm
 }
 
 // NewSidecarConnector creates a new connector for the sidecar-to-satellite stream.
@@ -531,6 +543,25 @@ func (c *SidecarConnector) handleEventCommand(ctx context.Context, cmd *pgswarmv
 	case "command.rebuild":
 		legacyCmd := &pgswarmv1.SidecarCommand{RequestId: operationID, Cmd: cmd.Cmd}
 		result = c.handleRebuild(ctx, legacyCmd)
+
+	case "command.backup_config":
+		result = c.handleBackupConfig(evt, operationID)
+	case "command.backup_trigger":
+		result = c.handleBackupTrigger(ctx, evt, operationID)
+	case "command.restore":
+		result = c.handleRestoreCommand(ctx, evt, operationID)
+
+	case "command.set_log_level":
+		level := evt.Data["level"]
+		if level == "" {
+			result = &pgswarmv1.CommandResult{RequestId: operationID, Success: false, Error: "missing level parameter"}
+		} else if _, err := loglevel.SetGlobalLevel(level); err != nil {
+			result = &pgswarmv1.CommandResult{RequestId: operationID, Success: false, Error: err.Error()}
+		} else {
+			log.Info().Str("level", level).Msg("sidecar: log level changed via command")
+			result = &pgswarmv1.CommandResult{RequestId: operationID, Success: true}
+		}
+
 	default:
 		log.Warn().Str("command", eventType).Msg("sidecar: unknown event command type")
 		result = &pgswarmv1.CommandResult{
@@ -574,4 +605,110 @@ func (c *SidecarConnector) handleEventCommand(ctx context.Context, cmd *pgswarmv
 	c.sendCh <- &pgswarmv1.SidecarMessage{
 		Payload: &pgswarmv1.SidecarMessage_Event{Event: resultEvt},
 	}
+}
+
+// handleBackupConfig deserializes a BackupConfig from the event data and
+// updates the backup manager.
+func (c *SidecarConnector) handleBackupConfig(evt *pgswarmv1.Event, operationID string) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: operationID, Success: true}
+
+	if c.backupManager == nil {
+		result.Success = false
+		result.Error = "backup manager not initialized"
+		return result
+	}
+
+	configJSON := evt.Data["config"]
+	if configJSON == "" {
+		result.Success = false
+		result.Error = "missing 'config' in event data"
+		return result
+	}
+
+	var cfg pgswarmv1.BackupConfig
+	if err := protojson.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("unmarshal backup config: %v", err)
+		return result
+	}
+
+	c.backupManager.UpdateConfig(&cfg)
+	log.Info().Str("store_id", cfg.GetStoreId()).Msg("sidecar: backup config applied")
+	return result
+}
+
+// handleBackupTrigger dispatches an on-demand backup request.
+// If a backup_config is embedded in the event data, it is applied to the
+// backup manager first. This ensures the trigger works even if the sidecar
+// reconnected and missed the most recent backup.config_update push.
+func (c *SidecarConnector) handleBackupTrigger(ctx context.Context, evt *pgswarmv1.Event, operationID string) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: operationID, Success: true}
+
+	if c.backupManager == nil {
+		result.Success = false
+		result.Error = "backup manager not initialized"
+		return result
+	}
+
+	// Apply embedded backup config if present (sent by central's triggerBackup handler).
+	if cfgJSON, ok := evt.Data["backup_config"]; ok && cfgJSON != "" {
+		var cfg pgswarmv1.BackupConfig
+		if err := protojson.Unmarshal([]byte(cfgJSON), &cfg); err == nil {
+			c.backupManager.UpdateConfig(&cfg)
+		} else {
+			log.Warn().Err(err).Msg("sidecar: failed to apply embedded backup config from trigger event")
+		}
+	}
+
+	backupType := evt.Data["backup_type"]
+	if backupType == "" {
+		backupType = "base"
+	}
+
+	if err := c.backupManager.TriggerBackup(ctx, backupType); err != nil {
+		result.Success = false
+		result.Error = err.Error()
+	}
+	return result
+}
+
+// handleRestoreCommand dispatches a restore operation.
+func (c *SidecarConnector) handleRestoreCommand(ctx context.Context, evt *pgswarmv1.Event, operationID string) *pgswarmv1.CommandResult {
+	result := &pgswarmv1.CommandResult{RequestId: operationID, Success: true}
+
+	if c.backupManager == nil {
+		result.Success = false
+		result.Error = "backup manager not initialized"
+		return result
+	}
+
+	cmdJSON := evt.Data["restore_command"]
+	if cmdJSON == "" {
+		result.Success = false
+		result.Error = "missing 'restore_command' in event data"
+		return result
+	}
+
+	// Apply embedded backup_config if present — same pattern as handleBackupTrigger.
+	if cfgJSON, ok := evt.Data["backup_config"]; ok && cfgJSON != "" {
+		var cfg pgswarmv1.BackupConfig
+		if err := protojson.Unmarshal([]byte(cfgJSON), &cfg); err == nil {
+			c.backupManager.UpdateConfig(&cfg)
+		} else {
+			log.Warn().Err(err).Msg("sidecar: failed to apply embedded backup config from restore event")
+		}
+	}
+
+	var cmd pgswarmv1.RestoreCommand
+	if err := protojson.Unmarshal([]byte(cmdJSON), &cmd); err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("unmarshal restore command: %v", err)
+		return result
+	}
+
+	if err := c.backupManager.TriggerRestore(ctx, &cmd); err != nil {
+		result.Success = false
+		result.Error = err.Error()
+	}
+	return result
 }

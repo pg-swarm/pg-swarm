@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
@@ -25,6 +26,10 @@ type SidecarStream struct {
 	Namespace string
 	SendCh    chan *pgswarmv1.SidecarCommand // buffered, cap 16
 	Cancel    context.CancelFunc
+
+	// IsPrimary is updated by the health monitor when the pod's role is known.
+	// Used by the backup handler to prefer replica pods for physical backups.
+	IsPrimary atomic.Bool
 
 	mu      sync.Mutex
 	pending map[string]chan *pgswarmv1.CommandResult // requestID → response
@@ -64,6 +69,51 @@ func (m *SidecarStreamManager) Get(namespace, podName string) *SidecarStream {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.streams[streamKey(namespace, podName)]
+}
+
+// ListByCluster returns all connected sidecar streams for the given cluster.
+func (m *SidecarStreamManager) ListByCluster(namespace, clusterName string) []*SidecarStream {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*SidecarStream
+	for _, s := range m.streams {
+		if s.Namespace == namespace && s.Cluster == clusterName {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// UpdateRole sets the IsPrimary flag on a sidecar stream by pod name.
+// Called by the satellite's health monitor when role changes are observed.
+func (m *SidecarStreamManager) UpdateRole(namespace, podName string, isPrimary bool) {
+	m.mu.RLock()
+	s := m.streams[streamKey(namespace, podName)]
+	m.mu.RUnlock()
+	if s != nil {
+		s.IsPrimary.Store(isPrimary)
+	}
+}
+
+// PreferReplica returns the streams for a cluster, sorted so replicas come
+// first. Falls back to all streams if none are known replicas.
+func (m *SidecarStreamManager) PreferReplica(namespace, clusterName string) []*SidecarStream {
+	streams := m.ListByCluster(namespace, clusterName)
+	if len(streams) <= 1 {
+		return streams
+	}
+	var replicas, others []*SidecarStream
+	for _, s := range streams {
+		if s.IsPrimary.Load() {
+			others = append(others, s)
+		} else {
+			replicas = append(replicas, s)
+		}
+	}
+	if len(replicas) > 0 {
+		return append(replicas, others...)
+	}
+	return streams // role unknown yet, return all
 }
 
 // SendCommandAndWait sends a command to a sidecar and waits for the response.

@@ -9,6 +9,7 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/satellite/operator"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // LifecycleHandler processes cluster lifecycle events (create, update, delete,
@@ -75,6 +76,11 @@ func (h *LifecycleHandler) handleCreateOrUpdate(ctx context.Context, evt *pgswar
 			Str("cluster", cfg.ClusterName).
 			Int64("version", cfg.ConfigVersion).
 			Msg("cluster config applied successfully")
+
+		// Push backup config to sidecars if present
+		if cfg.Backups != nil {
+			h.emitBackupConfigUpdate(ctx, cfg)
+		}
 	}
 
 	// Publish result event (will be forwarded to central by the bus)
@@ -140,6 +146,20 @@ func (h *LifecycleHandler) handlePause(ctx context.Context, evt *pgswarmv1.Event
 		WithData(resultEvt, "error", err.Error())
 	}
 	return h.bus.Publish(ctx, resultEvt)
+}
+
+// emitBackupConfigUpdate serializes the BackupConfig and publishes a
+// backup.config_update event so the BackupHandler pushes it to sidecars.
+func (h *LifecycleHandler) emitBackupConfigUpdate(ctx context.Context, cfg *pgswarmv1.ClusterConfig) {
+	jsonBytes, err := protojson.Marshal(cfg.Backups)
+	if err != nil {
+		h.logger.Error().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to marshal backup config")
+		return
+	}
+	evt := NewEvent("backup.config_update", cfg.ClusterName, cfg.Namespace, "satellite")
+	WithData(evt, "config", string(jsonBytes))
+	_ = h.bus.Publish(ctx, evt)
+	h.logger.Info().Str("cluster", cfg.ClusterName).Msg("emitted backup.config_update event")
 }
 
 func (h *LifecycleHandler) handleUnpause(ctx context.Context, evt *pgswarmv1.Event) error {

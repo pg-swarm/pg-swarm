@@ -11,6 +11,7 @@ import (
 
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
 	"github.com/pg-swarm/pg-swarm/internal/sentinel"
+	"github.com/pg-swarm/pg-swarm/internal/sentinel/backup"
 	"github.com/pg-swarm/pg-swarm/internal/shared/loglevel"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -104,6 +105,23 @@ func main() {
 		)
 		// Wire connector as the event emitter for the log watcher
 		mon.SetEventEmitter(connector)
+
+		// Create backup manager and wire it into monitor + connector
+		bm := backup.NewManager(
+			backup.PodConfig{
+				PodName:     podName,
+				Namespace:   namespace,
+				ClusterName: clusterName,
+			},
+			connector,
+			client,
+			k8sCfg,
+			sentinel.ExecInPod,
+			sentinel.ExecInPodOutput,
+		)
+		mon.SetBackupManager(bm)
+		connector.SetBackupManager(bm)
+
 		go func() {
 			if err := connector.Run(ctx); err != nil && ctx.Err() == nil {
 				log.Error().Err(err).Msg("sidecar connector exited with error")

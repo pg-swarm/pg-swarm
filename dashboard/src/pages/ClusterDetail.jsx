@@ -16,7 +16,7 @@ import {
   ArrowUpRight, Pause, Play, HardDrive, BarChart3,
   Table2, SearchCode, ArrowLeft, X, Info, AlertTriangle,
   AlertCircle, Flame, Database, Activity, ChevronDown, ChevronRight,
-  Loader, Trash2, Plus, Save, Pencil, Globe,
+  Loader, Trash2, Plus, Save, Pencil, Globe, Archive, RotateCcw,
 } from 'lucide-react';
 
 const SEV_ICONS = { info: Info, warning: AlertTriangle, error: AlertCircle, critical: Flame };
@@ -24,6 +24,7 @@ const SEV_ICONS = { info: Info, warning: AlertTriangle, error: AlertCircle, crit
 const TABS = [
   { id: 'instances', label: 'Instances' },
   { id: 'databases', label: 'Databases' },
+  { id: 'backups', label: 'Backups' },
   { id: 'events', label: 'Events' },
 ];
 
@@ -43,6 +44,7 @@ export default function ClusterDetail() {
   const [progressModalVisible, setProgressModalVisible] = useState(false);
   const [activeTab, setActiveTab] = useState('instances');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [sidecarLogLevel, setSidecarLogLevel] = useState('info');
   const { activeOperations } = useData();
   const mockTimerRef = useRef(null);
 
@@ -351,6 +353,26 @@ export default function ClusterDetail() {
                 <span className="cd-summary-label">Updated</span>
                 <span className="cd-summary-value">{timeAgo(cluster.updated_at)}</span>
               </div>
+              <div className="cd-summary-item">
+                <span className="cd-summary-label">Sidecar Log Level</span>
+                <select value={sidecarLogLevel} onChange={async (e) => {
+                  const level = e.target.value;
+                  setSidecarLogLevel(level);
+                  try {
+                    await api.setSidecarLogLevel(id, level);
+                    toast('Sidecar log level set to ' + level);
+                  } catch (err) {
+                    toast('Failed to set sidecar log level: ' + err.message, true);
+                  }
+                }} style={{
+                  fontSize: 12, padding: '2px 6px', background: 'var(--bg-secondary)',
+                  color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: 4,
+                }}>
+                  {['trace', 'debug', 'info', 'warn', 'error'].map(l => (
+                    <option key={l} value={l}>{l}</option>
+                  ))}
+                </select>
+              </div>
             </div>
             {(labelEntries.length > 0 || tags.length > 0) && (
               <div className="cd-summary-tags">
@@ -503,6 +525,11 @@ export default function ClusterDetail() {
           {/* ── Databases Tab ── */}
           {activeTab === 'databases' && (
             <ClusterDatabasesTab clusterId={id} toast={toast} />
+          )}
+
+          {/* ── Backups Tab ── */}
+          {activeTab === 'backups' && (
+            <ClusterBackupsTab clusterId={id} toast={toast} />
           )}
 
           {/* ── Events Tab ── */}
@@ -851,6 +878,293 @@ function DiskBarDark({ label, bytes, total, color }) {
 }
 
 // --- Cluster Databases Tab ---
+
+// --- Cluster Backups Tab ---
+
+const BACKUP_STATUS_CLASS = {
+  completed: 'badge-green',
+  running: 'badge-blue',
+  failed: 'badge-red',
+  pending: 'badge-amber',
+  skipped: 'badge-gray',
+};
+
+function fmtBytes(n) {
+  if (!n) return '-';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+function ClusterBackupsTab({ clusterId, toast }) {
+  const [backups, setBackups] = useState([]);
+  const [restores, setRestores] = useState([]);
+  const [triggerBusy, setTriggerBusy] = useState(false);
+  const [restoreModal, setRestoreModal] = useState(null); // null | backup object
+  const [restoreForm, setRestoreForm] = useState({ restore_type: 'logical', target_database: '', target_time: '' });
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [showRestores, setShowRestores] = useState(false);
+
+  async function load() {
+    try {
+      const [b, r] = await Promise.all([
+        api.clusterBackups(clusterId),
+        api.clusterRestores(clusterId),
+      ]);
+      setBackups(b || []);
+      setRestores(r || []);
+    } catch (e) {
+      console.error('backup load failed:', e);
+    }
+  }
+
+  useEffect(() => { load(); }, [clusterId]);
+
+  // Auto-refresh while any backup/restore is running.
+  useEffect(() => {
+    const anyRunning = [...backups, ...restores].some(x => x.status === 'running' || x.status === 'pending');
+    if (!anyRunning) return;
+    const iv = setInterval(load, 5000);
+    return () => clearInterval(iv);
+  }, [backups, restores]);
+
+  async function triggerBackup(backupType) {
+    setTriggerBusy(backupType);
+    try {
+      await api.triggerBackup(clusterId, backupType);
+      toast('Backup triggered — check status in a few moments');
+      setTimeout(load, 2000);
+    } catch (e) {
+      toast('Trigger failed: ' + e.message, true);
+    } finally {
+      setTriggerBusy(false);
+    }
+  }
+
+  function openRestoreModal(backup) {
+    setRestoreModal(backup);
+    const defaultType = backup?.backup_type === 'base' ? 'pitr' : 'logical';
+    setRestoreForm({ restore_type: defaultType, target_database: '', target_time: '' });
+  }
+
+  async function submitRestore() {
+    if (!restoreModal) return;
+    const body = {
+      restore_type: restoreForm.restore_type,
+      backup_id: restoreModal.id,
+      backup_path: restoreModal.backup_path,
+    };
+    if (restoreForm.restore_type === 'logical') {
+      if (!restoreForm.target_database) {
+        toast('Target database is required for logical restore', true);
+        return;
+      }
+      body.target_database = restoreForm.target_database;
+    } else {
+      if (!restoreForm.target_time) {
+        toast('Target time is required for PITR restore', true);
+        return;
+      }
+      body.target_time = new Date(restoreForm.target_time).toISOString();
+    }
+    setRestoreBusy(true);
+    try {
+      await api.triggerRestore(clusterId, body);
+      toast('Restore initiated');
+      setRestoreModal(null);
+      setTimeout(load, 2000);
+    } catch (e) {
+      toast('Restore failed: ' + e.message, true);
+    } finally {
+      setRestoreBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="cd-card">
+        <div className="cd-card-header" style={{ justifyContent: 'space-between' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Archive size={14} /> Backup Inventory ({backups.length})</span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {['base', 'incremental', 'logical'].map(t => (
+              <button key={t} className="btn btn-sm btn-approve" disabled={!!triggerBusy}
+                onClick={() => triggerBackup(t)}>
+                {triggerBusy === t ? <><Loader size={12} className="spin" /> Running...</> : `+ ${t}`}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="cd-card-body" style={{ padding: 0 }}>
+          {backups.length === 0 ? (
+            <div className="cd-empty">No backups recorded yet. Trigger one above or wait for the scheduled run.</div>
+          ) : (
+            <table className="cd-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>Size</th>
+                  <th>PG Version</th>
+                  <th>WAL Start</th>
+                  <th>Started</th>
+                  <th>Completed</th>
+                  <th style={{ width: 80 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {backups.map(b => (
+                  <tr key={b.id}>
+                    <td><span className="badge badge-blue" style={{ textTransform: 'capitalize' }}>{b.backup_type}</span></td>
+                    <td>
+                      <span className={'badge ' + (BACKUP_STATUS_CLASS[b.status] || 'badge-gray')}>
+                        <span className="dot" />{b.status}
+                      </span>
+                    </td>
+                    <td className="mono">{fmtBytes(b.size_bytes)}</td>
+                    <td className="mono muted">{b.pg_version || '-'}</td>
+                    <td className="mono muted" style={{ fontSize: 11 }}>{b.wal_start_lsn || '-'}</td>
+                    <td className="muted">{timeAgo(b.started_at)}</td>
+                    <td className="muted">{b.completed_at ? timeAgo(b.completed_at) : '-'}</td>
+                    <td>
+                      {b.status === 'completed' && (
+                        <button className="btn btn-sm" onClick={() => openRestoreModal(b)}
+                          title="Restore from this backup">
+                          <RotateCcw size={12} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {backups.some(b => b.error_message) && (
+            <div className="cd-table-errors">
+              {backups.filter(b => b.error_message).map(b => (
+                <div key={b.id} style={{ fontSize: 11, color: 'var(--red)', marginBottom: 4 }}>
+                  <span className="mono">{b.backup_type}/{b.id?.slice(0, 8)}</span>: {b.error_message}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {restores.length > 0 && (
+        <div className="cd-card">
+          <div className="cd-card-header" style={{ cursor: 'pointer' }} onClick={() => setShowRestores(v => !v)}>
+            <RotateCcw size={14} />
+            Restore History ({restores.length})
+            {showRestores ? <ChevronDown size={13} style={{ marginLeft: 'auto' }} /> : <ChevronRight size={13} style={{ marginLeft: 'auto' }} />}
+          </div>
+          {showRestores && (
+            <div className="cd-card-body" style={{ padding: 0 }}>
+              <table className="cd-table">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Target DB</th>
+                    <th>Target Time</th>
+                    <th>Started</th>
+                    <th>Completed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {restores.map(r => (
+                    <tr key={r.id}>
+                      <td><span className="badge badge-blue" style={{ textTransform: 'capitalize' }}>{r.restore_type}</span></td>
+                      <td>
+                        <span className={'badge ' + (BACKUP_STATUS_CLASS[r.status] || 'badge-gray')}>
+                          <span className="dot" />{r.status}
+                        </span>
+                      </td>
+                      <td className="mono">{r.target_database || '-'}</td>
+                      <td className="mono muted" style={{ fontSize: 11 }}>{r.target_time ? new Date(r.target_time).toLocaleString() : '-'}</td>
+                      <td className="muted">{timeAgo(r.started_at)}</td>
+                      <td className="muted">{r.completed_at ? timeAgo(r.completed_at) : '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {restores.some(r => r.error_message) && (
+                <div className="cd-table-errors">
+                  {restores.filter(r => r.error_message).map(r => (
+                    <div key={r.id} style={{ fontSize: 11, color: 'var(--red)', marginBottom: 4 }}>
+                      <span className="mono">{r.restore_type}/{r.id?.slice(0, 8)}</span>: {r.error_message}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Restore Modal */}
+      {restoreModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => !restoreBusy && setRestoreModal(null)}>
+          <div style={{
+            background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10,
+            padding: 24, minWidth: 400, maxWidth: 520,
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <span style={{ fontWeight: 700, fontSize: 14 }}>Restore from backup</span>
+              <button className="btn btn-sm" onClick={() => setRestoreModal(null)} disabled={restoreBusy}><X size={13} /></button>
+            </div>
+
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16 }}>
+              <span className="badge badge-blue" style={{ textTransform: 'capitalize', marginRight: 6 }}>{restoreModal.backup_type}</span>
+              {timeAgo(restoreModal.started_at)} &nbsp;·&nbsp; {fmtBytes(restoreModal.size_bytes)}
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>Restore type</label>
+              <select className="input" value={restoreForm.restore_type}
+                onChange={e => setRestoreForm(f => ({ ...f, restore_type: e.target.value }))}
+                style={{ width: '100%' }}>
+                <option value="logical">Logical (pg_restore)</option>
+                <option value="pitr">PITR (point-in-time recovery)</option>
+              </select>
+            </div>
+
+            {restoreForm.restore_type === 'logical' && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>Target database</label>
+                <input className="input" placeholder="e.g. myapp" value={restoreForm.target_database}
+                  onChange={e => setRestoreForm(f => ({ ...f, target_database: e.target.value }))}
+                  style={{ width: '100%' }} />
+              </div>
+            )}
+
+            {restoreForm.restore_type === 'pitr' && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>Recovery target time</label>
+                <input className="input" type="datetime-local" value={restoreForm.target_time}
+                  onChange={e => setRestoreForm(f => ({ ...f, target_time: e.target.value }))}
+                  style={{ width: '100%' }} />
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                  Warning: PITR stops PostgreSQL and replaces PGDATA. Ensure you have WAL segments archived.
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 20 }}>
+              <button className="btn" onClick={() => setRestoreModal(null)} disabled={restoreBusy}>Cancel</button>
+              <button className="btn btn-approve" onClick={submitRestore} disabled={restoreBusy}>
+                {restoreBusy ? <><Loader size={13} className="spin" /> Restoring...</> : <><RotateCcw size={13} /> Restore</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 
 function ClusterDatabasesTab({ clusterId, toast }) {
   const [dbs, setDbs] = useState([]);

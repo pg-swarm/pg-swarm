@@ -356,6 +356,17 @@ func (p *PGClient) Exec(sql string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+// ExecDB runs SQL on the current primary pod connected to a specific database.
+func (p *PGClient) ExecDB(database, sql string) (string, error) {
+	primary, err := p.k8s.GetPrimaryPod(p.clusterName)
+	if err != nil {
+		return "", fmt.Errorf("no primary pod: %w", err)
+	}
+	out, err := p.k8s.ExecInPod(primary, "postgres",
+		"psql", "-U", "postgres", "-d", database, "-tAc", sql)
+	return strings.TrimSpace(out), err
+}
+
 // ExecOnReplica runs SQL on a replica pod (for verifying replication).
 func (p *PGClient) ExecOnReplica(sql string) (string, error) {
 	replica, err := p.k8s.GetReplicaPod(p.clusterName)
