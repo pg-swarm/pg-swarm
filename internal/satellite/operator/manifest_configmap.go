@@ -86,6 +86,8 @@ var defaultPgParams = map[string]string{
 // mandatoryHbaRules are required pg_hba.conf entries for HA operation.
 var mandatoryHbaRules = []string{
 	"local all all trust",
+	"local replication postgres trust",
+	"local replication repl_user trust",
 	"host all all 0.0.0.0/0 scram-sha-256",
 	"host replication repl_user 0.0.0.0/0 scram-sha-256",
 	"host replication postgres 0.0.0.0/0 scram-sha-256",
