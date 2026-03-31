@@ -133,20 +133,31 @@ func (e *Executor) ExecuteBaseBackup(ctx context.Context, cfg *pgswarmv1.BackupC
 	result.WALStartLSN = strings.TrimSpace(startLSN)
 	e.logger.Debug().Str("wal_start_lsn", result.WALStartLSN).Msg("ExecuteBaseBackup: start LSN captured")
 
-	// Stream pg_basebackup to storage with -D - (stdout).
-	// NOTE: -D - requires all tablespace data to be in the main PGDATA directory.
-	// Clusters with custom tablespaces must use -D /tmp/... with a separate upload.
-	e.logger.Debug().Msg("ExecuteBaseBackup: streaming base backup")
-	basebackupCmd := "pg_basebackup -U postgres -D - -Ft -z --checkpoint=fast --wal-method=none --no-password"
-	key := fmt.Sprintf("%s/base/%s/base.tar.gz", cfg.GetBasePath(), ts)
-
-	// pg_basebackup -z already outputs gzip-compressed tar, so no wrap function needed
-	if err := e.streamFromPod(ctx, backend, key, basebackupCmd, nil); err != nil {
-		result.Error = fmt.Errorf("stream base backup: %w", err)
-		e.logger.Debug().Err(err).Msg("ExecuteBaseBackup: stream failed")
+	// Run pg_basebackup into a temp directory in the pod.
+	// This produces base.tar.gz and backup_manifest as separate files.
+	tmpDir := fmt.Sprintf("/tmp/pg-basebackup-%s", ts)
+	e.logger.Debug().Str("tmp_dir", tmpDir).Msg("ExecuteBaseBackup: running pg_basebackup to temp dir")
+	backupCmd := fmt.Sprintf(
+		"pg_basebackup -U postgres -D %s -Ft -z --checkpoint=fast --wal-method=none --no-password",
+		tmpDir,
+	)
+	if err := e.execInPod(ctx, backupCmd); err != nil {
+		result.Error = fmt.Errorf("run pg_basebackup: %w", err)
+		e.logger.Debug().Err(err).Msg("ExecuteBaseBackup: pg_basebackup failed")
 		return result
 	}
-	e.logger.Debug().Str("key", key).Msg("ExecuteBaseBackup: base backup streamed successfully")
+	e.logger.Debug().Str("tmp_dir", tmpDir).Msg("ExecuteBaseBackup: pg_basebackup completed")
+
+	// Stream base.tar.gz from pod temp dir to storage (already gzip-compressed by -z).
+	tarKey := fmt.Sprintf("%s/base/%s/base.tar.gz", cfg.GetBasePath(), ts)
+	e.logger.Debug().Str("key", tarKey).Msg("ExecuteBaseBackup: streaming base.tar.gz to storage")
+	if err := e.streamFromPod(ctx, backend, tarKey, "cat "+tmpDir+"/base.tar.gz", nil); err != nil {
+		result.Error = fmt.Errorf("upload base tar: %w", err)
+		e.logger.Debug().Err(err).Msg("ExecuteBaseBackup: tar upload failed")
+		e.execInPod(ctx, "rm -rf "+tmpDir)
+		return result
+	}
+	e.logger.Debug().Str("key", tarKey).Msg("ExecuteBaseBackup: base.tar.gz uploaded successfully")
 
 	// Get end LSN
 	e.logger.Trace().Msg("ExecuteBaseBackup: querying end WAL LSN")
@@ -154,22 +165,40 @@ func (e *Executor) ExecuteBaseBackup(ctx context.Context, cfg *pgswarmv1.BackupC
 	result.WALEndLSN = strings.TrimSpace(endLSN)
 	e.logger.Debug().Str("wal_end_lsn", result.WALEndLSN).Msg("ExecuteBaseBackup: end LSN captured")
 
+	// Read backup_manifest from pod (small file, ~10-100 KB), gzip it, upload as standalone object.
+	// This manifest is required for incremental backups via --incremental=<path>.
+	e.logger.Trace().Str("tmp_dir", tmpDir).Msg("ExecuteBaseBackup: reading backup_manifest")
+	manifestRaw, err := e.execInPodOutput(ctx, "cat "+tmpDir+"/backup_manifest")
+	if err != nil {
+		e.logger.Warn().Err(err).Msg("could not read backup_manifest (incremental backups will not be available)")
+	} else {
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		if _, err := gw.Write([]byte(manifestRaw)); err != nil {
+			e.logger.Warn().Err(err).Msg("could not gzip backup_manifest")
+		} else if err := gw.Close(); err != nil {
+			e.logger.Warn().Err(err).Msg("could not close gzip writer")
+		} else {
+			manifestKey := fmt.Sprintf("%s/base/%s/backup_manifest.gz", cfg.GetBasePath(), ts)
+			e.logger.Trace().Str("manifest_key", manifestKey).Msg("ExecuteBaseBackup: uploading backup_manifest.gz")
+			if err := backend.Upload(ctx, manifestKey, bytes.NewReader(buf.Bytes())); err != nil {
+				e.logger.Warn().Err(err).Msg("failed to upload backup_manifest.gz (incremental backups will not be available)")
+			} else {
+				e.logger.Debug().Str("manifest_key", manifestKey).Msg("ExecuteBaseBackup: backup_manifest.gz uploaded successfully")
+			}
+		}
+	}
+
+	// Cleanup temp directory in pod.
+	e.logger.Trace().Str("tmp_dir", tmpDir).Msg("ExecuteBaseBackup: cleaning up temp directory")
+	if err := e.execInPod(ctx, "rm -rf "+tmpDir); err != nil {
+		e.logger.Warn().Err(err).Msg("could not clean up temp directory (will be cleaned on next backup)")
+	}
+
 	// SizeBytes tracking is deferred pending a counting io.Reader wrapper.
 	result.SizeBytes = 0
 
-	// Upload a metadata manifest.
-	manifest := fmt.Sprintf(`{"backup_type":"base","timestamp":"%s","pg_version":"%s","wal_start_lsn":"%s","wal_end_lsn":"%s"}`,
-		ts, result.PGVersion, result.WALStartLSN, result.WALEndLSN)
-	manifestKey := fmt.Sprintf("%s/base/%s/manifest.json", cfg.GetBasePath(), ts)
-	e.logger.Trace().Str("manifest_key", manifestKey).Msg("ExecuteBaseBackup: uploading metadata manifest")
-	if err := backend.Upload(ctx, manifestKey, strings.NewReader(manifest)); err != nil {
-		e.logger.Warn().Err(err).Msg("failed to upload manifest (backup data is safe)")
-	}
-
-	// NOTE: pg_basebackup's own backup_manifest is included inside the tar stream
-	// produced by -Ft, so there is no separate file to upload.
-
-	result.BackupPath = key
+	result.BackupPath = tarKey
 	result.CompletedAt = time.Now()
 	e.logger.Debug().
 		Str("path", result.BackupPath).
@@ -213,8 +242,8 @@ func (e *Executor) ExecuteIncrementalBackup(ctx context.Context, cfg *pgswarmv1.
 	}
 	defer backend.Close()
 
-	// List all objects under the base/ prefix and find the latest manifest.json.
-	// Keys look like: <base_path>/base/<timestamp>/manifest.json
+	// List all objects under the base/ prefix and find the latest backup_manifest.gz.
+	// Keys look like: <base_path>/base/<timestamp>/backup_manifest.gz
 	listPrefix := cfg.GetBasePath() + "/base/"
 	e.logger.Trace().Str("prefix", listPrefix).Msg("ExecuteIncrementalBackup: listing prior base backups")
 	objects, err := backend.List(ctx, listPrefix)
@@ -226,23 +255,18 @@ func (e *Executor) ExecuteIncrementalBackup(ctx context.Context, cfg *pgswarmv1.
 	}
 	e.logger.Debug().Int("object_count", len(objects)).Msg("ExecuteIncrementalBackup: found objects in base/ prefix")
 
-	// Find the most recent manifest.json (keys sort lexically; pick the last one).
+	// Find the most recent backup_manifest.gz (keys sort lexically; pick the last one).
 	var latestManifestKey string
 	for _, obj := range objects {
-		if strings.HasSuffix(obj.Key, "/backup_manifest") || strings.HasSuffix(obj.Key, "/manifest.json") {
-			// Prefer pg_basebackup's own backup_manifest over our metadata manifest.json
-			if strings.HasSuffix(obj.Key, "/backup_manifest") {
-				if obj.Key > latestManifestKey {
-					latestManifestKey = obj.Key
-				}
-			} else if latestManifestKey == "" || (!strings.Contains(latestManifestKey, "/backup_manifest") && obj.Key > latestManifestKey) {
+		if strings.HasSuffix(obj.Key, "/backup_manifest.gz") {
+			if obj.Key > latestManifestKey {
 				latestManifestKey = obj.Key
 			}
 		}
 	}
 
 	if latestManifestKey == "" {
-		e.logger.Info().Msg("no pg_basebackup manifest found in prior base backups, running full base backup")
+		e.logger.Info().Msg("no backup_manifest.gz found in prior base backups, running full base backup")
 		r := e.ExecuteBaseBackup(ctx, cfg)
 		r.BackupType = "incremental"
 		return r
@@ -250,22 +274,31 @@ func (e *Executor) ExecuteIncrementalBackup(ctx context.Context, cfg *pgswarmv1.
 
 	e.logger.Info().Str("manifest_key", latestManifestKey).Msg("found prior backup manifest, running incremental backup")
 
-	// Download the manifest file and write it to the postgres pod.
-	e.logger.Trace().Str("manifest_key", latestManifestKey).Msg("ExecuteIncrementalBackup: downloading prior manifest")
-	manifestReader, err := backend.Download(ctx, latestManifestKey)
+	// Download the gzip-compressed manifest file and decompress it.
+	e.logger.Trace().Str("manifest_key", latestManifestKey).Msg("ExecuteIncrementalBackup: downloading prior backup_manifest.gz")
+	manifestGzReader, err := backend.Download(ctx, latestManifestKey)
 	if err != nil {
 		result.Error = fmt.Errorf("download prior manifest: %w", err)
 		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: failed to download prior manifest")
 		return result
 	}
-	defer manifestReader.Close()
+	defer manifestGzReader.Close()
 
-	var manifestBuf bytes.Buffer
-	if _, err := manifestBuf.ReadFrom(manifestReader); err != nil {
-		result.Error = fmt.Errorf("read prior manifest: %w", err)
+	// Decompress the gzip-compressed manifest.
+	gr, err := gzip.NewReader(manifestGzReader)
+	if err != nil {
+		result.Error = fmt.Errorf("decompress prior manifest: %w", err)
+		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: failed to decompress manifest")
 		return result
 	}
-	e.logger.Debug().Int("manifest_size", manifestBuf.Len()).Msg("ExecuteIncrementalBackup: prior manifest downloaded")
+	defer gr.Close()
+
+	var manifestBuf bytes.Buffer
+	if _, err := manifestBuf.ReadFrom(gr); err != nil {
+		result.Error = fmt.Errorf("read decompressed prior manifest: %w", err)
+		return result
+	}
+	e.logger.Debug().Int("manifest_size", manifestBuf.Len()).Msg("ExecuteIncrementalBackup: prior manifest downloaded and decompressed")
 
 	// Write manifest to a temp file in the pod via base64-encoded exec.
 	manifestPath := "/tmp/pg-prior-manifest"
@@ -288,48 +321,68 @@ func (e *Executor) ExecuteIncrementalBackup(ctx context.Context, cfg *pgswarmv1.
 
 	ts := result.StartedAt.UTC().Format("20060102T150405")
 
-	// Stream pg_basebackup --incremental to storage with -D - (stdout).
-	// NOTE: -D - requires all tablespace data to be in the main PGDATA directory.
-	// Clusters with custom tablespaces must use -D /tmp/... with a separate upload.
-	e.logger.Debug().Str("manifest_path", manifestPath).Msg("ExecuteIncrementalBackup: streaming incremental backup")
+	// Run pg_basebackup --incremental into a temp directory in the pod.
+	// This produces incremental.tar.gz and backup_manifest as separate files.
+	tmpDir := fmt.Sprintf("/tmp/pg-incr-%s", ts)
+	e.logger.Debug().Str("tmp_dir", tmpDir).Str("manifest_path", manifestPath).Msg("ExecuteIncrementalBackup: running pg_basebackup --incremental to temp dir")
 	incrCmd := fmt.Sprintf(
-		"pg_basebackup -U postgres -D - -Ft -z --checkpoint=fast --wal-method=none --no-password --incremental=%s",
-		manifestPath,
+		"pg_basebackup -U postgres -D %s -Ft -z --checkpoint=fast --wal-method=none --no-password --incremental=%s",
+		tmpDir, manifestPath,
 	)
-	key := fmt.Sprintf("%s/incremental/%s/incremental.tar.gz", cfg.GetBasePath(), ts)
-
-	// pg_basebackup -z already outputs gzip-compressed tar, so no wrap function needed
-	if err := e.streamFromPod(ctx, backend, key, incrCmd, nil); err != nil {
-		result.Error = fmt.Errorf("stream incremental backup: %w", err)
-		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: stream failed")
-		e.execInPod(ctx, fmt.Sprintf("rm -f %s", manifestPath))
+	if err := e.execInPod(ctx, incrCmd); err != nil {
+		result.Error = fmt.Errorf("run pg_basebackup --incremental: %w", err)
+		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: pg_basebackup failed")
+		e.execInPod(ctx, fmt.Sprintf("rm -rf %s %s", tmpDir, manifestPath))
 		return result
 	}
-	e.logger.Debug().Str("key", key).Msg("ExecuteIncrementalBackup: incremental backup streamed successfully")
+	e.logger.Debug().Str("tmp_dir", tmpDir).Msg("ExecuteIncrementalBackup: pg_basebackup --incremental completed")
+
+	// Stream incremental.tar.gz from pod temp dir to storage (already gzip-compressed by -z).
+	tarKey := fmt.Sprintf("%s/incremental/%s/incremental.tar.gz", cfg.GetBasePath(), ts)
+	e.logger.Debug().Str("key", tarKey).Msg("ExecuteIncrementalBackup: streaming incremental.tar.gz to storage")
+	if err := e.streamFromPod(ctx, backend, tarKey, "cat "+tmpDir+"/base.tar.gz", nil); err != nil {
+		result.Error = fmt.Errorf("upload incremental tar: %w", err)
+		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: tar upload failed")
+		e.execInPod(ctx, fmt.Sprintf("rm -rf %s %s", tmpDir, manifestPath))
+		return result
+	}
+	e.logger.Debug().Str("key", tarKey).Msg("ExecuteIncrementalBackup: incremental.tar.gz uploaded successfully")
 
 	endLSN, _ := e.execInPodOutput(ctx, "psql -U postgres -tAc \"SELECT pg_current_wal_lsn()\" 2>/dev/null || echo ''")
 	result.WALEndLSN = strings.TrimSpace(endLSN)
 	e.logger.Debug().Str("wal_end_lsn", result.WALEndLSN).Msg("ExecuteIncrementalBackup: end LSN captured")
 
+	// Read backup_manifest from pod, gzip it, upload as standalone object.
+	e.logger.Trace().Str("tmp_dir", tmpDir).Msg("ExecuteIncrementalBackup: reading backup_manifest")
+	manifestRaw, err := e.execInPodOutput(ctx, "cat "+tmpDir+"/backup_manifest")
+	if err != nil {
+		e.logger.Warn().Err(err).Msg("could not read backup_manifest (future incrementals from this backup will not be available)")
+	} else {
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		if _, err := gw.Write([]byte(manifestRaw)); err != nil {
+			e.logger.Warn().Err(err).Msg("could not gzip backup_manifest")
+		} else if err := gw.Close(); err != nil {
+			e.logger.Warn().Err(err).Msg("could not close gzip writer")
+		} else {
+			manifestKey := fmt.Sprintf("%s/incremental/%s/backup_manifest.gz", cfg.GetBasePath(), ts)
+			e.logger.Trace().Str("manifest_key", manifestKey).Msg("ExecuteIncrementalBackup: uploading backup_manifest.gz")
+			if err := backend.Upload(ctx, manifestKey, bytes.NewReader(buf.Bytes())); err != nil {
+				e.logger.Warn().Err(err).Msg("failed to upload backup_manifest.gz (future incrementals from this backup will not be available)")
+			} else {
+				e.logger.Debug().Str("manifest_key", manifestKey).Msg("ExecuteIncrementalBackup: backup_manifest.gz uploaded successfully")
+			}
+		}
+	}
+
 	// SizeBytes tracking is deferred pending a counting io.Reader wrapper.
 	result.SizeBytes = 0
 
-	// Upload our metadata manifest. Note that pg_basebackup's own backup_manifest
-	// is included inside the tar stream produced by -Ft, so future incrementals
-	// can chain off this backup by extracting from the tar.
-	manifest := fmt.Sprintf(`{"backup_type":"incremental","timestamp":"%s","pg_version":"%s","wal_start_lsn":"%s","wal_end_lsn":"%s","based_on":"%s"}`,
-		ts, result.PGVersion, result.WALStartLSN, result.WALEndLSN, latestManifestKey)
-	manifestKey := fmt.Sprintf("%s/incremental/%s/manifest.json", cfg.GetBasePath(), ts)
-	e.logger.Trace().Str("manifest_key", manifestKey).Msg("ExecuteIncrementalBackup: uploading metadata manifest")
-	if err := backend.Upload(ctx, manifestKey, strings.NewReader(manifest)); err != nil {
-		e.logger.Warn().Err(err).Msg("failed to upload incremental manifest")
-	}
+	// Cleanup temp directory and prior manifest file.
+	e.logger.Trace().Str("tmp_dir", tmpDir).Str("manifest_path", manifestPath).Msg("ExecuteIncrementalBackup: cleaning up temporary files")
+	e.execInPod(ctx, fmt.Sprintf("rm -rf %s %s", tmpDir, manifestPath))
 
-	// Cleanup the prior manifest file
-	e.logger.Trace().Msg("ExecuteIncrementalBackup: cleaning up manifest file")
-	e.execInPod(ctx, fmt.Sprintf("rm -f %s", manifestPath))
-
-	result.BackupPath = key
+	result.BackupPath = tarKey
 	result.CompletedAt = time.Now()
 	e.logger.Debug().
 		Str("path", result.BackupPath).
