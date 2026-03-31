@@ -759,9 +759,21 @@ func buildBackupConfig(st store.Store, enc *crypto.Encryptor, backup *models.Bac
 		return nil, fmt.Errorf("get backup store: %w", err)
 	}
 
+	// Look up satellite name for top-level backup path prefix.
+	satName := ""
+	if cfg.SatelliteID != nil {
+		if sat, err := st.GetSatellite(context.Background(), *cfg.SatelliteID); err == nil {
+			satName = sat.Name
+			if satName == "" {
+				satName = sat.Hostname // fallback if user hasn't assigned a name yet
+			}
+		}
+		// If lookup fails, satName stays "" — path degrades gracefully
+	}
+
 	bc := &pgswarmv1.BackupConfig{
 		StoreId:  bs.ID.String(),
-		BasePath: cfg.Namespace + "/" + cfg.Name,
+		BasePath: satName + "/" + cfg.Namespace + "/" + cfg.Name,
 	}
 
 	// Physical
