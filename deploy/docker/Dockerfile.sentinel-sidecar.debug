@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+# Debug image — NOT for production use.
+# Runs dlv in headless mode; attach with VS Code "Attach to sentinel-sidecar (dlv)".
+
+# ── Build stage ───────────────────────────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN apk add --no-cache git ca-certificates tzdata
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Install dlv for the target architecture.
+# When cross-compiling (BUILDPLATFORM != TARGETPLATFORM), go install places the
+# binary at $GOPATH/bin/${TARGETOS}_${TARGETARCH}/dlv.  Use find to locate it
+# regardless of path so this works for both native and cross-compile builds.
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go install github.com/go-delve/delve/cmd/dlv@latest && \
+    find /go/bin -name dlv -exec mv {} /usr/local/bin/dlv \;
+
+COPY . .
+
+# Build without stripping symbols and with optimisations disabled so dlv can
+# step through code and inspect variables accurately.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -gcflags="all=-N -l" \
+    -o /out/sentinel-sidecar ./cmd/sentinel-sidecar
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+# Use golang:1.26-alpine (not bare alpine) so dlv has the runtime support it
+# needs.  Image size is not a concern for a dev-only image.
+FROM golang:1.26-alpine
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /out/sentinel-sidecar /usr/local/bin/sentinel-sidecar
+COPY --from=builder /usr/local/bin/dlv     /usr/local/bin/dlv
+
+# dlv DAP/remote port
+EXPOSE 2345
+
+# Run as root — required for ptrace(2) which dlv uses to control the process.
+USER root
+
+ENTRYPOINT ["dlv", "exec", "/usr/local/bin/sentinel-sidecar", \
+  "--headless", "--listen=:2345", "--api-version=2", "--accept-multiclient", "--"]

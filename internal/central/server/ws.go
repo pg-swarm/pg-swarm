@@ -36,26 +36,20 @@ func newWSHub(srv *RESTServer) *WSHub {
 
 // Run starts the hub's broadcast loop. Call in a goroutine.
 func (h *WSHub) Run() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ticker.C:
-			h.broadcast()
-		case <-h.notify:
-			// Small debounce so rapid mutations coalesce into one broadcast.
-			time.Sleep(50 * time.Millisecond)
-			// Drain any extra notifications.
-			for {
-				select {
-				case <-h.notify:
-				default:
-					goto done
-				}
+		<-h.notify
+		// Small debounce so rapid mutations coalesce into one broadcast.
+		time.Sleep(50 * time.Millisecond)
+		// Drain any extra notifications.
+		for {
+			select {
+			case <-h.notify:
+			default:
+				goto done
 			}
-		done:
-			h.broadcast()
 		}
+	done:
+		h.broadcast()
 	}
 }
 
@@ -97,11 +91,14 @@ func (h *WSHub) BroadcastJSON(msgType string, data interface{}) {
 	if len(h.clients) == 0 {
 		return
 	}
+
+	log.Trace().Interface("Broadcasting Json", data).Msg("In BroadcastJSON")
 	msg, err := json.Marshal(wsMessage{Type: msgType, Data: data})
 	if err != nil {
-		log.Error().Err(err).Msg("ws: marshal broadcast")
+		log.Error().AnErr("Error marshalling json", err).Msg("In BroadcastJSON")
 		return
 	}
+	log.Trace().Interface("Clients", h.clients).Send()
 	for c := range h.clients {
 		select {
 		case c.send <- msg:
@@ -112,6 +109,7 @@ func (h *WSHub) BroadcastJSON(msgType string, data interface{}) {
 
 // broadcast fetches current state and pushes it to all clients.
 func (h *WSHub) broadcast() {
+	log.Debug().Msg("Broadcasting state changes")
 	h.mu.RLock()
 	n := len(h.clients)
 	h.mu.RUnlock()
@@ -217,6 +215,8 @@ func (h *WSHub) handleWS(c *websocket.Conn) {
 
 	// Send initial state immediately.
 	state := h.fetchState()
+	log.Trace().Interface("State", state).Msg("Fetched State")
+
 	if msg, err := json.Marshal(wsMessage{Type: "full_state", Data: state}); err == nil {
 		if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
 			return
@@ -227,6 +227,7 @@ func (h *WSHub) handleWS(c *websocket.Conn) {
 	go func() {
 		for msg := range client.send {
 			if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+				log.Error().AnErr("Error sending message to client", err).Send()
 				return
 			}
 		}

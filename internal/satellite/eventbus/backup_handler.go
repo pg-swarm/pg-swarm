@@ -61,6 +61,7 @@ func (h *BackupHandler) handleConfigUpdate(ctx context.Context, evt *pgswarmv1.E
 	}
 
 	h.logger.Info().Str("cluster", clusterName).Int("sidecars", len(streams)).
+		Int("config_len", len(configJSON)).
 		Msg("pushing backup config to sidecars")
 
 	for _, s := range streams {
@@ -118,9 +119,15 @@ func (h *BackupHandler) handleTrigger(ctx context.Context, evt *pgswarmv1.Event)
 		Str("type", backupType).Msg("triggering backup on sidecar")
 
 	go func() {
-		result, err := h.streams.SendEventCommandAndWait(ctx, target.Namespace, target.PodName, "command.backup_trigger", map[string]string{
+		params := map[string]string{
 			"backup_type": backupType,
-		})
+		}
+		// Forward the embedded backup_config from central so the sidecar can
+		// apply storage credentials even if it missed the last config_update.
+		if bcJSON, ok := evt.Data["backup_config"]; ok && bcJSON != "" {
+			params["backup_config"] = bcJSON
+		}
+		result, err := h.streams.SendEventCommandAndWait(ctx, target.Namespace, target.PodName, "command.backup_trigger", params)
 
 		resultEvt := NewPodEvent("backup.trigger.completed", clusterName, namespace, target.PodName, "satellite")
 		if evt.GetOperationId() != "" {
@@ -229,9 +236,14 @@ func (h *BackupHandler) handleRestore(ctx context.Context, evt *pgswarmv1.Event)
 		Str("type", cmd.GetRestoreType()).Msg("dispatching restore to sidecar")
 
 	go func() {
-		result, err := h.streams.SendEventCommandAndWait(ctx, namespace, targetPod, "command.restore", map[string]string{
+		params := map[string]string{
 			"restore_command": restoreCmdJSON,
-		})
+		}
+		// Forward embedded backup_config so the sidecar has storage credentials.
+		if bcJSON, ok := evt.Data["backup_config"]; ok && bcJSON != "" {
+			params["backup_config"] = bcJSON
+		}
+		result, err := h.streams.SendEventCommandAndWait(ctx, namespace, targetPod, "command.restore", params)
 
 		resultEvt := NewPodEvent("restore.completed", clusterName, namespace, targetPod, "satellite")
 		if evt.GetOperationId() != "" {

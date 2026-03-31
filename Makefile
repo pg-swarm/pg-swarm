@@ -4,6 +4,7 @@
         docker-push-central docker-push-satellite docker-push-sentinel docker-push-all \
         docker-compose-up docker-compose-down \
         minikube-build-central minikube-build-satellite minikube-build-sentinel minikube-build-all \
+        minikube-build-sentinel-debug minikube-patch-sentinel-debug minikube-unpatch-sentinel-debug minikube-debug-sentinel \
         k8s-deploy-central k8s-deploy-central-minikube k8s-deploy-satellite k8s-deploy-satellite-minikube k8s-deploy-all \
         k8s-delete-central k8s-delete-satellite k8s-delete-all \
         k8s-status k8s-refresh-deploy help
@@ -126,6 +127,41 @@ minikube-build-sentinel: ## Build sentinel-sidecar image and load into minikube
 	docker buildx build --platform linux/$(MINIKUBE_ARCH) \
 		-f $(DOCKERFILE_DIR)/Dockerfile.sentinel-sidecar \
 		-t $(DOCKER_REPO)/pg-swarm-sentinel:$(IMAGE_TAG) --load .
+
+minikube-build-sentinel-debug: ## Build sentinel-sidecar debug image (dlv) and load into minikube
+	eval $$(minikube docker-env) && \
+	docker buildx build --platform linux/$(MINIKUBE_ARCH) \
+		-f $(DOCKERFILE_DIR)/Dockerfile.sentinel-sidecar.debug \
+		-t $(DOCKER_REPO)/pg-swarm-sentinel:debug --load .
+
+minikube-patch-sentinel-debug: ## Patch satellite-config to use the :debug sentinel image
+	kubectl patch configmap satellite-config \
+		-n pgswarm-system \
+		--type merge \
+		-p '{"data":{"DEFAULT_SENTINEL_IMAGE":"$(DOCKER_REPO)/pg-swarm-sentinel:debug"}}'
+	@printf "Patched. Delete existing PG pods to pick up the change.\n"
+	@printf "Restore with: make minikube-unpatch-sentinel-debug\n"
+
+minikube-unpatch-sentinel-debug: ## Restore satellite-config DEFAULT_SENTINEL_IMAGE to :latest
+	kubectl patch configmap satellite-config \
+		-n pgswarm-system \
+		--type merge \
+		-p '{"data":{"DEFAULT_SENTINEL_IMAGE":"$(DOCKER_REPO)/pg-swarm-sentinel:latest"}}'
+	@printf "Restored DEFAULT_SENTINEL_IMAGE to :latest.\n"
+
+# NOTE: The sentinel container needs SYS_PTRACE for dlv. Patch the StatefulSet once after
+# deploying the debug image (verify container order first):
+#   kubectl get sts <sts-name> -n <ns> -o jsonpath='{.spec.template.spec.containers[*].name}'
+#   kubectl patch statefulset <sts-name> -n <ns> --type=json \
+#     -p='[{"op":"add","path":"/spec/template/spec/containers/1/securityContext",
+#            "value":{"capabilities":{"add":["SYS_PTRACE"]},"allowPrivilegeEscalation":true,"runAsUser":0}}]'
+minikube-debug-sentinel: ## Port-forward dlv :2345 from sentinel in TARGET_POD (make minikube-debug-sentinel TARGET_POD=<pod>)
+ifndef TARGET_POD
+	$(error TARGET_POD is required. Usage: make minikube-debug-sentinel TARGET_POD=<pod-name>)
+endif
+	@printf "Forwarding dlv :2345 from pod/$(TARGET_POD) -c sentinel\n"
+	@printf "Then in VS Code: Run > 'Attach to sentinel-sidecar (dlv)'\n"
+	kubectl port-forward pod/$(TARGET_POD) 2345:2345 -c sentinel
 
 minikube-build-all: minikube-build-central minikube-build-satellite minikube-build-sentinel ## Build all images and load into minikube
 

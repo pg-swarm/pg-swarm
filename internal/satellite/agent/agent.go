@@ -163,6 +163,27 @@ func (a *Agent) Run(ctx context.Context) error {
 		lh := eventbus.NewLifecycleHandler(a.operator, a.eventBus)
 		lh.Register()
 		log.Info().Msg("lifecycle handler registered on event bus")
+
+		// Push cached BackupConfig when a sidecar connects (it may have
+		// missed the initial backup.config_update that arrived before it
+		// was up).
+		sidecarSrv.SetOnSidecarConnect(func(id *pgswarmv1.SidecarIdentity) {
+			cfg := a.operator.GetDesiredConfig(id.Namespace, id.ClusterName)
+			if cfg == nil {
+				log.Debug().Str("pod", id.PodName).Str("cluster", id.ClusterName).
+					Str("namespace", id.Namespace).Msg("on-connect: no desired config cached for cluster")
+				return
+			}
+			if cfg.Backups == nil {
+				log.Debug().Str("pod", id.PodName).Str("cluster", id.ClusterName).
+					Msg("on-connect: desired config has no backup config")
+				return
+			}
+			log.Info().Str("pod", id.PodName).Str("cluster", id.ClusterName).
+				Str("store_id", cfg.Backups.GetStoreId()).
+				Msg("on-connect: pushing cached backup config to sidecar")
+			lh.EmitBackupConfigUpdate(context.Background(), cfg)
+		})
 	}
 
 	// 4b. Log rule handler: routes log.rule.* events from sidecars to commands

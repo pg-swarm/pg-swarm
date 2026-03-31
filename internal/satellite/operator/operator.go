@@ -374,6 +374,15 @@ func (o *Operator) ManagedClusters() []ManagedCluster {
 	return out
 }
 
+// GetDesiredConfig returns the cached ClusterConfig for a given cluster, or nil
+// if not found. Used to push config to sidecars that connect after the initial
+// config_update event.
+func (o *Operator) GetDesiredConfig(namespace, clusterName string) *pgswarmv1.ClusterConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.desired[clusterKey(namespace, clusterName)]
+}
+
 // ResolveNamespaceForCluster returns the namespace for a given cluster name,
 // falling back to defaultNamespace if the cluster is unknown.
 func (o *Operator) ResolveNamespaceForCluster(clusterName, namespace string) string {

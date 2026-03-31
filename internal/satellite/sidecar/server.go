@@ -27,13 +27,21 @@ type Server struct {
 	manager        *SidecarStreamManager
 	validateToken  TokenValidator
 	server         *grpc.Server
-	onSidecarEvent func(*pgswarmv1.Event) // forwards sidecar events to satellite EventBus
+	onSidecarEvent   func(*pgswarmv1.Event)            // forwards sidecar events to satellite EventBus
+	onSidecarConnect func(*pgswarmv1.SidecarIdentity) // called when a sidecar first connects
 }
 
 // SetOnSidecarEvent sets the callback for sidecar events received via the
 // event path. The satellite agent wires this to its EventBus.Publish.
 func (s *Server) SetOnSidecarEvent(fn func(*pgswarmv1.Event)) {
 	s.onSidecarEvent = fn
+}
+
+// SetOnSidecarConnect sets a callback invoked when a sidecar stream connects.
+// The satellite agent uses this to push cached config (e.g. BackupConfig) to
+// sidecars that missed the initial config_update event.
+func (s *Server) SetOnSidecarConnect(fn func(*pgswarmv1.SidecarIdentity)) {
+	s.onSidecarConnect = fn
 }
 
 // NewServer creates a sidecar gRPC server.
@@ -93,6 +101,11 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[pgswarmv1.SidecarMessag
 
 	s.manager.Add(id.Namespace, id.PodName, sidecarStream)
 	defer s.manager.Remove(id.Namespace, id.PodName)
+
+	// Push cached config (e.g. BackupConfig) to the newly connected sidecar.
+	if s.onSidecarConnect != nil {
+		s.onSidecarConnect(id)
+	}
 
 	// Read loop (goroutine)
 	errCh := make(chan error, 1)

@@ -243,6 +243,7 @@ func (s *RESTServer) fanOutDeploymentRule(ctx context.Context, rule *models.Depl
 // fanOutRulesForSatellite evaluates all deployment rules against the satellite's labels
 // and creates ClusterConfigs for matching rules that don't already have one.
 func (s *RESTServer) fanOutRulesForSatellite(ctx context.Context, satelliteID uuid.UUID, labels map[string]string) {
+	log.Debug().Msg("Fanout Config to clusters initiated")
 	rules, err := s.store.ListDeploymentRules(ctx)
 	if err != nil {
 		log.Error().Err(err).Str("satellite_id", satelliteID.String()).Msg("fan-out: failed to list deployment rules")
@@ -324,6 +325,8 @@ func (s *RESTServer) fanOutRulesForSatellite(ctx context.Context, satelliteID uu
 // pauseUnmatchedClusters pauses clusters on a satellite whose deployment rule's
 // label selector no longer matches the satellite's updated labels.
 func (s *RESTServer) pauseUnmatchedClusters(ctx context.Context, satelliteID uuid.UUID, newLabels map[string]string) {
+	log.Debug().Str("satellite_id", satelliteID.String()).Interface("labels", newLabels).Msg("checking for unmatched clusters to pause")
+
 	clusters, err := s.store.GetClusterConfigsBySatellite(ctx, satelliteID)
 	if err != nil {
 		log.Error().Err(err).Str("satellite_id", satelliteID.String()).Msg("pause-unmatched: failed to list clusters")

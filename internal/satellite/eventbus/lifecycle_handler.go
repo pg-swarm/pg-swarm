@@ -79,7 +79,7 @@ func (h *LifecycleHandler) handleCreateOrUpdate(ctx context.Context, evt *pgswar
 
 		// Push backup config to sidecars if present
 		if cfg.Backups != nil {
-			h.emitBackupConfigUpdate(ctx, cfg)
+			h.EmitBackupConfigUpdate(ctx, cfg)
 		}
 	}
 
@@ -148,9 +148,11 @@ func (h *LifecycleHandler) handlePause(ctx context.Context, evt *pgswarmv1.Event
 	return h.bus.Publish(ctx, resultEvt)
 }
 
-// emitBackupConfigUpdate serializes the BackupConfig and publishes a
+// EmitBackupConfigUpdate serializes the BackupConfig and publishes a
 // backup.config_update event so the BackupHandler pushes it to sidecars.
-func (h *LifecycleHandler) emitBackupConfigUpdate(ctx context.Context, cfg *pgswarmv1.ClusterConfig) {
+// Exported so the agent can call it when a sidecar connects after the
+// initial config push.
+func (h *LifecycleHandler) EmitBackupConfigUpdate(ctx context.Context, cfg *pgswarmv1.ClusterConfig) {
 	jsonBytes, err := protojson.Marshal(cfg.Backups)
 	if err != nil {
 		h.logger.Error().Err(err).Str("cluster", cfg.ClusterName).Msg("failed to marshal backup config")

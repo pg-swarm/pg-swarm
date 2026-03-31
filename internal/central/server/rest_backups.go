@@ -77,6 +77,10 @@ func (s *RESTServer) triggerBackup(c *fiber.Ctx) error {
 		} else {
 			log.Warn().Err(err).Str("cluster", cfg.Name).Msg("failed to build backup config for trigger")
 		}
+	} else {
+		log.Debug().Str("cluster", cfg.Name).
+			Bool("has_backup_spec", spec.Backup != nil).
+			Msg("trigger: not embedding backup_config (no backup spec or store_id)")
 	}
 
 	if err := s.streams.PushEvent(*cfg.SatelliteID, evt); err != nil {

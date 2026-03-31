@@ -29,8 +29,8 @@ var errNeedReRegister = errors.New("registration credentials rejected, re-regist
 // register → wait-for-approval flow, retrying indefinitely until
 // the context is cancelled.
 func (a *Agent) ensureIdentity(ctx context.Context) error {
-	log.Trace().Msg("attempting to load identity from env")
-	identity, err := a.loadIdentity()
+	log.Trace().Msg("attempting to load identity")
+	identity, err := a.loadIdentity(ctx)
 	if err == nil {
 		a.identity = identity
 		log.Info().Str("satellite_id", identity.SatelliteID).Msg("loaded existing identity")
@@ -228,14 +228,46 @@ func (a *Agent) pollApproval(ctx context.Context, client pgswarmv1.RegistrationS
 	}
 }
 
-// loadIdentity reads the satellite identity from env vars injected by the K8s secret.
-func (a *Agent) loadIdentity() (*Identity, error) {
+// loadIdentity reads the satellite identity. It first checks env vars
+// (PG_SWARM_SATELLITE_ID, PG_SWARM_AUTH_TOKEN) which are the fast path for
+// in-cluster pods with projected secret volumes. If the env vars are empty and
+// a K8s client is available, it falls back to reading the identity secret
+// directly via the K8s API.
+func (a *Agent) loadIdentity(ctx context.Context) (*Identity, error) {
 	satID := os.Getenv("PG_SWARM_SATELLITE_ID")
 	authToken := os.Getenv("PG_SWARM_AUTH_TOKEN")
 	if satID != "" && authToken != "" {
+		log.Trace().Msg("identity loaded from env vars")
 		return &Identity{SatelliteID: satID, AuthToken: authToken}, nil
 	}
-	return nil, os.ErrNotExist
+
+	if a.k8sClient == nil {
+		log.Trace().Msg("env vars empty and K8s client unavailable, no identity found")
+		return nil, os.ErrNotExist
+	}
+
+	ns := a.config.IdentitySecretNamespace
+	name := a.config.IdentitySecretName
+	log.Trace().Str("secret", ns+"/"+name).Msg("env vars empty, trying K8s secret")
+
+	secret, err := a.k8sClient.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Trace().Str("secret", ns+"/"+name).Msg("identity secret not found")
+			return nil, os.ErrNotExist
+		}
+		return nil, fmt.Errorf("read identity secret %s/%s: %w", ns, name, err)
+	}
+
+	satID = string(secret.Data["satellite-id"])
+	authToken = string(secret.Data["auth-token"])
+	if satID == "" || authToken == "" {
+		log.Warn().Str("secret", ns+"/"+name).Msg("identity secret exists but missing required keys")
+		return nil, os.ErrNotExist
+	}
+
+	log.Trace().Str("secret", ns+"/"+name).Msg("identity loaded from K8s secret")
+	return &Identity{SatelliteID: satID, AuthToken: authToken}, nil
 }
 
 // saveIdentity upserts the K8s secret with the satellite identity.
