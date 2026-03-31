@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -20,6 +21,12 @@ func ExecInPod(ctx context.Context, client kubernetes.Interface, restConfig *res
 // ExecInPodOutput is the exported form of execInPodOutput for use by sub-packages.
 func ExecInPodOutput(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, podName, namespace, command string) (string, error) {
 	return execInPodOutput(ctx, client, restConfig, podName, namespace, command)
+}
+
+// ExecInPodStream runs a command in the postgres container and streams its stdout
+// to the provided io.Writer. The caller owns the goroutine for concurrent execution.
+func ExecInPodStream(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, podName, namespace, command string, stdout io.Writer) error {
+	return execInPodStream(ctx, client, restConfig, podName, namespace, command, stdout)
 }
 
 // execInPod runs a shell command inside the "postgres" container of the given pod
@@ -81,4 +88,36 @@ func execInPodOutput(ctx context.Context, client kubernetes.Interface, restConfi
 		return "", fmt.Errorf("exec failed (stderr: %s): %w", stderr.String(), err)
 	}
 	return stdout.String(), nil
+}
+
+// execInPodStream runs a command in the postgres container and streams stdout
+// to the provided io.Writer. Returns when the command exits. Does not run
+// a goroutine internally; the caller owns goroutine/concurrency management.
+func execInPodStream(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, podName, namespace, command string, stdout io.Writer) error {
+	script := fmt.Sprintf("set -e\n%s", command)
+	req := client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "postgres",
+			Command:   []string{"bash", "-c", script},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+	if err != nil {
+		return fmt.Errorf("exec setup: %w", err)
+	}
+
+	var stderr bytes.Buffer
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: stdout,
+		Stderr: &stderr,
+	}); err != nil {
+		return fmt.Errorf("exec failed (stderr: %s): %w", stderr.String(), err)
+	}
+	return nil
 }

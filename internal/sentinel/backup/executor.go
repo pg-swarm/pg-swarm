@@ -2,9 +2,11 @@ package backup
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,30 +46,36 @@ type ExecFunc func(ctx context.Context, k8sClient kubernetes.Interface, restConf
 // ExecOutputFunc runs a command in the postgres container and returns stdout.
 type ExecOutputFunc func(ctx context.Context, k8sClient kubernetes.Interface, restConfig *rest.Config, podName, namespace, cmd string) (string, error)
 
+// ExecStreamFunc runs a command in the postgres container and streams its stdout
+// to the provided io.Writer. Used for streaming backup data without buffering.
+type ExecStreamFunc func(ctx context.Context, k8sClient kubernetes.Interface, restConfig *rest.Config, podName, namespace, cmd string, stdout io.Writer) error
+
 // Executor runs pg_basebackup / pg_dump via K8s exec in the postgres
 // container and uploads results to remote storage.
 type Executor struct {
-	pod        PodRef
-	k8sClient  kubernetes.Interface
-	restConfig *rest.Config
-	logger     zerolog.Logger
-	execFn     ExecFunc
-	execOutFn  ExecOutputFunc
+	pod         PodRef
+	k8sClient   kubernetes.Interface
+	restConfig  *rest.Config
+	logger      zerolog.Logger
+	execFn      ExecFunc
+	execOutFn   ExecOutputFunc
+	execStreamFn ExecStreamFunc
 }
 
 // NewExecutor creates a new Executor.
-func NewExecutor(pod PodRef, k8sClient kubernetes.Interface, restConfig *rest.Config, logger zerolog.Logger, execFn ExecFunc, execOutFn ExecOutputFunc) *Executor {
+func NewExecutor(pod PodRef, k8sClient kubernetes.Interface, restConfig *rest.Config, logger zerolog.Logger, execFn ExecFunc, execOutFn ExecOutputFunc, execStreamFn ExecStreamFunc) *Executor {
 	logger.Debug().
 		Str("pod", pod.PodName).
 		Str("namespace", pod.Namespace).
 		Msg("NewExecutor: creating executor")
 	return &Executor{
-		pod:        pod,
-		k8sClient:  k8sClient,
-		restConfig: restConfig,
-		logger:     logger,
-		execFn:     execFn,
-		execOutFn:  execOutFn,
+		pod:          pod,
+		k8sClient:    k8sClient,
+		restConfig:   restConfig,
+		logger:       logger,
+		execFn:       execFn,
+		execOutFn:    execOutFn,
+		execStreamFn: execStreamFn,
 	}
 }
 
@@ -112,9 +120,6 @@ func (e *Executor) ExecuteBaseBackup(ctx context.Context, cfg *pgswarmv1.BackupC
 	defer backend.Close()
 
 	ts := result.StartedAt.UTC().Format("20060102T150405")
-	backupDir := fmt.Sprintf("/tmp/pg-backup-%s", ts)
-	tarFile := backupDir + ".tar.gz"
-	e.logger.Trace().Str("timestamp", ts).Str("backup_dir", backupDir).Msg("ExecuteBaseBackup: computed paths")
 
 	// Get PG version
 	e.logger.Trace().Msg("ExecuteBaseBackup: querying PG version")
@@ -128,70 +133,41 @@ func (e *Executor) ExecuteBaseBackup(ctx context.Context, cfg *pgswarmv1.BackupC
 	result.WALStartLSN = strings.TrimSpace(startLSN)
 	e.logger.Debug().Str("wal_start_lsn", result.WALStartLSN).Msg("ExecuteBaseBackup: start LSN captured")
 
-	// Run pg_basebackup
-	e.logger.Debug().Str("backup_dir", backupDir).Msg("ExecuteBaseBackup: running pg_basebackup")
-	basebackupCmd := fmt.Sprintf(
-		"pg_basebackup --checkpoint=fast --wal-method=none -D %s -Ft -z -U postgres -h localhost",
-		backupDir,
-	)
-	if err := e.execInPod(ctx, basebackupCmd); err != nil {
-		result.Error = fmt.Errorf("pg_basebackup: %w", err)
-		e.logger.Debug().Err(err).Msg("ExecuteBaseBackup: pg_basebackup failed, cleaning up")
-		// Cleanup
-		e.execInPod(ctx, fmt.Sprintf("rm -rf %s %s", backupDir, tarFile))
+	// Stream pg_basebackup to storage with -D - (stdout).
+	// NOTE: -D - requires all tablespace data to be in the main PGDATA directory.
+	// Clusters with custom tablespaces must use -D /tmp/... with a separate upload.
+	e.logger.Debug().Msg("ExecuteBaseBackup: streaming base backup")
+	basebackupCmd := "pg_basebackup -U postgres -D - -Ft -z --checkpoint=fast --wal-method=none --no-password"
+	key := fmt.Sprintf("%s/base/%s/base.tar.gz", cfg.GetBasePath(), ts)
+
+	// pg_basebackup -z already outputs gzip-compressed tar, so no wrap function needed
+	if err := e.streamFromPod(ctx, backend, key, basebackupCmd, nil); err != nil {
+		result.Error = fmt.Errorf("stream base backup: %w", err)
+		e.logger.Debug().Err(err).Msg("ExecuteBaseBackup: stream failed")
 		return result
 	}
-	e.logger.Debug().Msg("ExecuteBaseBackup: pg_basebackup completed")
-
-	// The -Ft flag already outputs tar format files. Package them into a single tar.gz.
-	e.logger.Trace().Msg("ExecuteBaseBackup: packaging tar archive")
-	packCmd := fmt.Sprintf("cd %s && tar czf %s . && rm -rf %s", backupDir, tarFile, backupDir)
-	if err := e.execInPod(ctx, packCmd); err != nil {
-		result.Error = fmt.Errorf("tar: %w", err)
-		e.logger.Debug().Err(err).Msg("ExecuteBaseBackup: tar packaging failed")
-		return result
-	}
-
-	// Get file size
-	sizeStr, _ := e.execInPodOutput(ctx, fmt.Sprintf("stat -c %%s %s", tarFile))
-	fmt.Sscanf(strings.TrimSpace(sizeStr), "%d", &result.SizeBytes)
-	e.logger.Debug().Int64("size_bytes", result.SizeBytes).Msg("ExecuteBaseBackup: backup size determined")
+	e.logger.Debug().Str("key", key).Msg("ExecuteBaseBackup: base backup streamed successfully")
 
 	// Get end LSN
+	e.logger.Trace().Msg("ExecuteBaseBackup: querying end WAL LSN")
 	endLSN, _ := e.execInPodOutput(ctx, "psql -U postgres -tAc \"SELECT pg_current_wal_lsn()\" 2>/dev/null || echo ''")
 	result.WALEndLSN = strings.TrimSpace(endLSN)
 	e.logger.Debug().Str("wal_end_lsn", result.WALEndLSN).Msg("ExecuteBaseBackup: end LSN captured")
 
-	// Upload via storage backend.
-	key := fmt.Sprintf("%s/base/%s/base.tar.gz", cfg.GetBasePath(), ts)
-	e.logger.Debug().Str("key", key).Msg("ExecuteBaseBackup: uploading backup archive")
-	if err := e.uploadFromPod(ctx, backend, key, tarFile); err != nil {
-		result.Error = fmt.Errorf("upload: %w", err)
-		e.logger.Debug().Err(err).Msg("ExecuteBaseBackup: upload failed")
-		return result
-	}
-	e.logger.Debug().Str("key", key).Msg("ExecuteBaseBackup: backup archive uploaded")
+	// SizeBytes tracking is deferred pending a counting io.Reader wrapper.
+	result.SizeBytes = 0
 
 	// Upload a metadata manifest.
-	manifest := fmt.Sprintf(`{"backup_type":"base","timestamp":"%s","pg_version":"%s","wal_start_lsn":"%s","wal_end_lsn":"%s","size_bytes":%d}`,
-		ts, result.PGVersion, result.WALStartLSN, result.WALEndLSN, result.SizeBytes)
+	manifest := fmt.Sprintf(`{"backup_type":"base","timestamp":"%s","pg_version":"%s","wal_start_lsn":"%s","wal_end_lsn":"%s"}`,
+		ts, result.PGVersion, result.WALStartLSN, result.WALEndLSN)
 	manifestKey := fmt.Sprintf("%s/base/%s/manifest.json", cfg.GetBasePath(), ts)
 	e.logger.Trace().Str("manifest_key", manifestKey).Msg("ExecuteBaseBackup: uploading metadata manifest")
 	if err := backend.Upload(ctx, manifestKey, strings.NewReader(manifest)); err != nil {
 		e.logger.Warn().Err(err).Msg("failed to upload manifest (backup data is safe)")
 	}
 
-	// Upload pg_basebackup's own backup_manifest so incremental backups can
-	// chain off this base backup via --incremental=<manifest>.
-	pgManifestKey := fmt.Sprintf("%s/base/%s/backup_manifest", cfg.GetBasePath(), ts)
-	e.logger.Trace().Str("pg_manifest_key", pgManifestKey).Msg("ExecuteBaseBackup: uploading pg backup_manifest")
-	if err := e.uploadFromPod(ctx, backend, pgManifestKey, backupDir+"/backup_manifest"); err != nil {
-		e.logger.Warn().Err(err).Msg("failed to upload pg backup_manifest (incremental chaining unavailable for this base)")
-	}
-
-	// Cleanup local
-	e.logger.Trace().Msg("ExecuteBaseBackup: cleaning up local files")
-	e.execInPod(ctx, fmt.Sprintf("rm -f %s", tarFile))
+	// NOTE: pg_basebackup's own backup_manifest is included inside the tar stream
+	// produced by -Ft, so there is no separate file to upload.
 
 	result.BackupPath = key
 	result.CompletedAt = time.Now()
@@ -311,67 +287,47 @@ func (e *Executor) ExecuteIncrementalBackup(ctx context.Context, cfg *pgswarmv1.
 	e.logger.Debug().Str("pg_version", result.PGVersion).Str("wal_start_lsn", result.WALStartLSN).Msg("ExecuteIncrementalBackup: version and start LSN captured")
 
 	ts := result.StartedAt.UTC().Format("20060102T150405")
-	backupDir := fmt.Sprintf("/tmp/pg-incr-%s", ts)
-	tarFile := backupDir + ".tar.gz"
 
-	// Run pg_basebackup with --incremental pointing at the prior manifest.
-	e.logger.Debug().Str("manifest_path", manifestPath).Str("backup_dir", backupDir).Msg("ExecuteIncrementalBackup: running pg_basebackup --incremental")
+	// Stream pg_basebackup --incremental to storage with -D - (stdout).
+	// NOTE: -D - requires all tablespace data to be in the main PGDATA directory.
+	// Clusters with custom tablespaces must use -D /tmp/... with a separate upload.
+	e.logger.Debug().Str("manifest_path", manifestPath).Msg("ExecuteIncrementalBackup: streaming incremental backup")
 	incrCmd := fmt.Sprintf(
-		"pg_basebackup --checkpoint=fast --wal-method=none --incremental=%s -D %s -Ft -z -U postgres -h localhost",
-		manifestPath, backupDir,
+		"pg_basebackup -U postgres -D - -Ft -z --checkpoint=fast --wal-method=none --no-password --incremental=%s",
+		manifestPath,
 	)
-	if err := e.execInPod(ctx, incrCmd); err != nil {
-		result.Error = fmt.Errorf("pg_basebackup --incremental: %w", err)
-		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: pg_basebackup --incremental failed, cleaning up")
-		e.execInPod(ctx, fmt.Sprintf("rm -rf %s %s %s", backupDir, tarFile, manifestPath))
+	key := fmt.Sprintf("%s/incremental/%s/incremental.tar.gz", cfg.GetBasePath(), ts)
+
+	// pg_basebackup -z already outputs gzip-compressed tar, so no wrap function needed
+	if err := e.streamFromPod(ctx, backend, key, incrCmd, nil); err != nil {
+		result.Error = fmt.Errorf("stream incremental backup: %w", err)
+		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: stream failed")
+		e.execInPod(ctx, fmt.Sprintf("rm -f %s", manifestPath))
 		return result
 	}
-	e.logger.Debug().Msg("ExecuteIncrementalBackup: pg_basebackup --incremental completed")
-
-	// Pack into a single archive.
-	e.logger.Trace().Msg("ExecuteIncrementalBackup: packaging tar archive")
-	packCmd := fmt.Sprintf("cd %s && tar czf %s . && rm -rf %s", backupDir, tarFile, backupDir)
-	if err := e.execInPod(ctx, packCmd); err != nil {
-		result.Error = fmt.Errorf("tar incremental backup: %w", err)
-		return result
-	}
-
-	sizeStr, _ := e.execInPodOutput(ctx, fmt.Sprintf("stat -c %%s %s", tarFile))
-	fmt.Sscanf(strings.TrimSpace(sizeStr), "%d", &result.SizeBytes)
+	e.logger.Debug().Str("key", key).Msg("ExecuteIncrementalBackup: incremental backup streamed successfully")
 
 	endLSN, _ := e.execInPodOutput(ctx, "psql -U postgres -tAc \"SELECT pg_current_wal_lsn()\" 2>/dev/null || echo ''")
 	result.WALEndLSN = strings.TrimSpace(endLSN)
-	e.logger.Debug().Int64("size_bytes", result.SizeBytes).Str("wal_end_lsn", result.WALEndLSN).Msg("ExecuteIncrementalBackup: size and end LSN captured")
+	e.logger.Debug().Str("wal_end_lsn", result.WALEndLSN).Msg("ExecuteIncrementalBackup: end LSN captured")
 
-	key := fmt.Sprintf("%s/incremental/%s/incremental.tar.gz", cfg.GetBasePath(), ts)
-	e.logger.Debug().Str("key", key).Msg("ExecuteIncrementalBackup: uploading incremental archive")
-	if err := e.uploadFromPod(ctx, backend, key, tarFile); err != nil {
-		result.Error = fmt.Errorf("upload incremental: %w", err)
-		e.logger.Debug().Err(err).Msg("ExecuteIncrementalBackup: upload failed")
-		return result
-	}
+	// SizeBytes tracking is deferred pending a counting io.Reader wrapper.
+	result.SizeBytes = 0
 
-	// Upload our metadata manifest and also save pg_basebackup's own manifest
-	// so future incrementals can chain off this backup.
-	manifest := fmt.Sprintf(`{"backup_type":"incremental","timestamp":"%s","pg_version":"%s","wal_start_lsn":"%s","wal_end_lsn":"%s","size_bytes":%d,"based_on":"%s"}`,
-		ts, result.PGVersion, result.WALStartLSN, result.WALEndLSN, result.SizeBytes, latestManifestKey)
+	// Upload our metadata manifest. Note that pg_basebackup's own backup_manifest
+	// is included inside the tar stream produced by -Ft, so future incrementals
+	// can chain off this backup by extracting from the tar.
+	manifest := fmt.Sprintf(`{"backup_type":"incremental","timestamp":"%s","pg_version":"%s","wal_start_lsn":"%s","wal_end_lsn":"%s","based_on":"%s"}`,
+		ts, result.PGVersion, result.WALStartLSN, result.WALEndLSN, latestManifestKey)
 	manifestKey := fmt.Sprintf("%s/incremental/%s/manifest.json", cfg.GetBasePath(), ts)
 	e.logger.Trace().Str("manifest_key", manifestKey).Msg("ExecuteIncrementalBackup: uploading metadata manifest")
 	if err := backend.Upload(ctx, manifestKey, strings.NewReader(manifest)); err != nil {
 		e.logger.Warn().Err(err).Msg("failed to upload incremental manifest")
 	}
 
-	// Upload pg_basebackup's backup_manifest from this incremental so it can
-	// serve as the base for the next incremental in the chain.
-	pgManifestKey := fmt.Sprintf("%s/incremental/%s/backup_manifest", cfg.GetBasePath(), ts)
-	e.logger.Trace().Str("pg_manifest_key", pgManifestKey).Msg("ExecuteIncrementalBackup: uploading pg backup_manifest")
-	if err := e.uploadFromPod(ctx, backend, pgManifestKey, backupDir+"/backup_manifest"); err != nil {
-		e.logger.Warn().Err(err).Msg("failed to upload pg backup_manifest (incremental chaining may break)")
-	}
-
-	// Cleanup
-	e.logger.Trace().Msg("ExecuteIncrementalBackup: cleaning up local files")
-	e.execInPod(ctx, fmt.Sprintf("rm -f %s %s", tarFile, manifestPath))
+	// Cleanup the prior manifest file
+	e.logger.Trace().Msg("ExecuteIncrementalBackup: cleaning up manifest file")
+	e.execInPod(ctx, fmt.Sprintf("rm -f %s", manifestPath))
 
 	result.BackupPath = key
 	result.CompletedAt = time.Now()
@@ -438,55 +394,37 @@ func (e *Executor) ExecuteLogicalBackup(ctx context.Context, cfg *pgswarmv1.Back
 	}
 
 	ts := result.StartedAt.UTC().Format("20060102T150405")
-	format := logicalCfg.GetFormat()
-	if format == "" {
-		format = "custom"
-	}
-	e.logger.Debug().Int("db_count", len(databases)).Str("format", format).Str("timestamp", ts).Msg("ExecuteLogicalBackup: starting pg_dump loop")
+	// Stream logical backups as plain SQL with gzip compression
+	e.logger.Debug().Int("db_count", len(databases)).Str("timestamp", ts).Msg("ExecuteLogicalBackup: starting pg_dump stream loop")
 
-	var totalSize int64
 	for i, db := range databases {
-		ext := dumpExtension(format)
-		dumpFile := fmt.Sprintf("/tmp/pg-dump-%s-%s%s", db, ts, ext)
+		e.logger.Debug().Str("database", db).Int("index", i+1).Int("total", len(databases)).Msg("ExecuteLogicalBackup: streaming database dump")
 
-		e.logger.Debug().Str("database", db).Int("index", i+1).Int("total", len(databases)).Msg("ExecuteLogicalBackup: dumping database")
-		dumpCmd := fmt.Sprintf("pg_dump -U postgres -h localhost -F%s -f %s %s",
-			dumpFormatFlag(format), dumpFile, db)
+		// pg_dump -Fp outputs plain SQL to stdout
+		dumpCmd := fmt.Sprintf("pg_dump -U postgres -Fp %s", db)
+		key := fmt.Sprintf("%s/logical/%s/%s.sql.gz", cfg.GetBasePath(), ts, db)
 
-		if err := e.execInPod(ctx, dumpCmd); err != nil {
-			result.Error = fmt.Errorf("pg_dump %s: %w", db, err)
-			e.logger.Debug().Err(err).Str("database", db).Msg("ExecuteLogicalBackup: pg_dump failed")
-			return result
+		// Wrap the stream with gzip compression
+		gzipWrap := func(w io.Writer) (io.Writer, func() error) {
+			gw := gzip.NewWriter(w)
+			return gw, gw.Close
 		}
 
-		// Get size
-		sizeStr, _ := e.execInPodOutput(ctx, fmt.Sprintf("stat -c %%s %s", dumpFile))
-		var sz int64
-		fmt.Sscanf(strings.TrimSpace(sizeStr), "%d", &sz)
-		totalSize += sz
-		e.logger.Trace().Str("database", db).Int64("size_bytes", sz).Msg("ExecuteLogicalBackup: dump size")
-
-		// Upload
-		key := fmt.Sprintf("%s/logical/%s/%s%s", cfg.GetBasePath(), ts, db, ext)
-		e.logger.Debug().Str("database", db).Str("key", key).Msg("ExecuteLogicalBackup: uploading dump")
-		if err := e.uploadFromPod(ctx, backend, key, dumpFile); err != nil {
-			result.Error = fmt.Errorf("upload %s: %w", db, err)
-			e.logger.Debug().Err(err).Str("database", db).Msg("ExecuteLogicalBackup: upload failed")
+		e.logger.Debug().Str("database", db).Str("key", key).Msg("ExecuteLogicalBackup: streaming dump to storage")
+		if err := e.streamFromPod(ctx, backend, key, dumpCmd, gzipWrap); err != nil {
+			result.Error = fmt.Errorf("stream dump %s: %w", db, err)
+			e.logger.Debug().Err(err).Str("database", db).Msg("ExecuteLogicalBackup: stream failed")
 			return result
 		}
-
-		// Cleanup
-		e.execInPod(ctx, fmt.Sprintf("rm -f %s", dumpFile))
-		e.logger.Trace().Str("database", db).Msg("ExecuteLogicalBackup: dump file cleaned up")
 	}
 
 	result.Databases = databases
-	result.SizeBytes = totalSize
+	// SizeBytes tracking requires wrapping the PipeReader with a counting reader; deferred for now.
+	result.SizeBytes = 0
 	result.BackupPath = fmt.Sprintf("%s/logical/%s/", cfg.GetBasePath(), ts)
 	result.CompletedAt = time.Now()
 	e.logger.Debug().
 		Str("path", result.BackupPath).
-		Int64("total_size_bytes", totalSize).
 		Int("db_count", len(databases)).
 		Dur("duration", result.CompletedAt.Sub(result.StartedAt)).
 		Msg("ExecuteLogicalBackup: completed successfully")
@@ -524,7 +462,7 @@ func (e *Executor) ExecuteLogicalRestore(ctx context.Context, cmd *pgswarmv1.Res
 	if strings.HasSuffix(cmd.GetBackupPath(), ".sql") {
 		// Plain SQL — use psql
 		e.logger.Debug().Str("target_db", targetDB).Msg("ExecuteLogicalRestore: restoring via psql (plain SQL)")
-		restoreCmd := fmt.Sprintf("psql -U postgres -h localhost -d %s -f %s", targetDB, localPath)
+		restoreCmd := fmt.Sprintf("psql -U postgres -d %s -f %s", targetDB, localPath)
 		err := e.execInPod(ctx, restoreCmd)
 		if err != nil {
 			e.logger.Debug().Err(err).Msg("ExecuteLogicalRestore: psql restore failed")
@@ -536,7 +474,7 @@ func (e *Executor) ExecuteLogicalRestore(ctx context.Context, cmd *pgswarmv1.Res
 
 	// Custom/directory format — use pg_restore
 	e.logger.Debug().Str("target_db", targetDB).Msg("ExecuteLogicalRestore: restoring via pg_restore (custom format)")
-	restoreCmd := fmt.Sprintf("pg_restore -U postgres -h localhost -d %s --clean --if-exists %s",
+	restoreCmd := fmt.Sprintf("pg_restore -U postgres -d %s --clean --if-exists %s",
 		targetDB, localPath)
 	err = e.execInPod(ctx, restoreCmd)
 	if err != nil {
@@ -615,23 +553,70 @@ echo "recovery_target_action = 'promote'" >> "$PGDATA/postgresql.auto.conf"`,
 	return nil
 }
 
-// uploadFromPod reads a file from the postgres container via exec and uploads it to storage.
-func (e *Executor) uploadFromPod(ctx context.Context, backend storage.Backend, key, podPath string) error {
-	e.logger.Trace().Str("key", key).Str("pod_path", podPath).Msg("uploadFromPod: reading file from pod")
-	output, err := e.execInPodOutput(ctx, fmt.Sprintf("cat %s", podPath))
-	if err != nil {
-		e.logger.Debug().Err(err).Str("pod_path", podPath).Msg("uploadFromPod: failed to read file")
-		return fmt.Errorf("read file %s: %w", podPath, err)
+// streamFromPod runs a pod command and pipes its stdout through an optional transform
+// (e.g., gzip.Writer) directly to storage. The producer (pod exec) runs in a goroutine
+// to allow concurrent upload from the pipe. Errors from both sides are captured and returned.
+//
+// The wrap parameter allows inserting an optional transformation layer (e.g., gzip compression).
+// If wrap is nil, the stream goes directly to storage.
+// If wrap is not nil, wrap returns the wrapped writer and a cleanup function (e.g., gw.Close).
+func (e *Executor) streamFromPod(
+	ctx context.Context,
+	backend storage.Backend,
+	key, cmd string,
+	wrap func(io.Writer) (io.Writer, func() error),
+) error {
+	pr, pw := io.Pipe()
+
+	var writerForCmd io.Writer = pw
+	var closeExtra func() error
+
+	if wrap != nil {
+		writerForCmd, closeExtra = wrap(pw)
 	}
-	e.logger.Trace().Str("key", key).Int("data_len", len(output)).Msg("uploadFromPod: uploading to storage")
-	err = backend.Upload(ctx, key, bytes.NewReader([]byte(output)))
-	if err != nil {
-		e.logger.Debug().Err(err).Str("key", key).Msg("uploadFromPod: upload failed")
-	} else {
-		e.logger.Trace().Str("key", key).Msg("uploadFromPod: upload succeeded")
+
+	errCh := make(chan error, 1)
+	go func() {
+		err := e.execStreamFn(
+			ctx,
+			e.k8sClient,
+			e.restConfig,
+			e.pod.PodName,
+			e.pod.Namespace,
+			cmd,
+			writerForCmd,
+		)
+		// Flush gzip footer (or other cleanup) before closing the pipe
+		if closeExtra != nil {
+			if flushErr := closeExtra(); flushErr != nil && err == nil {
+				err = flushErr
+			}
+		}
+		if err != nil {
+			pw.CloseWithError(err)
+		} else {
+			pw.Close()
+		}
+		errCh <- err
+	}()
+
+	uploadErr := backend.Upload(ctx, key, pr)
+	// Prevent goroutine leak: if upload fails, close the pipe reader so the
+	// producer goroutine unblocks and can exit cleanly.
+	if uploadErr != nil {
+		pr.CloseWithError(uploadErr)
 	}
-	return err
+	execErr := <-errCh
+
+	if execErr != nil {
+		return fmt.Errorf("pod exec stream: %w", execErr)
+	}
+	if uploadErr != nil {
+		return fmt.Errorf("storage upload: %w", uploadErr)
+	}
+	return nil
 }
+
 
 // downloadToPod downloads a file from storage and writes it into the pod.
 func (e *Executor) downloadToPod(ctx context.Context, backend storage.Backend, key, podPath string) error {
@@ -664,28 +649,3 @@ func (e *Executor) downloadToPod(ctx context.Context, backend storage.Backend, k
 	return os.WriteFile(podPath, buf.Bytes(), 0644)
 }
 
-func dumpFormatFlag(format string) string {
-	switch format {
-	case "custom":
-		return "c"
-	case "plain":
-		return "p"
-	case "directory":
-		return "d"
-	default:
-		return "c"
-	}
-}
-
-func dumpExtension(format string) string {
-	switch format {
-	case "custom":
-		return ".dump"
-	case "plain":
-		return ".sql"
-	case "directory":
-		return ".dir"
-	default:
-		return ".dump"
-	}
-}

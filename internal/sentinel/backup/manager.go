@@ -36,13 +36,14 @@ type PodConfig struct {
 
 // Manager coordinates all backup operations on the sentinel sidecar.
 type Manager struct {
-	cfg        PodConfig
-	emitter    EventEmitter
-	k8sClient  kubernetes.Interface
-	restConfig *rest.Config
-	logger     zerolog.Logger
-	execFn     ExecFunc
-	execOutFn  ExecOutputFunc
+	cfg          PodConfig
+	emitter      EventEmitter
+	k8sClient    kubernetes.Interface
+	restConfig   *rest.Config
+	logger       zerolog.Logger
+	execFn       ExecFunc
+	execOutFn    ExecOutputFunc
+	execStreamFn ExecStreamFunc
 
 	// backupCfg holds the current BackupConfig pushed from satellite.
 	backupCfg atomic.Pointer[pgswarmv1.BackupConfig]
@@ -60,7 +61,7 @@ type Manager struct {
 }
 
 // NewManager creates a new backup manager.
-func NewManager(cfg PodConfig, emitter EventEmitter, k8sClient kubernetes.Interface, restConfig *rest.Config, execFn ExecFunc, execOutFn ExecOutputFunc) *Manager {
+func NewManager(cfg PodConfig, emitter EventEmitter, k8sClient kubernetes.Interface, restConfig *rest.Config, execFn ExecFunc, execOutFn ExecOutputFunc, execStreamFn ExecStreamFunc) *Manager {
 	l := log.With().Str("component", "backup-manager").Logger()
 	l.Debug().
 		Str("pod", cfg.PodName).
@@ -68,13 +69,14 @@ func NewManager(cfg PodConfig, emitter EventEmitter, k8sClient kubernetes.Interf
 		Str("cluster", cfg.ClusterName).
 		Msg("creating backup manager")
 	return &Manager{
-		cfg:        cfg,
-		emitter:    emitter,
-		k8sClient:  k8sClient,
-		restConfig: restConfig,
-		logger:     l,
-		execFn:     execFn,
-		execOutFn:  execOutFn,
+		cfg:           cfg,
+		emitter:       emitter,
+		k8sClient:     k8sClient,
+		restConfig:    restConfig,
+		logger:        l,
+		execFn:        execFn,
+		execOutFn:     execOutFn,
+		execStreamFn:  execStreamFn,
 	}
 }
 
@@ -202,6 +204,7 @@ func (bm *Manager) TriggerBackup(ctx context.Context, backupType string) error {
 			bm.logger,
 			bm.execFn,
 			bm.execOutFn,
+			bm.execStreamFn,
 		)
 
 		var result *Result
@@ -303,6 +306,7 @@ func (bm *Manager) TriggerRestore(ctx context.Context, cmd *pgswarmv1.RestoreCom
 			bm.logger,
 			bm.execFn,
 			bm.execOutFn,
+			bm.execStreamFn,
 		)
 
 		var errMsg string

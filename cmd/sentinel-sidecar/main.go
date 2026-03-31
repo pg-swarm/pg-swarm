@@ -118,6 +118,7 @@ func main() {
 			k8sCfg,
 			sentinel.ExecInPod,
 			sentinel.ExecInPodOutput,
+			sentinel.ExecInPodStream,
 		)
 		mon.SetBackupManager(bm)
 		connector.SetBackupManager(bm)
