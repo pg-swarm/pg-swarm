@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	pgswarmv1 "github.com/pg-swarm/pg-swarm/api/gen/v1"
@@ -8,6 +10,7 @@ import (
 	"github.com/pg-swarm/pg-swarm/internal/shared/models"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // listBackupInventory returns the backup history for a cluster.
@@ -167,6 +170,14 @@ func (s *RESTServer) triggerRestore(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create restore operation"})
 	}
 
+	// Parse target_time from request body if present
+	var targetTimestamp *timestamppb.Timestamp
+	if body.TargetTime != "" {
+		if t, err := time.Parse(time.RFC3339, body.TargetTime); err == nil {
+			targetTimestamp = timestamppb.New(t)
+		}
+	}
+
 	// Build proto RestoreCommand
 	cmd := &pgswarmv1.RestoreCommand{
 		ClusterName:    cfg.Name,
@@ -177,6 +188,7 @@ func (s *RESTServer) triggerRestore(c *fiber.Ctx) error {
 		BackupId:       body.BackupID,
 		BackupPath:     body.BackupPath,
 		TargetDatabase: body.TargetDatabase,
+		TargetTime:     targetTimestamp,
 	}
 
 	cmdJSON, err := protojson.Marshal(cmd)

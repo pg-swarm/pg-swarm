@@ -512,7 +512,19 @@ func (e *Executor) ExecuteLogicalRestore(ctx context.Context, cmd *pgswarmv1.Res
 	targetDB := cmd.GetTargetDatabase()
 
 	// Determine format by file extension
-	if strings.HasSuffix(cmd.GetBackupPath(), ".sql") {
+	switch {
+	case strings.HasSuffix(cmd.GetBackupPath(), ".sql.gz"):
+		// Gzip-compressed plain SQL — decompress and pipe to psql
+		e.logger.Debug().Str("target_db", targetDB).Msg("ExecuteLogicalRestore: restoring via zcat | psql (gzipped SQL)")
+		restoreCmd := fmt.Sprintf("zcat %s | psql -U postgres -d %s", localPath, targetDB)
+		err := e.execInPod(ctx, restoreCmd)
+		if err != nil {
+			e.logger.Debug().Err(err).Msg("ExecuteLogicalRestore: zcat | psql restore failed")
+		} else {
+			e.logger.Debug().Msg("ExecuteLogicalRestore: zcat | psql restore completed")
+		}
+		return err
+	case strings.HasSuffix(cmd.GetBackupPath(), ".sql"):
 		// Plain SQL — use psql
 		e.logger.Debug().Str("target_db", targetDB).Msg("ExecuteLogicalRestore: restoring via psql (plain SQL)")
 		restoreCmd := fmt.Sprintf("psql -U postgres -d %s -f %s", targetDB, localPath)
@@ -523,19 +535,19 @@ func (e *Executor) ExecuteLogicalRestore(ctx context.Context, cmd *pgswarmv1.Res
 			e.logger.Debug().Msg("ExecuteLogicalRestore: psql restore completed")
 		}
 		return err
+	default:
+		// Custom/directory format — use pg_restore
+		e.logger.Debug().Str("target_db", targetDB).Msg("ExecuteLogicalRestore: restoring via pg_restore (custom format)")
+		restoreCmd := fmt.Sprintf("pg_restore -U postgres -d %s --clean --if-exists %s",
+			targetDB, localPath)
+		err := e.execInPod(ctx, restoreCmd)
+		if err != nil {
+			e.logger.Debug().Err(err).Msg("ExecuteLogicalRestore: pg_restore failed")
+		} else {
+			e.logger.Debug().Msg("ExecuteLogicalRestore: pg_restore completed")
+		}
+		return err
 	}
-
-	// Custom/directory format — use pg_restore
-	e.logger.Debug().Str("target_db", targetDB).Msg("ExecuteLogicalRestore: restoring via pg_restore (custom format)")
-	restoreCmd := fmt.Sprintf("pg_restore -U postgres -d %s --clean --if-exists %s",
-		targetDB, localPath)
-	err = e.execInPod(ctx, restoreCmd)
-	if err != nil {
-		e.logger.Debug().Err(err).Msg("ExecuteLogicalRestore: pg_restore failed")
-	} else {
-		e.logger.Debug().Msg("ExecuteLogicalRestore: pg_restore completed")
-	}
-	return err
 }
 
 // ExecutePITRRestore performs a point-in-time recovery.
@@ -585,14 +597,76 @@ rm -f /tmp/pitr-base.tar.gz`
 	}
 	e.logger.Debug().Msg("ExecutePITRRestore: base backup extracted")
 
-	// 3. Create recovery.signal and configure recovery
-	e.logger.Debug().Str("target_time", targetTime).Msg("ExecutePITRRestore: step 3 — configuring recovery parameters")
+	// 3. Pre-stage WAL files for recovery.
+	// PostgreSQL will request WAL segments from storage via restore_command.
+	// Download all WAL files and decompress to a local restore directory.
+	e.logger.Debug().Msg("ExecutePITRRestore: step 3 — pre-staging WAL files for recovery")
+	walRestoreDir := "/var/lib/postgresql/data/wal-restore"
+	if err := os.MkdirAll(walRestoreDir, 0755); err != nil {
+		e.logger.Debug().Err(err).Msg("ExecutePITRRestore: failed to create WAL restore directory")
+		// Non-fatal — WAL restore_command will fail but recovery might still work
+		e.logger.Warn().Msg("ExecutePITRRestore: WAL restore directory creation failed, WAL replay may be unavailable")
+	} else {
+		walPrefix := cfg.GetBasePath() + "/wal/"
+		e.logger.Debug().Str("prefix", walPrefix).Msg("ExecutePITRRestore: listing WAL objects from storage")
+		walObjects, err := backend.List(ctx, walPrefix)
+		if err == nil {
+			e.logger.Debug().Int("wal_count", len(walObjects)).Msg("ExecutePITRRestore: WAL objects found")
+			walCount := 0
+			for _, obj := range walObjects {
+				// obj.Key = "<base_path>/wal/<filename>.gz"
+				if !strings.HasSuffix(obj.Key, ".gz") {
+					continue
+				}
+				name := strings.TrimSuffix(filepath.Base(obj.Key), ".gz")
+				destPath := filepath.Join(walRestoreDir, name)
+
+				r, err := backend.Download(ctx, obj.Key)
+				if err != nil {
+					e.logger.Debug().Err(err).Str("key", obj.Key).Msg("ExecutePITRRestore: failed to download WAL file")
+					continue
+				}
+
+				gr, err := gzip.NewReader(r)
+				if err != nil {
+					e.logger.Debug().Err(err).Str("key", obj.Key).Msg("ExecutePITRRestore: failed to decompress WAL file")
+					r.Close()
+					continue
+				}
+
+				f, err := os.Create(destPath)
+				if err != nil {
+					e.logger.Debug().Err(err).Str("path", destPath).Msg("ExecutePITRRestore: failed to create WAL restore file")
+					gr.Close()
+					r.Close()
+					continue
+				}
+
+				if _, err := io.Copy(f, gr); err != nil {
+					e.logger.Debug().Err(err).Str("path", destPath).Msg("ExecutePITRRestore: failed to write WAL file")
+				} else {
+					walCount++
+					e.logger.Trace().Str("file", name).Msg("ExecutePITRRestore: WAL file staged")
+				}
+				f.Close()
+				gr.Close()
+				r.Close()
+			}
+			e.logger.Debug().Int("staged_count", walCount).Msg("ExecutePITRRestore: WAL files staged")
+		} else {
+			e.logger.Debug().Err(err).Msg("ExecutePITRRestore: failed to list WAL objects from storage")
+		}
+	}
+
+	// 4. Create recovery.signal and configure recovery parameters
+	e.logger.Debug().Str("target_time", targetTime).Msg("ExecutePITRRestore: step 4 — configuring recovery parameters")
 	recoveryScript := fmt.Sprintf(`set -e
 PGDATA="/var/lib/postgresql/data/pgdata"
 touch "$PGDATA/recovery.signal"
 sed -i '/^recovery_target_time/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
 sed -i '/^restore_command/d' "$PGDATA/postgresql.auto.conf" 2>/dev/null || true
 echo "recovery_target_time = '%s'" >> "$PGDATA/postgresql.auto.conf"
+echo "restore_command = 'cp /var/lib/postgresql/data/wal-restore/%%f %%p'" >> "$PGDATA/postgresql.auto.conf"
 echo "recovery_target_action = 'promote'" >> "$PGDATA/postgresql.auto.conf"`,
 		targetTime)
 	if err := e.execInPod(ctx, recoveryScript); err != nil {
@@ -600,7 +674,7 @@ echo "recovery_target_action = 'promote'" >> "$PGDATA/postgresql.auto.conf"`,
 		return fmt.Errorf("configure recovery: %w", err)
 	}
 
-	// 4. PG will be restarted by the pod wrapper script automatically
+	// 5. PG will be restarted by the pod wrapper script automatically
 	e.logger.Info().Str("target_time", targetTime).Msg("PITR recovery configured, PG will restart via wrapper")
 	e.logger.Debug().Msg("ExecutePITRRestore: completed successfully")
 	return nil
@@ -672,6 +746,8 @@ func (e *Executor) streamFromPod(
 
 
 // downloadToPod downloads a file from storage and writes it into the pod.
+// For shared volume paths, streams directly without buffering (critical for large base backups).
+// For /tmp paths, falls back to base64 exec.
 func (e *Executor) downloadToPod(ctx context.Context, backend storage.Backend, key, podPath string) error {
 	e.logger.Trace().Str("key", key).Str("pod_path", podPath).Msg("downloadToPod: downloading from storage")
 	r, err := backend.Download(ctx, key)
@@ -681,24 +757,32 @@ func (e *Executor) downloadToPod(ctx context.Context, backend storage.Backend, k
 	}
 	defer r.Close()
 
+	// Try to write directly to shared volume (no memory buffering for large files)
+	if err := os.MkdirAll(filepath.Dir(podPath), 0755); err == nil {
+		e.logger.Trace().Str("pod_path", podPath).Msg("downloadToPod: streaming to shared volume")
+		f, err := os.Create(podPath)
+		if err != nil {
+			e.logger.Debug().Err(err).Str("pod_path", podPath).Msg("downloadToPod: create file failed")
+			return fmt.Errorf("create %s: %w", podPath, err)
+		}
+		defer f.Close()
+		if _, err := io.Copy(f, r); err != nil {
+			e.logger.Debug().Err(err).Str("pod_path", podPath).Msg("downloadToPod: stream write failed")
+			return fmt.Errorf("write %s: %w", podPath, err)
+		}
+		e.logger.Debug().Str("pod_path", podPath).Msg("downloadToPod: stream complete")
+		return nil
+	}
+
+	// Fallback: buffer and exec (for /tmp in postgres container, not on shared volume)
+	e.logger.Trace().Str("pod_path", podPath).Msg("downloadToPod: shared volume unavailable, falling back to exec")
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(r); err != nil {
 		e.logger.Debug().Err(err).Str("key", key).Msg("downloadToPod: read failed")
 		return fmt.Errorf("read %s: %w", key, err)
 	}
-	e.logger.Debug().Str("key", key).Int("data_len", buf.Len()).Msg("downloadToPod: data downloaded")
-
-	// Write file to the shared volume from the sentinel container directly.
-	// The /var/lib/postgresql/data volume is mounted in both containers.
-	// For paths under /tmp (not shared), use exec to write via base64.
-	if err := os.MkdirAll(filepath.Dir(podPath), 0755); err != nil {
-		// Fallback: write via exec if direct write fails (path not on shared volume)
-		e.logger.Trace().Str("pod_path", podPath).Msg("downloadToPod: direct write failed, falling back to exec")
-		encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
-		script := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, podPath)
-		return e.execInPod(ctx, script)
-	}
-	e.logger.Trace().Str("pod_path", podPath).Msg("downloadToPod: writing file directly to shared volume")
-	return os.WriteFile(podPath, buf.Bytes(), 0644)
+	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
+	script := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, podPath)
+	return e.execInPod(ctx, script)
 }
 
